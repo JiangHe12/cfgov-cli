@@ -1,0 +1,25 @@
+# Force LF line endings for files where byte-for-byte content matters.
+#
+# Windows-side `git config core.autocrlf=true` would otherwise rewrite checked-in
+# `\n` to `\r\n` at checkout time, which breaks:
+#   - gofmt / golangci-lint, which are LF-only (Windows CI lint job fails otherwise)
+#   - shell scripts run via `bash` on macOS/Linux
+#   - YAML / JSON manifests generated and compared
+#
+# These rules ensure every contributor and CI runner sees the canonical LF form.
+
+# Shell scripts.
+*.sh text eol=lf
+
+# CI / compose YAML.
+*.yml text eol=lf
+*.yaml text eol=lf
+
+# Go source files (gofmt is LF-only anyway, but be explicit).
+*.go text eol=lf
+
+# Markdown (so cross-OS reviews don't see noise).
+*.md text eol=lf
+
+# Default: let git auto-detect; binaries are unaffected.
+* text=auto
