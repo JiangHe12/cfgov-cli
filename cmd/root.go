@@ -49,6 +49,7 @@ type cliFlags struct {
 	DryRun      bool
 	Diff        bool
 	Yes         bool
+	Backup      bool
 	NoBackup    bool
 	Ticket      string
 	Operator    string
@@ -138,7 +139,8 @@ func newRootCmdWith(f *cliFlags) *cobra.Command {
 	cmd.PersistentFlags().BoolVar(&f.DryRun, "dry-run", false, "Plan only, do not mutate")
 	cmd.PersistentFlags().BoolVar(&f.Diff, "diff", false, "Include CLI-computed impact summary")
 	cmd.PersistentFlags().BoolVar(&f.Yes, "yes", false, "Confirm write authorization")
-	cmd.PersistentFlags().BoolVar(&f.NoBackup, "no-backup", false, "Acknowledge no local backup for this P0 command set")
+	cmd.PersistentFlags().BoolVar(&f.Backup, "backup", false, "Backup current remote config before writing")
+	cmd.PersistentFlags().BoolVar(&f.NoBackup, "no-backup", false, "Explicitly skip backup before writing")
 	cmd.PersistentFlags().StringVar(&f.Ticket, "ticket", "", "Human-supplied change ticket")
 	cmd.PersistentFlags().StringVar(&f.Operator, "operator", "", "Operator identity")
 	cmd.PersistentFlags().StringVar(&f.Reason, "reason", "", "Change reason")

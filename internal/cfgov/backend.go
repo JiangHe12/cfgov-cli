@@ -1,6 +1,9 @@
 package cfgov
 
-import "context"
+import (
+	"context"
+	"time"
+)
 
 const DefaultGroup = "DEFAULT_GROUP"
 
@@ -29,13 +32,41 @@ type DeleteRequest struct {
 
 type ListOptions struct {
 	Namespace string
+	Group     string
 	Prefix    string
+	Page      int
+	PageSize  int
 	Limit     int
 }
 
 type ListItem struct {
 	Coordinate Coordinate `json:"coordinate"`
 	Revision   string     `json:"revision,omitempty"`
+	Type       string     `json:"type,omitempty"`
+}
+
+type HistoryOptions struct {
+	Page     int
+	PageSize int
+}
+
+type HistoryItem struct {
+	ID           string `json:"id"`
+	OpType       string `json:"opType"`
+	ModifiedTime string `json:"modifiedTime"`
+	DataID       string `json:"dataId"`
+	Group        string `json:"group"`
+	Operator     string `json:"operator,omitempty"`
+}
+
+type WatchOptions struct {
+	LongPoll time.Duration
+}
+
+type WatchEvent struct {
+	Coordinate Coordinate `json:"coordinate"`
+	Revision   string     `json:"revision"`
+	Changed    bool       `json:"changed"`
 }
 
 type Description struct {
@@ -50,6 +81,8 @@ type Capabilities struct {
 	Verbs            []string `json:"verbs"`
 	SupportsCAS      bool     `json:"supportsCas"`
 	SupportsRevision bool     `json:"supportsRevision"`
+	SupportsHistory  bool     `json:"supportsHistory"`
+	SupportsWatch    bool     `json:"supportsWatch"`
 }
 
 type Backend interface {
@@ -57,6 +90,8 @@ type Backend interface {
 	Put(ctx context.Context, req PutRequest) (Blob, error)
 	Delete(ctx context.Context, req DeleteRequest) error
 	List(ctx context.Context, opts ListOptions) ([]ListItem, error)
+	History(ctx context.Context, coord Coordinate, opts HistoryOptions) ([]HistoryItem, int, error)
+	Watch(ctx context.Context, coord Coordinate, revision string, opts WatchOptions) (WatchEvent, error)
 	CurrentRevision(ctx context.Context, coord Coordinate) (string, error)
 	Ping(ctx context.Context) error
 	Describe() Description

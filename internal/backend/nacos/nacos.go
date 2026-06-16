@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/JiangHe12/opskit-core/apperrors"
 
@@ -82,18 +83,90 @@ func (b *Backend) List(ctx context.Context, opts cfgov.ListOptions) ([]cfgov.Lis
 	if limit <= 0 {
 		limit = 100
 	}
-	list, _, err := b.client.ListConfigsAll(ctx, "", opts.Prefix, 50, limit)
+	if opts.Page > 0 || opts.PageSize > 0 {
+		page := opts.Page
+		if page <= 0 {
+			page = 1
+		}
+		pageSize := opts.PageSize
+		if pageSize <= 0 {
+			pageSize = 20
+		}
+		paged, err := b.client.ListConfigs(ctx, opts.Group, opts.Prefix, page, pageSize)
+		if err != nil {
+			return nil, err
+		}
+		return listItems(opts.Namespace, paged.PageItems), nil
+	}
+	list, _, err := b.client.ListConfigsAll(ctx, opts.Group, opts.Prefix, 50, limit)
 	if err != nil {
 		return nil, err
 	}
-	items := make([]cfgov.ListItem, 0, len(list.PageItems))
-	for _, item := range list.PageItems {
+	return listItems(opts.Namespace, list.PageItems), nil
+}
+
+func listItems(namespace string, pageItems []api.ConfigItem) []cfgov.ListItem {
+	items := make([]cfgov.ListItem, 0, len(pageItems))
+	for _, item := range pageItems {
 		items = append(items, cfgov.ListItem{
-			Coordinate: cfgov.Coordinate{Namespace: opts.Namespace, Key: cfgov.FormatNacosKey(item.Group, item.DataID)},
+			Coordinate: cfgov.Coordinate{Namespace: namespace, Key: cfgov.FormatNacosKey(item.Group, item.DataID)},
 			Revision:   item.MD5,
+			Type:       item.Type,
 		})
 	}
-	return items, nil
+	return items
+}
+
+func (b *Backend) History(ctx context.Context, coord cfgov.Coordinate, opts cfgov.HistoryOptions) ([]cfgov.HistoryItem, int, error) {
+	if err := b.requireNamespace(coord.Namespace); err != nil {
+		return nil, 0, err
+	}
+	key, err := cfgov.ParseNacosKey(coord.Key)
+	if err != nil {
+		return nil, 0, err
+	}
+	items, total, err := b.client.GetHistory(ctx, key.DataID, key.Group, opts.Page, opts.PageSize)
+	if err != nil {
+		return nil, 0, err
+	}
+	out := make([]cfgov.HistoryItem, 0, len(items))
+	for _, item := range items {
+		out = append(out, cfgov.HistoryItem{
+			ID:           item.ID,
+			OpType:       item.OpType,
+			ModifiedTime: item.LastModified,
+			DataID:       item.DataID,
+			Group:        item.Group,
+			Operator:     item.SrcUser,
+		})
+	}
+	return out, total, nil
+}
+
+func (b *Backend) Watch(ctx context.Context, coord cfgov.Coordinate, revision string, opts cfgov.WatchOptions) (cfgov.WatchEvent, error) {
+	if err := b.requireNamespace(coord.Namespace); err != nil {
+		return cfgov.WatchEvent{}, err
+	}
+	key, err := cfgov.ParseNacosKey(coord.Key)
+	if err != nil {
+		return cfgov.WatchEvent{}, err
+	}
+	longPoll := opts.LongPoll
+	if longPoll <= 0 {
+		longPoll = 30 * time.Second
+	}
+	changed, err := b.client.ListenConfig(ctx, key.DataID, key.Group, revision, longPoll)
+	if err != nil {
+		return cfgov.WatchEvent{}, err
+	}
+	nextRevision := revision
+	if changed {
+		nextRevision, err = b.CurrentRevision(ctx, coord)
+		if err != nil {
+			return cfgov.WatchEvent{}, err
+		}
+	}
+	return cfgov.WatchEvent{Coordinate: coord, Revision: nextRevision, Changed: changed}, nil
 }
 
 func (b *Backend) CurrentRevision(ctx context.Context, coord cfgov.Coordinate) (string, error) {
@@ -116,9 +189,11 @@ func (b *Backend) Capabilities() cfgov.Capabilities {
 	return cfgov.Capabilities{
 		Backend:          "nacos",
 		ResourceTypes:    []string{"config"},
-		Verbs:            []string{"get", "push", "delete"},
+		Verbs:            []string{"get", "list", "diff", "validate", "pull", "history", "listen", "push", "delete"},
 		SupportsCAS:      true,
 		SupportsRevision: true,
+		SupportsHistory:  true,
+		SupportsWatch:    true,
 	}
 }
 
