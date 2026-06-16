@@ -8,7 +8,7 @@ import (
 )
 
 func TestWriteCreatesBackupAndIndex(t *testing.T) {
-	root := t.TempDir()
+	root := secureTempBackupRoot(t)
 	result, err := Write(root, Request{
 		Context:   "prod",
 		Namespace: "public",
@@ -40,7 +40,7 @@ func TestWriteCreatesBackupAndIndex(t *testing.T) {
 }
 
 func TestWriteTraversalLikeKeyStaysUnderRoot(t *testing.T) {
-	root := t.TempDir()
+	root := secureTempBackupRoot(t)
 	result, err := Write(root, Request{
 		Context:   "prod",
 		Namespace: "controlled-ns",
@@ -70,4 +70,13 @@ func TestWriteTraversalLikeKeyStaysUnderRoot(t *testing.T) {
 	if !strings.Contains(rel, "%2e%2e") {
 		t.Fatalf("backup path did not sanitize traversal components: rel=%q", rel)
 	}
+}
+
+func secureTempBackupRoot(t *testing.T) string {
+	t.Helper()
+	root := t.TempDir()
+	if err := os.Chmod(root, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	return root
 }
