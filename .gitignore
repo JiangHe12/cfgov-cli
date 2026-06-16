@@ -1,0 +1,31 @@
+# Build artifacts
+/cfgov-cli
+/cfgov-cli.exe
+*.test
+*.test.exe
+bin/*
+!bin/cfgov-cli.js
+/dist/
+
+# Local config (may contain credentials)
+.cfgov-cli/
+.claude/
+
+# Go
+vendor/
+
+# Node
+node_modules/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Lint
+lint-baseline.json
+
+# OS
+.DS_Store
+Thumbs.db
