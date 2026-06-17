@@ -5,6 +5,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestWriteCreatesBackupAndIndex(t *testing.T) {
@@ -69,6 +70,52 @@ func TestWriteTraversalLikeKeyStaysUnderRoot(t *testing.T) {
 	}
 	if !strings.Contains(rel, "%2e%2e") {
 		t.Fatalf("backup path did not sanitize traversal components: rel=%q", rel)
+	}
+}
+
+func TestCleanKeepLastDryRun(t *testing.T) {
+	root := secureTempBackupRoot(t)
+	for _, dataID := range []string{"a.yaml", "b.yaml"} {
+		if _, err := Write(root, Request{Context: "prod", Namespace: "public", Group: "DEFAULT_GROUP", DataID: dataID, Content: []byte(dataID), Operator: "tester"}); err != nil {
+			t.Fatalf("Write(%s) error = %v", dataID, err)
+		}
+	}
+	keepLast := 1
+	result, err := Clean(root, CleanOptions{KeepLast: &keepLast})
+	if err != nil {
+		t.Fatalf("Clean() error = %v", err)
+	}
+	if !result.DryRun || len(result.Deleted) != 1 {
+		t.Fatalf("result = %#v, want dry-run with one deletion candidate", result)
+	}
+	items, err := List(root, Filter{})
+	if err != nil {
+		t.Fatalf("List() error = %v", err)
+	}
+	if len(items) != 2 {
+		t.Fatalf("dry-run removed items: %#v", items)
+	}
+}
+
+func TestCleanBeforeApplies(t *testing.T) {
+	root := secureTempBackupRoot(t)
+	if _, err := Write(root, Request{Context: "prod", Namespace: "public", Group: "DEFAULT_GROUP", DataID: "app.yaml", Content: []byte("x"), Operator: "tester"}); err != nil {
+		t.Fatalf("Write() error = %v", err)
+	}
+	before := time.Now().Add(time.Hour)
+	result, err := Clean(root, CleanOptions{Before: &before, Apply: true})
+	if err != nil {
+		t.Fatalf("Clean() error = %v", err)
+	}
+	if result.DryRun || len(result.Deleted) != 1 {
+		t.Fatalf("result = %#v, want applied one deletion", result)
+	}
+	items, err := List(root, Filter{})
+	if err != nil {
+		t.Fatalf("List() error = %v", err)
+	}
+	if len(items) != 0 {
+		t.Fatalf("items after clean = %#v, want none", items)
 	}
 }
 

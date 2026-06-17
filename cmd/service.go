@@ -3,6 +3,7 @@ package cmd
 import (
 	"fmt"
 	"net"
+	"os"
 	"strconv"
 	"strings"
 
@@ -146,9 +147,13 @@ func serviceRegisterCmd(f *cliFlags) *cobra.Command {
 				plan.DryRun = true
 				return newPrinter(f).JSONData("ChangePlan", plan)
 			}
+			if err := validateBackupPolicy(f, ctxMeta); err != nil {
+				return err
+			}
 			if err := authorize(f, safety.R1, ctxMeta, ""); err != nil {
 				return err
 			}
+			warnEphemeralServiceRegister(plan.Options)
 			err = registry.RegisterInstance(cmd.Context(), plan.Service, plan.IP, plan.Port, plan.Options)
 			appendServiceAudit(f, ctxMeta, "register", plan.Service, auditStatus(err), plan.Impact, err)
 			if err != nil {
@@ -175,6 +180,9 @@ func serviceDeregisterCmd(f *cliFlags) *cobra.Command {
 			if f.DryRun || f.Plan {
 				plan.DryRun = true
 				return newPrinter(f).JSONData("ChangePlan", plan)
+			}
+			if err := validateBackupPolicy(f, ctxMeta); err != nil {
+				return err
 			}
 			if err := authorizeServiceDeregister(f, ctxMeta); err != nil {
 				return err
@@ -302,6 +310,13 @@ func serviceRegistry(backend cfgov.Backend) (cfgov.ServiceRegistry, error) {
 
 func authorizeServiceDeregister(f *cliFlags, meta cfgovctx.Context) error {
 	return authorize(f, safety.R2, meta, allowProductionServiceDereg)
+}
+
+func warnEphemeralServiceRegister(options cfgov.InstanceOptions) {
+	if options.Ephemeral != nil && !*options.Ephemeral {
+		return
+	}
+	_, _ = fmt.Fprintln(os.Stderr, "warning: registering as ephemeral; Nacos may remove this instance after no heartbeat. Use --persistent for long-lived registrations.")
 }
 
 func validateServiceName(service string) error {

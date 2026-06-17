@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"runtime"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -67,6 +68,8 @@ type Filter struct {
 type CleanOptions struct {
 	Filter    Filter
 	OlderThan time.Duration
+	Before    *time.Time
+	KeepLast  *int
 	Now       time.Time
 	Apply     bool
 }
@@ -245,6 +248,7 @@ func cleanLocked(root string, opts CleanOptions) (CleanResult, error) { //nolint
 	}
 	result := CleanResult{DryRun: !opts.Apply}
 	kept := make([]Metadata, 0, len(items))
+	deleteSet := cleanDeleteSet(items, opts)
 	for _, item := range items {
 		item = reconcile(item)
 		if item.BackupID == "" {
@@ -263,7 +267,7 @@ func cleanLocked(root string, opts CleanOptions) (CleanResult, error) { //nolint
 			}
 			continue
 		}
-		if opts.OlderThan > 0 && !olderThan(item, opts.Now, opts.OlderThan) {
+		if !deleteSet[item.BackupID] && !cleanByTime(item, opts) {
 			kept = append(kept, item)
 			continue
 		}
@@ -282,6 +286,41 @@ func cleanLocked(root string, opts CleanOptions) (CleanResult, error) { //nolint
 		}
 	}
 	return result, nil
+}
+
+func cleanDeleteSet(items []Metadata, opts CleanOptions) map[string]bool {
+	out := map[string]bool{}
+	if opts.KeepLast == nil {
+		return out
+	}
+	matched := make([]Metadata, 0, len(items))
+	for _, item := range items {
+		item = reconcile(item)
+		if item.Status == StatusMissing || !matches(item, opts.Filter) {
+			continue
+		}
+		matched = append(matched, item)
+	}
+	sortMetadata(matched)
+	keep := *opts.KeepLast
+	if keep >= len(matched) {
+		return out
+	}
+	for _, item := range matched[:len(matched)-keep] {
+		out[item.BackupID] = true
+	}
+	return out
+}
+
+func cleanByTime(item Metadata, opts CleanOptions) bool {
+	if opts.KeepLast != nil {
+		return false
+	}
+	if opts.Before != nil {
+		createdAt, err := time.Parse(time.RFC3339, item.CreatedAt)
+		return err == nil && createdAt.Before(*opts.Before)
+	}
+	return opts.OlderThan <= 0 || olderThan(item, opts.Now, opts.OlderThan)
 }
 
 func ParseRetentionDuration(s string) (time.Duration, error) {
@@ -399,6 +438,28 @@ func olderThan(item Metadata, now time.Time, age time.Duration) bool {
 		return false
 	}
 	return now.Sub(createdAt) > age
+}
+
+func sortMetadata(items []Metadata) {
+	sort.SliceStable(items, func(i, j int) bool {
+		ti, iok := metadataTime(items[i])
+		tj, jok := metadataTime(items[j])
+		switch {
+		case iok && jok && !ti.Equal(tj):
+			return ti.Before(tj)
+		case iok != jok:
+			return iok
+		default:
+			return items[i].BackupID < items[j].BackupID
+		}
+	})
+}
+
+func metadataTime(item Metadata) (time.Time, bool) {
+	if t, err := time.Parse(time.RFC3339, item.CreatedAt); err == nil {
+		return t, true
+	}
+	return time.Time{}, false
 }
 
 func getOrCreateStoreID(storeDir string) (string, error) {

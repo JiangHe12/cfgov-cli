@@ -1,8 +1,12 @@
 package cmd
 
 import (
+	"bufio"
 	"context"
+	"errors"
 	"fmt"
+	"io"
+	"os"
 	"strings"
 
 	"github.com/spf13/cobra"
@@ -143,6 +147,9 @@ func namespaceDeleteCmd(f *cliFlags) *cobra.Command {
 			if err := authorizeNamespaceDelete(f, ctxMeta); err != nil {
 				return err
 			}
+			if err := confirmNamespaceDelete(f, id); err != nil {
+				return err
+			}
 			err = manager.DeleteNamespace(cmd.Context(), id)
 			appendNamespaceAudit(f, ctxMeta, "delete", id, auditStatus(err), impact, err)
 			if err != nil {
@@ -178,6 +185,25 @@ func namespaceManager(backend cfgov.Backend) (cfgov.NamespaceManager, error) {
 
 func authorizeNamespaceDelete(f *cliFlags, meta cfgovctx.Context) error {
 	return authorize(f, safety.R2, meta, allowProductionNamespaceDel)
+}
+
+func confirmNamespaceDelete(f *cliFlags, id string) error {
+	if f.Yes || f.NonInter {
+		return nil
+	}
+	_, _ = fmt.Fprintf(os.Stderr, "Delete namespace %q (this cannot be undone)? [y/N] ", id)
+	input, err := bufio.NewReader(os.Stdin).ReadString('\n')
+	if err != nil && len(input) == 0 {
+		if errors.Is(err, io.EOF) {
+			return apperrors.New(apperrors.CodeUsageError, "no confirmation input available on stdin; use --yes or run in a TTY", nil)
+		}
+		return apperrors.New(apperrors.CodeLocalIOError, "failed to read confirmation", err)
+	}
+	if strings.EqualFold(strings.TrimSpace(input), "y") {
+		return nil
+	}
+	_, _ = fmt.Fprintln(os.Stderr, "canceled")
+	return apperrors.New(apperrors.CodeValidationFailed, "namespace delete canceled", nil)
 }
 
 func validateNamespaceInput(id, name string) error {

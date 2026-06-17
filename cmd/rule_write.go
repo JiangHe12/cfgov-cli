@@ -51,6 +51,7 @@ type rulePlanSummary struct {
 	Create int `json:"create"`
 	Update int `json:"update"`
 	Delete int `json:"delete"`
+	Skip   int `json:"skip"`
 	Total  int `json:"total"`
 }
 
@@ -350,13 +351,14 @@ func plannedRuleSetWrite(store cfgov.RuleStore, app string, ruleType rule.Type, 
 	if err != nil {
 		return plannedRuleWrite{}, ruleWritePlan{}, err
 	}
-	itemAction := classifyRuleChange(current.Rules, next)
+	localSHA256 := sha256Bytes(payload)
+	itemAction := classifyRuleChange(current.Rules, next, current.SHA256, localSHA256)
 	item := rulePlanItem{
 		Type:         ruleType,
 		Key:          coord.Key,
 		Action:       itemAction,
 		RemoteSHA256: current.SHA256,
-		LocalSHA256:  sha256Bytes(payload),
+		LocalSHA256:  localSHA256,
 		RemoteCount:  current.Count,
 		LocalCount:   len(next),
 		Revision:     current.Revision,
@@ -385,6 +387,10 @@ func applyRuleWrites(ctx context.Context, f *cliFlags, backend cfgov.Backend, ct
 	}
 	backups := make([]any, 0, len(writes))
 	for _, write := range writes {
+		if write.planItem.Action == "skip" {
+			appendRuleAudit(f, ctxMeta, plan.Action, plan.App, write.ruleType, auditStatusSkipped, ruleWriteItemAudit(plan.App, plan.Action, write.planItem), nil)
+			continue
+		}
 		if write.backupBefore {
 			result, err := backupRuleCurrent(ctx, f, backend, ctxMeta, write.coord)
 			if err != nil {
@@ -582,7 +588,10 @@ func cloneRuleMaps(items []map[string]any) []map[string]any {
 	return out
 }
 
-func classifyRuleChange(current, next []map[string]any) string {
+func classifyRuleChange(current, next []map[string]any, remoteSHA256, localSHA256 string) string {
+	if remoteSHA256 != "" && remoteSHA256 == localSHA256 {
+		return "skip"
+	}
 	switch {
 	case len(current) == 0 && len(next) > 0:
 		return "create"
@@ -599,6 +608,8 @@ func addRulePlanSummary(summary *rulePlanSummary, action string) {
 		summary.Create++
 	case "delete":
 		summary.Delete++
+	case "skip":
+		summary.Skip++
 	default:
 		summary.Update++
 	}
@@ -617,7 +628,11 @@ func sortedRuleTypes(items map[rule.Type][]map[string]any) []rule.Type {
 func ruleWriteAudit(plan ruleWritePlan) string {
 	parts := make([]string, 0, len(plan.Items))
 	for _, item := range plan.Items {
-		parts = append(parts, fmt.Sprintf("%s:%s remote=%s/%d local=%s/%d rev=%s", item.Type, item.Action, item.RemoteSHA256, item.RemoteCount, item.LocalSHA256, item.LocalCount, item.Revision))
+		parts = append(parts, ruleWriteItemAudit(plan.App, plan.Action, item))
 	}
-	return "app=" + plan.App + " action=" + plan.Action + " " + strings.Join(parts, ",")
+	return strings.Join(parts, ",")
+}
+
+func ruleWriteItemAudit(app, action string, item rulePlanItem) string {
+	return fmt.Sprintf("app=%s action=%s %s:%s remote=%s/%d local=%s/%d rev=%s", app, action, item.Type, item.Action, item.RemoteSHA256, item.RemoteCount, item.LocalSHA256, item.LocalCount, item.Revision)
 }

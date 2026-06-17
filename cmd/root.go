@@ -39,6 +39,7 @@ const (
 	allowProductionNamespaceDel = safety.AllowFlag("allow-production-namespace-delete")
 	allowProductionServiceDereg = safety.AllowFlag("allow-production-service-deregister")
 	allowProductionRuleDelete   = safety.AllowFlag("allow-production-rule-delete")
+	auditStatusSkipped          = "skipped"
 )
 
 type cliFlags struct {
@@ -185,7 +186,7 @@ func newRootCmdWith(f *cliFlags) *cobra.Command {
 	cmd.PersistentFlags().StringVar(&f.OTLPMetrics, "otel-metrics-endpoint", "", "OTLP metrics endpoint")
 	cmd.PersistentFlags().BoolVar(&f.OTLPInsec, "otel-insecure", false, "Disable TLS for OTLP exporter")
 
-	cmd.AddCommand(newContextCmd(f), newConfigCmd(f), newNamespaceCmd(f), newServiceCmd(f), newRuleCmd(f), newCapabilitiesCmd(f), newAuditCmd(f), newVersionCmd(f), newInstallCmd(f))
+	cmd.AddCommand(newContextCmd(f), newConfigCmd(f), newNamespaceCmd(f), newServiceCmd(f), newRuleCmd(f), newBackupCmd(f), newCapabilitiesCmd(f), newAuditCmd(f), newVersionCmd(f), newInstallCmd(f))
 	return cmd
 }
 

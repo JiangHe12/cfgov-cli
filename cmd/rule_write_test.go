@@ -59,3 +59,10 @@ func TestMandatoryRuleBackupRejectsNoBackup(t *testing.T) {
 		t.Fatalf("error = %v, want usage error", err)
 	}
 }
+
+func TestClassifyRuleChangeSkipWhenHashesMatch(t *testing.T) {
+	t.Parallel()
+	if got := classifyRuleChange([]map[string]any{{"resource": "r"}}, []map[string]any{{"resource": "r"}}, "abc", "abc"); got != "skip" {
+		t.Fatalf("classifyRuleChange() = %q, want skip", got)
+	}
+}

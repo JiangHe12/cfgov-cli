@@ -416,9 +416,6 @@ func configPushCmd(f *cliFlags) *cobra.Command {
 			class := cfgclass.Classify(cfgclass.OperationPush, content, contentType)
 			coord := cfgov.Coordinate{Namespace: backend.Describe().Namespace, Key: key}
 			plan := pushPlan(cmd.Context(), backend, coord, content, class)
-			if err := strictNoChangePush(cmd.Context(), f, backend, coord, content); err != nil {
-				return err
-			}
 			if f.DryRun {
 				appendAuditWarn(f, audit.EventType("config.write"), ctxMeta, audit.EventTarget{ResourceType: "config", Resource: key}, audit.StatusSuccess, plan.Impact, nil)
 				return newPrinter(f).JSONData("ChangePlan", plan)
@@ -427,6 +424,9 @@ func configPushCmd(f *cliFlags) *cobra.Command {
 				return err
 			}
 			if err := authorize(f, class.Risk, ctxMeta, ""); err != nil {
+				return err
+			}
+			if done, err := finishIdempotentConfigPush(cmd.Context(), f, backend, ctxMeta, coord, content, plan); done || err != nil {
 				return err
 			}
 			backupResult, err := maybeBackupConfig(cmd.Context(), f, backend, ctxMeta, coord)
@@ -563,19 +563,44 @@ func pushPlan(ctx context.Context, backend cfgov.Backend, coord cfgov.Coordinate
 	}
 }
 
-func strictNoChangePush(ctx context.Context, f *cliFlags, backend cfgov.Backend, coord cfgov.Coordinate, content []byte) error {
-	if !isStrictNoChange(f) {
-		return nil
+func handleIdempotentConfigPush(ctx context.Context, f *cliFlags, backend cfgov.Backend, meta cfgovctx.Context, coord cfgov.Coordinate, content []byte, plan changePlan) (bool, error) {
+	remote, err := backend.Get(ctx, coord)
+	if err != nil {
+		if apperrors.AsAppError(err).Code == apperrors.CodeResourceNotFound {
+			return false, nil
+		}
+		return false, err
 	}
-	if !remoteContentMatches(ctx, backend, coord, content) {
-		return nil
+	if sha256Bytes(remote.Content) != sha256Bytes(content) {
+		return false, nil
 	}
-	return apperrors.New(apperrors.CodeNoChangeRequired, "config already matches remote", nil)
+	appendAuditWarn(
+		f,
+		audit.EventType("config.write"),
+		meta,
+		audit.EventTarget{ResourceType: "config", Resource: coord.Key},
+		auditStatusSkipped,
+		plan.Impact,
+		nil,
+	)
+	return true, nil
 }
 
-func remoteContentMatches(ctx context.Context, backend cfgov.Backend, coord cfgov.Coordinate, content []byte) bool {
-	remote, err := backend.Get(ctx, coord)
-	return err == nil && sha256Bytes(remote.Content) == sha256Bytes(content)
+func finishIdempotentConfigPush(ctx context.Context, f *cliFlags, backend cfgov.Backend, meta cfgovctx.Context, coord cfgov.Coordinate, content []byte, plan changePlan) (bool, error) {
+	skipped, err := handleIdempotentConfigPush(ctx, f, backend, meta, coord, content, plan)
+	if err != nil || !skipped {
+		return skipped, err
+	}
+	if isStrictNoChange(f) {
+		return true, apperrors.New(apperrors.CodeNoChangeRequired, "config already matches remote", nil)
+	}
+	return true, newPrinter(f).JSONData("ChangeResult", map[string]any{
+		"resourceType": "config",
+		"namespace":    coord.Namespace,
+		"key":          coord.Key,
+		"skipped":      true,
+		"reason":       "idempotent",
+	})
 }
 
 func appendReadAudit(f *cliFlags, ctxMeta cfgovctx.Context, key string, err error) {

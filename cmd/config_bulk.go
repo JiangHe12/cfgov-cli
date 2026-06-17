@@ -190,6 +190,7 @@ func configImportCmd(f *cliFlags) *cobra.Command { //nolint:gocyclo // Cobra wir
 			if err := validateBackupPolicy(f, ctxMeta); err != nil {
 				return err
 			}
+			appendConfigSkippedAudits(f, ctxMeta, audit.EventType("config.import"), plan.Skip)
 			for _, item := range localsForItems(locals, append(plan.Create, plan.Update...)) {
 				if err := cmd.Context().Err(); err != nil {
 					return err
@@ -268,6 +269,7 @@ func configPromoteCmd(f *cliFlags) *cobra.Command { //nolint:gocyclo // Cobra wi
 			if len(plan.Conflict) > 0 {
 				return apperrors.New(apperrors.CodeConflict, fmt.Sprintf("%d config(s) conflict; use --overwrite", len(plan.Conflict)), nil)
 			}
+			appendConfigSkippedAudits(f, ctxMeta, audit.EventType("config.promote"), plan.Skip)
 			if err := applyUpserts(cmd.Context(), f, target, ctxMeta, localsForItems(locals, append(plan.Create, plan.Update...)), "config.promote"); err != nil {
 				return err
 			}
@@ -389,6 +391,7 @@ func configReconcileCmd(f *cliFlags) *cobra.Command {
 			if err := authorizeReconcile(f, plan.Risk, ctxMeta, required); err != nil {
 				return err
 			}
+			appendConfigSkippedAudits(f, ctxMeta, audit.EventType("config.reconcile"), plan.Skip)
 			if err := applyUpserts(cmd.Context(), f, backend, ctxMeta, localsForItems(locals, append(plan.Create, plan.Update...)), "config.reconcile"); err != nil {
 				return err
 			}
@@ -463,6 +466,23 @@ func applyUpserts(ctx context.Context, f *cliFlags, backend cfgov.Backend, meta 
 		appendAuditWarn(f, eventType, meta, audit.EventTarget{ResourceType: "config", Resource: item.Key}, audit.StatusSuccess, itemAudit(item), nil)
 	}
 	return nil
+}
+
+func appendConfigSkippedAudits(f *cliFlags, meta cfgovctx.Context, eventType audit.EventType, items []planItem) {
+	for _, item := range items {
+		if item.LocalSHA256 == "" || item.RemoteSHA256 != item.LocalSHA256 {
+			continue
+		}
+		appendAuditWarn(
+			f,
+			eventType,
+			meta,
+			audit.EventTarget{ResourceType: "config", Resource: item.Key},
+			auditStatusSkipped,
+			"sha256="+item.LocalSHA256,
+			nil,
+		)
+	}
 }
 
 func readLocalConfigs(dir string) ([]localConfig, error) {

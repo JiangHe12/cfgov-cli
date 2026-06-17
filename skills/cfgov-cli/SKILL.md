@@ -118,10 +118,15 @@ Risk model: read commands are R0; `register` is R1; `deregister` is R2 and prote
 
 ```bash
 cfgov capabilities -o json
-cfgov audit query [--since 24h] [--until <rfc3339>] [--type <type>] [--operator <name>] [--context <ctx>] [--status <status>] [--limit 100] -o json
-cfgov audit verify -o json
+cfgov backup list [--context-filter <ctx>] [--namespace <ns>] [--data-id <key>] -o json
+cfgov backup clean (--before <30d|rfc3339|yyyy-mm-dd>|--keep-last <n>) --confirm -o json
+cfgov audit query [--since 24h] [--until <rfc3339>] [--type <type>] [--operator <name>] [--context-filter <ctx>] [--status <status>] [--limit 100] -o json
+cfgov audit prune (--before <30d|rfc3339|yyyy-mm-dd>|--keep-last <n>) --confirm -o json
+cfgov audit verify [--strict] -o json
 cfgov version -o json
 cfgov install <agent> --skills
 ```
+
+`backup clean` and `audit prune` default to dry-run; only `--confirm` deletes local files. Do not add `--confirm` unless the human explicitly asked for deletion after reviewing the listed files.
 
 Check `cfgov capabilities -o json` before assuming a backend supports a noun or verb.
