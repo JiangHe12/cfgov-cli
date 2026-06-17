@@ -143,6 +143,21 @@ func (b *Backend) History(ctx context.Context, coord cfgov.Coordinate, opts cfgo
 	return out, total, nil
 }
 
+func (b *Backend) HistoryBlob(ctx context.Context, coord cfgov.Coordinate, historyID string) (cfgov.Blob, error) {
+	if err := b.requireNamespace(coord.Namespace); err != nil {
+		return cfgov.Blob{}, err
+	}
+	key, err := cfgov.ParseNacosKey(coord.Key)
+	if err != nil {
+		return cfgov.Blob{}, err
+	}
+	content, err := b.client.GetHistoryConfig(ctx, key.DataID, key.Group, historyID)
+	if err != nil {
+		return cfgov.Blob{}, err
+	}
+	return cfgov.Blob{Coordinate: coord, Content: []byte(content), Revision: md5Hex([]byte(content))}, nil
+}
+
 func (b *Backend) Watch(ctx context.Context, coord cfgov.Coordinate, revision string, opts cfgov.WatchOptions) (cfgov.WatchEvent, error) {
 	if err := b.requireNamespace(coord.Namespace); err != nil {
 		return cfgov.WatchEvent{}, err

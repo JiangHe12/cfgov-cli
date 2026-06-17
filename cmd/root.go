@@ -34,6 +34,7 @@ const (
 	apiVersion                  = "cfgov-cli.io/v1"
 	auditAPIVersion             = "cfgov-cli.io/audit/v1"
 	allowProductionConfigDelete = safety.AllowFlag("allow-production-config-delete")
+	allowProductionPrune        = safety.AllowFlag("allow-production-prune")
 )
 
 type cliFlags struct {
@@ -47,6 +48,7 @@ type cliFlags struct {
 	Output      string
 	PlainHead   bool
 	DryRun      bool
+	Plan        bool
 	Diff        bool
 	Yes         bool
 	Backup      bool
@@ -56,6 +58,8 @@ type cliFlags struct {
 	Reason      string
 	NonInter    bool
 	AllowDel    bool
+	AllowPrune  bool
+	Concurrency int
 	OTLPEnd     string
 	OTLPMetrics string
 	OTLPInsec   bool
@@ -121,6 +125,9 @@ func newRootCmdWith(f *cliFlags) *cobra.Command {
 			if err := validateOutput(f.Output); err != nil {
 				return err
 			}
+			if f.Concurrency <= 0 || f.Concurrency > 16 {
+				return apperrors.New(apperrors.CodeUsageError, "--concurrency must be between 1 and 16", nil)
+			}
 			telemetry.Init(c.Context(), f.OTLPEnd, f.OTLPInsec, v)
 			telemetry.InitMetrics(c.Context(), f.OTLPMetrics, f.OTLPInsec, v)
 			return nil
@@ -137,6 +144,7 @@ func newRootCmdWith(f *cliFlags) *cobra.Command {
 	cmd.PersistentFlags().StringVarP(&f.Output, "output", "o", "table", "Output format: table | json | plain")
 	cmd.PersistentFlags().BoolVar(&f.PlainHead, "plain-header", false, "Show headers in plain output")
 	cmd.PersistentFlags().BoolVar(&f.DryRun, "dry-run", false, "Plan only, do not mutate")
+	cmd.PersistentFlags().BoolVar(&f.Plan, "plan", false, "Alias for --dry-run plan output")
 	cmd.PersistentFlags().BoolVar(&f.Diff, "diff", false, "Include CLI-computed impact summary")
 	cmd.PersistentFlags().BoolVar(&f.Yes, "yes", false, "Confirm write authorization")
 	cmd.PersistentFlags().BoolVar(&f.Backup, "backup", false, "Backup current remote config before writing")
@@ -146,6 +154,8 @@ func newRootCmdWith(f *cliFlags) *cobra.Command {
 	cmd.PersistentFlags().StringVar(&f.Reason, "reason", "", "Change reason")
 	cmd.PersistentFlags().BoolVar(&f.NonInter, "non-interactive", false, "Disable interactive confirmation")
 	cmd.PersistentFlags().BoolVar(&f.AllowDel, "allow-production-config-delete", false, "Allow protected config delete")
+	cmd.PersistentFlags().BoolVar(&f.AllowPrune, "allow-production-prune", false, "Allow protected reconcile prune actions")
+	cmd.PersistentFlags().IntVar(&f.Concurrency, "concurrency", 1, "Maximum concurrent batch operations")
 	cmd.PersistentFlags().StringVar(&f.OTLPEnd, "otel-endpoint", "", "OTLP trace endpoint")
 	cmd.PersistentFlags().StringVar(&f.OTLPMetrics, "otel-metrics-endpoint", "", "OTLP metrics endpoint")
 	cmd.PersistentFlags().BoolVar(&f.OTLPInsec, "otel-insecure", false, "Disable TLS for OTLP exporter")
@@ -243,9 +253,12 @@ func authorize(f *cliFlags, base safety.Risk, meta cfgovctx.Context, required sa
 		TicketPattern:      meta.TicketPattern,
 		Validator:          ticketValidator(meta.TicketValidator, f.contextName(), currentOperator(f)),
 		RequiredAllowFlags: requiredAllow(required),
-		GrantedAllowFlags:  map[safety.AllowFlag]bool{allowProductionConfigDelete: f.AllowDel},
-		Roles:              meta.Roles,
-		Operator:           currentOperator(f),
+		GrantedAllowFlags: map[safety.AllowFlag]bool{
+			allowProductionConfigDelete: f.AllowDel,
+			allowProductionPrune:        f.AllowPrune,
+		},
+		Roles:    meta.Roles,
+		Operator: currentOperator(f),
 	})
 	if err != nil {
 		telemetry.RecordAuthorizationDenied(commandContext(f), "authorization", nil)

@@ -36,6 +36,11 @@ func newConfigCmd(f *cliFlags) *cobra.Command {
 		configPullCmd(f),
 		configHistoryCmd(f),
 		configListenCmd(f),
+		configExportCmd(f),
+		configImportCmd(f),
+		configPromoteCmd(f),
+		configRollbackCmd(f),
+		configReconcileCmd(f),
 		configPushCmd(f),
 		configDeleteCmd(f),
 	)
