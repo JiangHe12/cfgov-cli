@@ -16,6 +16,9 @@ import (
 	"github.com/fatih/color"
 	"github.com/mattn/go-isatty"
 	"github.com/spf13/cobra"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/codes"
+	"go.opentelemetry.io/otel/trace"
 
 	"github.com/JiangHe12/opskit-core/apperrors"
 	"github.com/JiangHe12/opskit-core/audit"
@@ -83,6 +86,10 @@ type cliFlags struct {
 	commandCtx     context.Context
 	commandName    string
 	commandTime    time.Time
+	activeSpan     trace.Span
+	telemetryStop  telemetry.ShutdownFunc
+	metricsStop    telemetry.ShutdownFunc
+	metricAttrs    []attribute.KeyValue
 }
 
 var versionInfo = struct {
@@ -98,6 +105,7 @@ func init() {
 	printer.Configure(printer.Options{APIVersion: apiVersion, JSONEnvelopeByDefault: true})
 	audit.Configure(audit.Config{APIVersion: auditAPIVersion, ConfigDirName: ".cfgov-cli", PrivateKeyEnvVar: "CFGOV_CLI_AUDIT_PRIVATE_KEY"})
 	safety.Configure(safety.Config{Prompt: "Proceed with cfgov write? [y/N] ", OperatorEnvVar: "CFGOV_CLI_OPERATOR"})
+	telemetry.Configure(telemetry.Config{ServiceName: "cfgov-cli", AttributePrefix: "cfgov", MetricNamePrefix: "cfgov", DomainAttributeName: "resource"})
 }
 
 func SetVersionInfo(version, commit, built string) {
@@ -143,8 +151,14 @@ func newRootCmdWith(f *cliFlags) *cobra.Command {
 			if f.Concurrency <= 0 || f.Concurrency > 16 {
 				return apperrors.New(apperrors.CodeUsageError, "--concurrency must be between 1 and 16", nil)
 			}
-			telemetry.Init(c.Context(), f.OTLPEnd, f.OTLPInsec, v)
-			telemetry.InitMetrics(c.Context(), f.OTLPMetrics, f.OTLPInsec, v)
+			traceEndpoint, metricsEndpoint, insecure, ctxMeta, ctxName := resolveTelemetryConfig(f)
+			f.telemetryStop = telemetry.Init(c.Context(), traceEndpoint, insecure, v)
+			f.metricsStop = telemetry.InitMetrics(c.Context(), metricsEndpoint, insecure, v)
+			spanCtx, span := telemetry.Tracer().Start(c.Context(), f.commandName)
+			f.metricAttrs = telemetry.SpanAttributes(currentOperator(f), ctxName, ctxMeta.Env, "", f.Ticket, ctxMeta.Protected, true, "")
+			span.SetAttributes(f.metricAttrs...)
+			f.commandCtx = spanCtx
+			f.activeSpan = span
 			return nil
 		},
 	}
@@ -186,7 +200,8 @@ func newRootCmdWith(f *cliFlags) *cobra.Command {
 	cmd.PersistentFlags().StringVar(&f.OTLPMetrics, "otel-metrics-endpoint", "", "OTLP metrics endpoint")
 	cmd.PersistentFlags().BoolVar(&f.OTLPInsec, "otel-insecure", false, "Disable TLS for OTLP exporter")
 
-	cmd.AddCommand(newContextCmd(f), newConfigCmd(f), newNamespaceCmd(f), newServiceCmd(f), newRuleCmd(f), newBackupCmd(f), newCapabilitiesCmd(f), newAuditCmd(f), newVersionCmd(f), newInstallCmd(f))
+	cmd.AddCommand(newContextCmd(f), newConfigCmd(f), newNamespaceCmd(f), newServiceCmd(f), newRuleCmd(f), newBackupCmd(f), newCapabilitiesCmd(f), newAuditCmd(f), newDoctorCmd(f), newCompletionCmd(f), newVersionCmd(f), newInstallCmd(f))
+	setSuggestionsRecursive(cmd, 1)
 	return cmd
 }
 
@@ -198,12 +213,31 @@ func Execute() {
 	f := newDefaultFlags()
 	cmd := newRootCmdWith(f)
 	err := cmd.ExecuteContext(ctx)
+	if f.activeSpan != nil {
+		if err != nil {
+			f.activeSpan.RecordError(err)
+			f.activeSpan.SetStatus(codes.Error, err.Error())
+		} else {
+			f.activeSpan.SetStatus(codes.Ok, "")
+		}
+		f.activeSpan.End()
+	}
 	if !f.commandTime.IsZero() {
 		status := "success"
 		if err != nil {
 			status = "error"
 		}
-		telemetry.RecordCommand(ctx, f.commandName, status, time.Since(f.commandTime), nil)
+		telemetry.RecordCommand(ctx, f.commandName, status, time.Since(f.commandTime), f.metricAttrs)
+	}
+	if f.telemetryStop != nil || f.metricsStop != nil {
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		if f.telemetryStop != nil {
+			f.telemetryStop(shutdownCtx)
+		}
+		if f.metricsStop != nil {
+			f.metricsStop(shutdownCtx)
+		}
+		cancel()
 	}
 	if err == nil || errors.Is(err, context.Canceled) {
 		stop()
@@ -221,6 +255,24 @@ func Execute() {
 	}
 	stop()
 	os.Exit(code)
+}
+
+func resolveTelemetryConfig(f *cliFlags) (traceEndpoint, metricsEndpoint string, insecure bool, ctxMeta cfgovctx.Context, ctxName string) {
+	ctxMeta, ctxName, _ = resolvedContext(f)
+	traceEndpoint = firstNonEmpty(f.OTLPEnd, ctxMeta.OTLPEndpoint, os.Getenv("OTEL_EXPORTER_OTLP_ENDPOINT"))
+	metricsEndpoint = firstNonEmpty(f.OTLPMetrics, ctxMeta.OTLPMetricsEndpoint, os.Getenv("OTEL_EXPORTER_OTLP_METRICS_ENDPOINT"))
+	insecure = f.OTLPInsec || ctxMeta.OTLPInsecure
+	if ctxName == "" {
+		ctxName = f.contextName()
+	}
+	return traceEndpoint, metricsEndpoint, insecure, ctxMeta, ctxName
+}
+
+func setSuggestionsRecursive(cmd *cobra.Command, distance int) {
+	cmd.SuggestionsMinimumDistance = distance
+	for _, child := range cmd.Commands() {
+		setSuggestionsRecursive(child, distance)
+	}
 }
 
 func buildBackend(f *cliFlags) (cfgov.Backend, cfgovctx.Context, error) {

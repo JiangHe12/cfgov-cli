@@ -3,6 +3,7 @@ package cmd
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -104,7 +105,7 @@ func ruleListCmd(f *cliFlags) *cobra.Command {
 }
 
 func ruleGetCmd(f *cliFlags) *cobra.Command {
-	var app, typeName string
+	var app, typeName, resource string
 	cmd := &cobra.Command{
 		Use:   "get --app <app> --type <ruleType>",
 		Short: "Get one Sentinel rule set",
@@ -123,11 +124,15 @@ func ruleGetCmd(f *cliFlags) *cobra.Command {
 			if err != nil {
 				return err
 			}
+			if resource != "" {
+				result = filterRuleSetByResource(result, resource)
+			}
 			return newPrinter(f).JSONData("RuleSet", result)
 		},
 	}
 	cmd.Flags().StringVar(&app, "app", "", "Sentinel app")
 	cmd.Flags().StringVar(&typeName, "type", "", "Rule type: flow, degrade, system, authority, param")
+	cmd.Flags().StringVar(&resource, "resource", "", "Filter by resource")
 	_ = cmd.MarkFlagRequired("app")
 	_ = cmd.MarkFlagRequired("type")
 	return cmd
@@ -220,6 +225,7 @@ func ruleDiffCmd(f *cliFlags) *cobra.Command {
 func ruleValidateCmd(f *cliFlags) *cobra.Command {
 	var file string
 	var deep bool
+	var failOnWarnings bool
 	cmd := &cobra.Command{
 		Use:   "validate --file <path>",
 		Short: "Validate a local Sentinel rule file",
@@ -242,12 +248,17 @@ func ruleValidateCmd(f *cliFlags) *cobra.Command {
 					_ = newPrinter(f).JSONData("RuleValidation", result)
 					return apperrors.New(apperrors.CodeValidationFailed, "deep rule validation failed", nil)
 				}
+				if failOnWarnings && rule.HasWarning(issues) {
+					_ = newPrinter(f).JSONData("RuleValidation", result)
+					return apperrors.New(apperrors.CodeValidationFailed, "deep rule validation warnings found", nil)
+				}
 			}
 			return newPrinter(f).JSONData("RuleValidation", result)
 		},
 	}
 	cmd.Flags().StringVar(&file, "file", "", "Local rule file")
 	cmd.Flags().BoolVar(&deep, "deep", false, "Run deep semantic checks")
+	cmd.Flags().BoolVar(&failOnWarnings, "fail-on-warnings", false, "Exit non-zero when deep validation reports warnings")
 	_ = cmd.MarkFlagRequired("file")
 	return cmd
 }
@@ -328,6 +339,31 @@ func ruleAuditSummary(items []ruleSetResult) string {
 		parts = append(parts, string(item.Type)+"="+item.SHA256+"/"+intString(item.Count))
 	}
 	return "ruleSets=" + intString(len(items)) + " " + strings.Join(parts, ",")
+}
+
+func filterRuleSetByResource(result ruleSetResult, resource string) ruleSetResult {
+	if resource == "" {
+		return result
+	}
+	filtered := make([]map[string]any, 0, len(result.Rules))
+	for _, item := range result.Rules {
+		if ruleValueString(item["resource"]) == resource {
+			filtered = append(filtered, item)
+		}
+	}
+	result.Rules = filtered
+	result.Count = len(filtered)
+	if data, err := json.Marshal(filtered); err == nil {
+		result.SHA256 = sha256Bytes(data)
+	}
+	return result
+}
+
+func ruleValueString(value any) string {
+	if value == nil {
+		return ""
+	}
+	return fmt.Sprint(value)
 }
 
 func intString(value int) string {

@@ -39,9 +39,10 @@ func newNamespaceCmd(f *cliFlags) *cobra.Command {
 
 func namespaceListCmd(f *cliFlags) *cobra.Command {
 	return &cobra.Command{
-		Use:   "list",
-		Short: "List namespaces",
-		Args:  cobra.NoArgs,
+		Use:     "list",
+		Aliases: []string{"ls"},
+		Short:   "List namespaces",
+		Args:    cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			manager, ctxMeta, err := buildNamespaceManager(f)
 			if err != nil {
@@ -123,9 +124,10 @@ func namespaceMutateCmd(
 func namespaceDeleteCmd(f *cliFlags) *cobra.Command {
 	var id string
 	cmd := &cobra.Command{
-		Use:   "delete --id <id>",
-		Short: "Delete a namespace",
-		Args:  cobra.NoArgs,
+		Use:     "delete --id <id>",
+		Aliases: []string{"del", "rm"},
+		Short:   "Delete a namespace",
+		Args:    cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			if err := validateNamespaceID(id); err != nil {
 				return err

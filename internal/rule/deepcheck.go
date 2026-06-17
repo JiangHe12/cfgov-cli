@@ -39,6 +39,15 @@ func HasError(issues []Issue) bool {
 	return false
 }
 
+func HasWarning(issues []Issue) bool {
+	for _, issue := range issues {
+		if issue.Severity == SeverityWarning {
+			return true
+		}
+	}
+	return false
+}
+
 func checkDuplicateKeys(rules map[Type][]map[string]any) []Issue {
 	var issues []Issue
 	for _, ruleType := range []Type{TypeFlow, TypeDegrade, TypeAuthority, TypeParam} {

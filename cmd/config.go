@@ -94,9 +94,10 @@ func configListCmd(f *cliFlags) *cobra.Command {
 	var group, query, prefix string
 	var page, pageSize, limit int
 	cmd := &cobra.Command{
-		Use:   "list",
-		Short: "List config blobs",
-		Args:  cobra.NoArgs,
+		Use:     "list",
+		Aliases: []string{"ls"},
+		Short:   "List config blobs",
+		Args:    cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			backend, ctxMeta, err := buildBackend(f)
 			if err != nil {
@@ -137,7 +138,7 @@ func configListCmd(f *cliFlags) *cobra.Command {
 			return nil
 		},
 	}
-	cmd.Flags().StringVar(&group, "group", "", "Nacos group filter")
+	cmd.Flags().StringVarP(&group, "group", "g", "", "Nacos group filter")
 	cmd.Flags().StringVarP(&query, "query", "q", "", "Exact key/dataId search")
 	cmd.Flags().StringVar(&prefix, "prefix", "", "Key prefix/search filter")
 	cmd.Flags().IntVar(&page, "page", 1, "Page number")
@@ -190,7 +191,7 @@ func configDiffCmd(f *cliFlags) *cobra.Command {
 		},
 	}
 	cmd.Flags().StringVar(&key, "key", "", "Config key: dataId or group/dataId")
-	cmd.Flags().StringVar(&file, "file", "", "Local file")
+	cmd.Flags().StringVarP(&file, "file", "f", "", "Local file")
 	cmd.Flags().StringVar(&inlineContent, "content", "", "Config content")
 	cmd.Flags().StringVar(&sourceContext, "source-context", "", "Source context")
 	cmd.Flags().StringVar(&targetContext, "target-context", "", "Target context")
@@ -231,7 +232,7 @@ func configValidateCmd(f *cliFlags) *cobra.Command {
 			return newPrinter(f).JSONData("ValidationResult", data)
 		},
 	}
-	cmd.Flags().StringVar(&file, "file", "", "Local file")
+	cmd.Flags().StringVarP(&file, "file", "f", "", "Local file")
 	cmd.Flags().StringVar(&inlineContent, "content", "", "Config content")
 	cmd.Flags().StringVar(&contentType, "type", "", "Config type: text, properties, json, yaml, xml")
 	return cmd
@@ -271,7 +272,7 @@ func configPullCmd(f *cliFlags) *cobra.Command {
 		},
 	}
 	cmd.Flags().StringVar(&key, "key", "", "Config key: dataId or group/dataId")
-	cmd.Flags().StringVar(&file, "file", "", "Output file")
+	cmd.Flags().StringVarP(&file, "file", "f", "", "Output file")
 	_ = cmd.MarkFlagRequired("key")
 	_ = cmd.MarkFlagRequired("file")
 	return cmd
@@ -454,7 +455,7 @@ func configPushCmd(f *cliFlags) *cobra.Command {
 		},
 	}
 	cmd.Flags().StringVar(&key, "key", "", "Config key: dataId or group/dataId")
-	cmd.Flags().StringVar(&file, "file", "", "Config file to push")
+	cmd.Flags().StringVarP(&file, "file", "f", "", "Config file to push")
 	cmd.Flags().StringVar(&inlineContent, "content", "", "Config content")
 	cmd.Flags().StringVar(&contentType, "type", "", "Config type: text, properties, json, yaml, xml")
 	cmd.Flags().StringVar(&expectedRevision, "expected-revision", "", "CAS revision precondition")
@@ -466,9 +467,10 @@ func configPushCmd(f *cliFlags) *cobra.Command {
 func configDeleteCmd(f *cliFlags) *cobra.Command {
 	var key, expectedRevision string
 	cmd := &cobra.Command{
-		Use:   "delete --key <key>",
-		Short: "Delete a config blob",
-		Args:  cobra.NoArgs,
+		Use:     "delete --key <key>",
+		Aliases: []string{"del", "rm"},
+		Short:   "Delete a config blob",
+		Args:    cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			backend, ctxMeta, err := buildBackend(f)
 			if err != nil {

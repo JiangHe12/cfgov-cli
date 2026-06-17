@@ -38,9 +38,10 @@ func newServiceCmd(f *cliFlags) *cobra.Command {
 func serviceListCmd(f *cliFlags) *cobra.Command {
 	var page, pageSize int
 	cmd := &cobra.Command{
-		Use:   "list",
-		Short: "List services",
-		Args:  cobra.NoArgs,
+		Use:     "list",
+		Aliases: []string{"ls"},
+		Short:   "List services",
+		Args:    cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			registry, ctxMeta, err := buildServiceRegistry(f)
 			if err != nil {
@@ -90,7 +91,7 @@ func serviceGetCmd(f *cliFlags) *cobra.Command {
 			return newPrinter(f).JSONData("ServiceItem", result)
 		},
 	}
-	cmd.Flags().StringVar(&service, "service", "", "Service name")
+	cmd.Flags().StringVarP(&service, "service", "s", "", "Service name")
 	_ = cmd.MarkFlagRequired("service")
 	return cmd
 }
@@ -126,7 +127,7 @@ func serviceInstancesCmd(f *cliFlags) *cobra.Command {
 			return nil
 		},
 	}
-	cmd.Flags().StringVar(&service, "service", "", "Service name")
+	cmd.Flags().StringVarP(&service, "service", "s", "", "Service name")
 	cmd.Flags().StringVar(&group, "group", "", "Group name")
 	_ = cmd.MarkFlagRequired("service")
 	return cmd
@@ -212,7 +213,7 @@ type instanceFlagSet struct {
 }
 
 func (s *instanceFlagSet) bind(cmd *cobra.Command) {
-	cmd.Flags().StringVar(&s.service, "service", "", "Service name")
+	cmd.Flags().StringVarP(&s.service, "service", "s", "", "Service name")
 	cmd.Flags().StringVar(&s.ip, "ip", "", "Instance IP")
 	cmd.Flags().IntVar(&s.port, "port", 0, "Instance port")
 	cmd.Flags().StringVar(&s.group, "group", "", "Group name")
