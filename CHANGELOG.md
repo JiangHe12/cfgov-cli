@@ -4,6 +4,8 @@ All notable changes to this project are documented in this file.
 
 ## [Unreleased]
 
+## v0.1.0
+
 ### Added
 - P0 governance kernel: unified `cfgov.Backend` abstraction (`Coordinate{namespace,key}` → blob + revision/CAS) with a Nacos backend; Nacos `group/dataId` details are confined to the backend adapter.
 - Commands: `ctx set/use/list/current`, `config get/push/delete`, `capabilities`, `audit query/verify`, `version`.
