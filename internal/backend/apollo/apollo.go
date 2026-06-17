@@ -307,7 +307,7 @@ func (b *Backend) Capabilities() cfgov.Capabilities {
 	return cfgov.Capabilities{
 		Backend:          "apollo",
 		ResourceTypes:    []string{"config", "rule"},
-		Verbs:            []string{"get", "list", "diff", "validate", "pull", "push", "delete", "rule"},
+		Verbs:            []string{"get", "list", "diff", "validate", "pull", "push", "delete"},
 		SupportsCAS:      true,
 		SupportsRevision: true,
 		SupportsHistory:  false,

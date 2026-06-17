@@ -219,7 +219,7 @@ func (b *Backend) Describe() cfgov.Description {
 func (b *Backend) Capabilities() cfgov.Capabilities {
 	return cfgov.Capabilities{
 		Backend:          "nacos",
-		ResourceTypes:    []string{"config", "namespace", "service"},
+		ResourceTypes:    []string{"config", "namespace", "service", "rule"},
 		Verbs:            []string{"get", "list", "diff", "validate", "pull", "history", "listen", "push", "delete"},
 		SupportsCAS:      true,
 		SupportsRevision: true,

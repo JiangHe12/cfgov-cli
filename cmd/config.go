@@ -175,6 +175,9 @@ func configDiffCmd(f *cliFlags) *cobra.Command {
 				return err
 			}
 			summary := diffSummary(remote.Content, local)
+			if summary.Same && isStrictNoChange(f) {
+				return apperrors.New(apperrors.CodeNoChangeRequired, "no changes detected", nil)
+			}
 			if f.Output == "plain" {
 				p := newPrinter(f)
 				p.Info(summary.Summary)
@@ -413,6 +416,9 @@ func configPushCmd(f *cliFlags) *cobra.Command {
 			class := cfgclass.Classify(cfgclass.OperationPush, content, contentType)
 			coord := cfgov.Coordinate{Namespace: backend.Describe().Namespace, Key: key}
 			plan := pushPlan(cmd.Context(), backend, coord, content, class)
+			if err := strictNoChangePush(cmd.Context(), f, backend, coord, content); err != nil {
+				return err
+			}
 			if f.DryRun {
 				appendAuditWarn(f, audit.EventType("config.write"), ctxMeta, audit.EventTarget{ResourceType: "config", Resource: key}, audit.StatusSuccess, plan.Impact, nil)
 				return newPrinter(f).JSONData("ChangePlan", plan)
@@ -555,6 +561,21 @@ func pushPlan(ctx context.Context, backend cfgov.Backend, coord cfgov.Coordinate
 		SHA256:       hash,
 		Bytes:        len(bytes.TrimRight(content, "\n")),
 	}
+}
+
+func strictNoChangePush(ctx context.Context, f *cliFlags, backend cfgov.Backend, coord cfgov.Coordinate, content []byte) error {
+	if !isStrictNoChange(f) {
+		return nil
+	}
+	if !remoteContentMatches(ctx, backend, coord, content) {
+		return nil
+	}
+	return apperrors.New(apperrors.CodeNoChangeRequired, "config already matches remote", nil)
+}
+
+func remoteContentMatches(ctx context.Context, backend cfgov.Backend, coord cfgov.Coordinate, content []byte) bool {
+	remote, err := backend.Get(ctx, coord)
+	return err == nil && sha256Bytes(remote.Content) == sha256Bytes(content)
 }
 
 func appendReadAudit(f *cliFlags, ctxMeta cfgovctx.Context, key string, err error) {
@@ -840,6 +861,9 @@ func configContextDiff(ctx context.Context, f *cliFlags, key, sourceContext, tar
 		return err
 	}
 	result := diffSummary(targetBlob.Content, sourceBlob.Content)
+	if result.Same && isStrictNoChange(f) {
+		return apperrors.New(apperrors.CodeNoChangeRequired, "no changes detected", nil)
+	}
 	result.Source = diffTargetFor(sourceContext, source.Describe(), sourceKey, sourceBlob.Content)
 	result.Target = diffTargetFor(targetContext, target.Describe(), targetKey, targetBlob.Content)
 	appendAuditWarn(

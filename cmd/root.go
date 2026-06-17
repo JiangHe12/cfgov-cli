@@ -42,39 +42,46 @@ const (
 )
 
 type cliFlags struct {
-	Config        string
-	Backend       string
-	Server        string
-	Username      string
-	Password      string
-	Namespace     string
-	Timeout       time.Duration
-	Output        string
-	PlainHead     bool
-	DryRun        bool
-	Plan          bool
-	Diff          bool
-	Yes           bool
-	Backup        bool
-	NoBackup      bool
-	Ticket        string
-	Operator      string
-	Reason        string
-	NonInter      bool
-	AllowDel      bool
-	AllowPrune    bool
-	AllowNSDel    bool
-	AllowSvcDereg bool
-	AllowRuleDel  bool
-	Concurrency   int
-	OTLPEnd       string
-	OTLPMetrics   string
-	OTLPInsec     bool
-	contextOnce   sync.Once
-	cachedCtx     string
-	commandCtx    context.Context
-	commandName   string
-	commandTime   time.Time
+	Config         string
+	Context        string
+	Backend        string
+	Server         string
+	Username       string
+	Password       string
+	Namespace      string
+	Timeout        time.Duration
+	Output         string
+	PlainHead      bool
+	Debug          bool
+	Trace          bool
+	TraceBodyLim   int
+	StrictNoChange bool
+	AuditMaxSize   int64
+	BackupKeep     int
+	DryRun         bool
+	Plan           bool
+	Diff           bool
+	Yes            bool
+	Backup         bool
+	NoBackup       bool
+	Ticket         string
+	Operator       string
+	Reason         string
+	NonInter       bool
+	AllowDel       bool
+	AllowPrune     bool
+	AllowNSDel     bool
+	AllowSvcDereg  bool
+	AllowRuleDel   bool
+	Concurrency    int
+	OTLPEnd        string
+	OTLPMetrics    string
+	OTLPInsec      bool
+	contextOnce    sync.Once
+	cachedCtx      string
+	commandCtx     context.Context
+	commandName    string
+	commandTime    time.Time
 }
 
 var versionInfo = struct {
@@ -107,7 +114,7 @@ func getVersionInfo() (string, string, string) {
 }
 
 func newDefaultFlags() *cliFlags {
-	return &cliFlags{Timeout: 30 * time.Second, Output: "table"}
+	return &cliFlags{Timeout: 30 * time.Second, Output: "table", TraceBodyLim: 2048, AuditMaxSize: audit.DefaultMaxSizeBytes, BackupKeep: 10}
 }
 
 func NewRootCmd() *cobra.Command {
@@ -141,6 +148,7 @@ func newRootCmdWith(f *cliFlags) *cobra.Command {
 		},
 	}
 	cmd.PersistentFlags().StringVar(&f.Config, "config", "", "Override context config path")
+	cmd.PersistentFlags().StringVar(&f.Context, "context", "", "Temporarily use a named context for this command")
 	cmd.PersistentFlags().StringVar(&f.Backend, "backend", "", "Backend override: nacos | apollo")
 	cmd.PersistentFlags().StringVar(&f.Server, "server", "", "Backend server URL")
 	cmd.PersistentFlags().StringVar(&f.Username, "username", "", "Backend username")
@@ -150,6 +158,13 @@ func newRootCmdWith(f *cliFlags) *cobra.Command {
 	cmd.PersistentFlags().DurationVar(&f.Timeout, "timeout", 30*time.Second, "Request timeout")
 	cmd.PersistentFlags().StringVarP(&f.Output, "output", "o", "table", "Output format: table | json | plain")
 	cmd.PersistentFlags().BoolVar(&f.PlainHead, "plain-header", false, "Show headers in plain output")
+	cmd.PersistentFlags().BoolVar(&f.Debug, "debug", false, "Output backend request summary to stderr")
+	cmd.PersistentFlags().BoolVar(&f.Trace, "trace", false, "Output backend request/response trace to stderr")
+	cmd.PersistentFlags().IntVar(&f.TraceBodyLim, "trace-body-limit", 2048, "Trace body byte limit (0 = unlimited)")
+	_ = cmd.PersistentFlags().MarkHidden("trace-body-limit")
+	cmd.PersistentFlags().BoolVar(&f.StrictNoChange, "strict-no-change", false, "Exit 13 (NO_CHANGE_REQUIRED) when a plan has no changes to apply")
+	cmd.PersistentFlags().Int64Var(&f.AuditMaxSize, "audit-max-size", audit.DefaultMaxSizeBytes, "Active audit log rotation size in bytes")
+	cmd.PersistentFlags().IntVar(&f.BackupKeep, "backup-keep", 10, "Number of local backup snapshots to keep")
 	cmd.PersistentFlags().BoolVar(&f.DryRun, "dry-run", false, "Plan only, do not mutate")
 	cmd.PersistentFlags().BoolVar(&f.Plan, "plan", false, "Alias for --dry-run plan output")
 	cmd.PersistentFlags().BoolVar(&f.Diff, "diff", false, "Include CLI-computed impact summary")
@@ -238,6 +253,7 @@ func buildBackend(f *cliFlags) (cfgov.Backend, cfgovctx.Context, error) {
 	}
 	namespace := firstNonEmpty(f.Namespace, os.Getenv("NACOS_NAMESPACE"), item.Namespace)
 	client := api.NewClient(server, username, password, namespace, f.Timeout)
+	client.SetTrace(api.TraceOptions{Debug: f.Debug, Trace: f.Trace, BodyLimit: f.TraceBodyLim, Writer: os.Stderr})
 	return nacosbackend.New(client, server), item, nil
 }
 
@@ -268,6 +284,8 @@ func buildApolloBackend(f *cliFlags, contextName string, item cfgovctx.Context, 
 		Operator:      currentOperator(f),
 		Reason:        f.Reason,
 		Timeout:       f.Timeout,
+		Trace:         f.Debug || f.Trace,
+		TraceOut:      os.Stderr,
 	})
 	if err != nil {
 		return nil, err
@@ -276,6 +294,17 @@ func buildApolloBackend(f *cliFlags, contextName string, item cfgovctx.Context, 
 }
 
 func resolvedContext(f *cliFlags) (cfgovctx.Context, string, error) {
+	if f.Context != "" {
+		cfg, err := cfgovctx.Load()
+		if err != nil {
+			return cfgovctx.Context{}, "", err
+		}
+		item, ok := cfg.Contexts[f.Context]
+		if !ok {
+			return cfgovctx.Context{}, "", apperrors.New(apperrors.CodeUsageError, "context not found", nil)
+		}
+		return item, f.Context, nil
+	}
 	ctx, name, err := cfgovctx.Current()
 	if err != nil {
 		if f.Server == "" && os.Getenv("NACOS_SERVER") == "" {
@@ -332,6 +361,10 @@ func requiredAllow(flag safety.AllowFlag) []safety.AllowFlag {
 	return []safety.AllowFlag{flag}
 }
 
+func isStrictNoChange(f *cliFlags) bool {
+	return f.StrictNoChange
+}
+
 func appendAuditWarn(f *cliFlags, typ audit.EventType, ctx cfgovctx.Context, target audit.EventTarget, status, diff string, err error) {
 	path, pathErr := audit.DefaultPath()
 	if pathErr != nil {
@@ -352,9 +385,17 @@ func appendAuditWarn(f *cliFlags, typ audit.EventType, ctx cfgovctx.Context, tar
 		appErr := apperrors.AsAppError(err)
 		evt.Error = &audit.EventError{Code: string(appErr.Code), Message: appErr.Message}
 	}
-	if appendErr := audit.Append(path, evt); appendErr != nil {
+	if appendErr := audit.AppendWithOptions(path, evt, auditOptions(f)); appendErr != nil {
 		_, _ = fmt.Fprintf(os.Stderr, "warning: audit write failed: %v\n", appendErr)
 	}
+}
+
+func auditOptions(f *cliFlags) audit.Options {
+	maxSize := f.AuditMaxSize
+	if maxSize <= 0 {
+		maxSize = audit.DefaultMaxSizeBytes
+	}
+	return audit.Options{MaxSizeBytes: maxSize}
 }
 
 func newPrinter(f *cliFlags) *printer.Printer {
@@ -377,6 +418,9 @@ func commandContext(f *cliFlags) context.Context {
 }
 
 func (f *cliFlags) contextName() string {
+	if f.Context != "" {
+		return f.Context
+	}
 	f.contextOnce.Do(func() {
 		_, name, err := cfgovctx.Current()
 		if err != nil || name == "" {

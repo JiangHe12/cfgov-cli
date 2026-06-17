@@ -177,6 +177,9 @@ func configImportCmd(f *cliFlags) *cobra.Command { //nolint:gocyclo // Cobra wir
 			if err := enforcePlanLimit(plan, forceLarge, "import"); err != nil {
 				return err
 			}
+			if !configPlanHasChanges(plan) && isStrictNoChange(f) {
+				return apperrors.New(apperrors.CodeNoChangeRequired, "no changes to apply", nil)
+			}
 			if f.DryRun || f.Plan {
 				plan.DryRun = true
 				return newPrinter(f).JSONData("ChangePlan", plan)
@@ -252,6 +255,9 @@ func configPromoteCmd(f *cliFlags) *cobra.Command { //nolint:gocyclo // Cobra wi
 			if err != nil {
 				return err
 			}
+			if !configPlanHasChanges(plan) && isStrictNoChange(f) {
+				return apperrors.New(apperrors.CodeNoChangeRequired, "no changes to promote", nil)
+			}
 			if f.DryRun || f.Plan || f.Diff {
 				plan.DryRun = f.DryRun || f.Plan
 				return newPrinter(f).JSONData("ChangePlan", plan)
@@ -313,6 +319,9 @@ func configRollbackCmd(f *cliFlags) *cobra.Command {
 				Key: key, LocalSHA256: sha256Bytes(content), RemoteSHA256: sha256Bytes(remote.Content), Bytes: len(content),
 			}}}
 			plan.Summary = summarizePlan(plan)
+			if sha256Bytes(remote.Content) == sha256Bytes(content) && isStrictNoChange(f) {
+				return apperrors.New(apperrors.CodeNoChangeRequired, "remote already matches rollback target", nil)
+			}
 			if f.DryRun || f.Plan || f.Diff {
 				plan.DryRun = f.DryRun || f.Plan
 				return newPrinter(f).JSONData("ChangePlan", plan)
@@ -360,7 +369,7 @@ func configReconcileCmd(f *cliFlags) *cobra.Command {
 			if err != nil {
 				return err
 			}
-			if err := enforcePlanLimit(plan, forceLarge, "reconcile"); err != nil {
+			if err := enforceReconcilePlanGates(f, plan, forceLarge); err != nil {
 				return err
 			}
 			if f.DryRun || f.Plan {
@@ -705,9 +714,12 @@ func buildBackendFromNamedContext(parent context.Context, f *cliFlags, name stri
 			Operator:      currentOperator(f),
 			Reason:        f.Reason,
 			Timeout:       f.Timeout,
+			Trace:         f.Debug || f.Trace,
+			TraceOut:      os.Stderr,
 		})
 	}
 	client := api.NewClient(item.Server, item.Username, password, item.Namespace, f.Timeout)
+	client.SetTrace(api.TraceOptions{Debug: f.Debug, Trace: f.Trace, BodyLimit: f.TraceBodyLim, Writer: os.Stderr})
 	return nacos.New(client, item.Server), nil
 }
 
@@ -753,6 +765,24 @@ func summarizePlan(plan configPlan) planSummary {
 		Conflict: len(plan.Conflict),
 		Total:    len(plan.Create) + len(plan.Update) + len(plan.Delete) + len(plan.Prune) + len(plan.Skip) + len(plan.Conflict),
 	}
+}
+
+func configPlanHasChanges(plan configPlan) bool {
+	return len(plan.Create)+len(plan.Update)+len(plan.Delete)+len(plan.Prune) > 0
+}
+
+func strictNoChangeReconcile(f *cliFlags, plan configPlan) error {
+	if isStrictNoChange(f) && !configPlanHasChanges(plan) && len(plan.Conflict) == 0 {
+		return apperrors.New(apperrors.CodeNoChangeRequired, "no changes to reconcile", nil)
+	}
+	return nil
+}
+
+func enforceReconcilePlanGates(f *cliFlags, plan configPlan, forceLarge bool) error {
+	if err := enforcePlanLimit(plan, forceLarge, "reconcile"); err != nil {
+		return err
+	}
+	return strictNoChangeReconcile(f, plan)
 }
 
 func enforcePlanLimit(plan configPlan, forceLarge bool, operation string) error {

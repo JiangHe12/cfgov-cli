@@ -4,13 +4,18 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/JiangHe12/opskit-core/apperrors"
+	"github.com/JiangHe12/opskit-core/audit"
 	"github.com/JiangHe12/opskit-core/credstore"
+
+	"github.com/JiangHe12/cfgov-cli/internal/cfgov"
 )
 
 type capabilitiesData struct {
 	Tool      capTool      `json:"tool"`
 	Backend   capBackend   `json:"backend"`
 	Supported capSupported `json:"supported"`
+	Limits    capLimits    `json:"limits"`
+	Features  capFeatures  `json:"features"`
 }
 
 type capTool struct {
@@ -25,6 +30,24 @@ type capBackend struct {
 	SupportsHistory bool     `json:"supportsHistory"`
 	SupportsWatch   bool     `json:"supportsWatch"`
 	SupportsRules   bool     `json:"supportsRules"`
+	SupportsCAS     bool     `json:"supportsCas"`
+	Verbs           []string `json:"verbs"`
+}
+
+type capLimits struct {
+	DefaultConcurrency int   `json:"defaultConcurrency"`
+	MaxConcurrency     int   `json:"maxConcurrency"`
+	TraceBodyLimit     int   `json:"traceBodyLimit"`
+	AuditMaxSizeBytes  int64 `json:"auditMaxSizeBytes"`
+	BackupKeep         int   `json:"backupKeep"`
+}
+
+type capFeatures struct {
+	ContextOverride bool `json:"contextOverride"`
+	DebugTrace      bool `json:"debugTrace"`
+	AuditPrune      bool `json:"auditPrune"`
+	AuditTablePlain bool `json:"auditTablePlain"`
+	StrictNoChange  bool `json:"strictNoChange"`
 }
 
 type capSupported struct {
@@ -52,7 +75,7 @@ func newCapabilitiesCmd(f *cliFlags) *cobra.Command {
 		Short: "Show cfgov capabilities",
 		Args:  cobra.NoArgs,
 		RunE: func(_ *cobra.Command, _ []string) error {
-			data := buildCapabilities()
+			data := buildCapabilities(f, currentBackendCapabilities(f))
 			p := newPrinter(f)
 			if f.Output == "json" || f.Output == "plain" {
 				return p.JSONData("Capabilities", data)
@@ -63,11 +86,50 @@ func newCapabilitiesCmd(f *cliFlags) *cobra.Command {
 	}
 }
 
-func buildCapabilities() capabilitiesData {
+func currentBackendCapabilities(f *cliFlags) cfgov.Capabilities {
+	if backend, _, err := buildBackend(f); err == nil {
+		return backend.Capabilities()
+	}
+	name := firstNonEmpty(f.Backend, "nacos")
+	switch name {
+	case "apollo":
+		return cfgov.Capabilities{
+			Backend:          "apollo",
+			ResourceTypes:    []string{"config", "rule"},
+			Verbs:            []string{"get", "list", "diff", "validate", "pull", "push", "delete"},
+			SupportsCAS:      true,
+			SupportsRevision: true,
+			SupportsHistory:  false,
+			SupportsWatch:    false,
+			SupportsRules:    true,
+		}
+	default:
+		return cfgov.Capabilities{
+			Backend:          "nacos",
+			ResourceTypes:    []string{"config", "namespace", "service", "rule"},
+			Verbs:            []string{"get", "list", "diff", "validate", "pull", "history", "listen", "push", "delete"},
+			SupportsCAS:      true,
+			SupportsRevision: true,
+			SupportsHistory:  true,
+			SupportsWatch:    true,
+			SupportsRules:    true,
+		}
+	}
+}
+
+func buildCapabilities(f *cliFlags, backend cfgov.Capabilities) capabilitiesData {
 	v, c, _ := getVersionInfo()
 	return capabilitiesData{
-		Tool:    capTool{Name: "cfgov-cli", Version: v, Commit: c},
-		Backend: capBackend{Name: "nacos", ResourceTypes: []string{"config", "namespace", "service", "rule"}, SupportsHistory: true, SupportsWatch: true, SupportsRules: true},
+		Tool: capTool{Name: "cfgov-cli", Version: v, Commit: c},
+		Backend: capBackend{
+			Name:            backend.Backend,
+			ResourceTypes:   backend.ResourceTypes,
+			SupportsHistory: backend.SupportsHistory,
+			SupportsWatch:   backend.SupportsWatch,
+			SupportsRules:   backend.SupportsRules,
+			SupportsCAS:     backend.SupportsCAS,
+			Verbs:           backend.Verbs,
+		},
 		Supported: capSupported{
 			Commands: []capCommand{
 				{Noun: "config", Verb: "get", Risk: "R0"},
@@ -113,12 +175,35 @@ func buildCapabilities() capabilitiesData {
 			AuditAPIVersions:   []string{auditAPIVersion},
 			ErrorCodes:         errorCodeStrings(),
 			ExitCodes:          apperrors.AllExitCodes(),
-			Kinds:              []string{"AuditQueryResult", "AuditVerifyResult", "Capabilities", "ChangePlan", "ChangeResult", "ConfigExport", "ConfigItem", "ConfigList", "ConfigListenEvent", "ContextImportResult", "ContextItem", "ContextList", "ContextTestResult", "DiffResult", "Error", "ExportResult", "HistoryList", "NamespaceItem", "NamespaceList", "RuleDiff", "RuleExport", "RuleList", "RuleSet", "RuleValidation", "ServiceInstanceList", "ServiceItem", "ServiceList", "ValidationResult", "VersionInfo"},
+			Kinds:              []string{"AuditPruneResult", "AuditQueryResult", "AuditVerifyResult", "Capabilities", "ChangePlan", "ChangeResult", "ConfigExport", "ConfigItem", "ConfigList", "ConfigListenEvent", "ContextImportResult", "ContextItem", "ContextList", "ContextTestResult", "DiffResult", "Error", "ExportResult", "HistoryList", "NamespaceItem", "NamespaceList", "RuleDiff", "RuleExport", "RuleList", "RuleSet", "RuleValidation", "ServiceInstanceList", "ServiceItem", "ServiceList", "ValidationResult", "VersionInfo"},
 			CredentialBackends: credstore.Available(),
-			Environment:        []string{"CFGOV_CLI_AUDIT_PRIVATE_KEY", "CFGOV_CLI_CREDENTIAL_PASSPHRASE", "CFGOV_CLI_OPERATOR", "NACOS_SERVER", "NACOS_USERNAME", "NACOS_PASSWORD", "NACOS_NAMESPACE"},
+			Environment:        []string{"APOLLO_APP_ID", "APOLLO_CLUSTER", "APOLLO_ENV", "APOLLO_NAMESPACE", "APOLLO_RULE_NAMESPACE", "APOLLO_SECRET", "APOLLO_SERVER", "APOLLO_TOKEN", "CFGOV_CLI_AUDIT_PRIVATE_KEY", "CFGOV_CLI_CREDENTIAL_PASSPHRASE", "CFGOV_CLI_OPERATOR", "NACOS_SERVER", "NACOS_USERNAME", "NACOS_PASSWORD", "NACOS_NAMESPACE"},
 			RuleTypes:          []string{"flow", "degrade", "system", "authority", "param"},
 		},
+		Limits: capLimits{
+			DefaultConcurrency: 1,
+			MaxConcurrency:     16,
+			TraceBodyLimit:     f.TraceBodyLim,
+			AuditMaxSizeBytes:  firstPositiveInt64(f.AuditMaxSize, audit.DefaultMaxSizeBytes),
+			BackupKeep:         f.BackupKeep,
+		},
+		Features: capFeatures{
+			ContextOverride: true,
+			DebugTrace:      true,
+			AuditPrune:      true,
+			AuditTablePlain: true,
+			StrictNoChange:  true,
+		},
 	}
+}
+
+func firstPositiveInt64(values ...int64) int64 {
+	for _, value := range values {
+		if value > 0 {
+			return value
+		}
+	}
+	return 0
 }
 
 func capabilityRows(commands []capCommand) [][]string {

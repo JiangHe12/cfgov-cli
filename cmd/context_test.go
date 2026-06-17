@@ -26,7 +26,6 @@ func TestValidateRolesURLRejectsHTTPByDefault(t *testing.T) {
 }
 
 func TestCtxSetRejectsPlainCredential(t *testing.T) {
-	t.Parallel()
 	cfgovctx.SetConfigPath(filepath.Join(t.TempDir(), "config.yaml"))
 	f := newDefaultFlags()
 	cmd := newRootCmdWith(f)
