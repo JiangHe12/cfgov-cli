@@ -1,0 +1,37 @@
+{
+  "name": "cfgov-cli",
+  "version": "0.0.0",
+  "description": "Governed configuration and Sentinel-rule operations CLI for AI agents (Nacos and Apollo)",
+  "bin": {
+    "cfgov": "bin/cfgov-cli.js",
+    "cfgov-cli": "bin/cfgov-cli.js"
+  },
+  "files": [
+    "bin/",
+    "scripts/install.js",
+    "README.md",
+    "LICENSE"
+  ],
+  "scripts": {
+    "postinstall": "node scripts/install.js"
+  },
+  "keywords": [
+    "config",
+    "nacos",
+    "apollo",
+    "sentinel",
+    "governance",
+    "cli",
+    "ai"
+  ],
+  "author": "JiangHe12",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/JiangHe12/cfgov-cli.git"
+  },
+  "homepage": "https://github.com/JiangHe12/cfgov-cli",
+  "engines": {
+    "node": ">=14"
+  }
+}

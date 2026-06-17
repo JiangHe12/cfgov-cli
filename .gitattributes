@@ -15,6 +15,10 @@
 *.yml text eol=lf
 *.yaml text eol=lf
 
+# npm launcher / postinstall scripts (shebang must stay LF on macOS/Linux) and manifests.
+*.js text eol=lf
+*.json text eol=lf
+
 # Go source files (gofmt is LF-only anyway, but be explicit).
 *.go text eol=lf
 
