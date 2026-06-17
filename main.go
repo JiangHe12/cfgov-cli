@@ -10,5 +10,6 @@ var (
 
 func main() {
 	cmd.SetVersionInfo(version, commit, built)
+	cmd.SetSkillFS(skillEmbedFS)
 	cmd.Execute()
 }
