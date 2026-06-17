@@ -113,7 +113,7 @@ func buildCapabilities() capabilitiesData {
 			AuditAPIVersions:   []string{auditAPIVersion},
 			ErrorCodes:         errorCodeStrings(),
 			ExitCodes:          apperrors.AllExitCodes(),
-			Kinds:              []string{"AuditQueryResult", "AuditVerifyResult", "Capabilities", "ChangePlan", "ChangeResult", "ConfigExport", "ConfigItem", "ConfigList", "ConfigListenEvent", "ContextItem", "ContextList", "DiffResult", "Error", "ExportResult", "HistoryList", "NamespaceItem", "NamespaceList", "RuleDiff", "RuleExport", "RuleList", "RuleSet", "RuleValidation", "ServiceInstanceList", "ServiceItem", "ServiceList", "ValidationResult", "VersionInfo"},
+			Kinds:              []string{"AuditQueryResult", "AuditVerifyResult", "Capabilities", "ChangePlan", "ChangeResult", "ConfigExport", "ConfigItem", "ConfigList", "ConfigListenEvent", "ContextImportResult", "ContextItem", "ContextList", "ContextTestResult", "DiffResult", "Error", "ExportResult", "HistoryList", "NamespaceItem", "NamespaceList", "RuleDiff", "RuleExport", "RuleList", "RuleSet", "RuleValidation", "ServiceInstanceList", "ServiceItem", "ServiceList", "ValidationResult", "VersionInfo"},
 			CredentialBackends: credstore.Available(),
 			Environment:        []string{"CFGOV_CLI_AUDIT_PRIVATE_KEY", "CFGOV_CLI_CREDENTIAL_PASSPHRASE", "CFGOV_CLI_OPERATOR", "NACOS_SERVER", "NACOS_USERNAME", "NACOS_PASSWORD", "NACOS_NAMESPACE"},
 			RuleTypes:          []string{"flow", "degrade", "system", "authority", "param"},

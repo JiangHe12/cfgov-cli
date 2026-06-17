@@ -232,7 +232,7 @@ func configPromoteCmd(f *cliFlags) *cobra.Command { //nolint:gocyclo // Cobra wi
 			if err != nil {
 				return err
 			}
-			source, err := buildBackendFromNamedContext(cmd.Context(), f, sourceContext, "")
+			source, err := buildBackendFromNamedContext(cmd.Context(), f, sourceContext)
 			if err != nil {
 				return err
 			}
@@ -677,7 +677,7 @@ func rollbackContentFromBackupID(backupID string) ([]byte, error) {
 	return nil, apperrors.New(apperrors.CodeResourceNotFound, "backup-id not found", nil)
 }
 
-func buildBackendFromNamedContext(parent context.Context, f *cliFlags, name, namespaceOverride string) (cfgov.Backend, error) {
+func buildBackendFromNamedContext(parent context.Context, f *cliFlags, name string) (cfgov.Backend, error) {
 	cfg, err := cfgovctx.Load()
 	if err != nil {
 		return nil, err
@@ -700,15 +700,14 @@ func buildBackendFromNamedContext(parent context.Context, f *cliFlags, name, nam
 			AppID:         item.ApolloAppID,
 			Env:           item.ApolloEnv,
 			Cluster:       item.ApolloCluster,
-			Namespace:     firstNonEmpty(namespaceOverride, item.ApolloNamespace, item.Namespace),
+			Namespace:     firstNonEmpty(item.ApolloNamespace, item.Namespace),
 			RuleNamespace: item.ApolloRuleNamespace,
 			Operator:      currentOperator(f),
 			Reason:        f.Reason,
 			Timeout:       f.Timeout,
 		})
 	}
-	namespace := firstNonEmpty(namespaceOverride, item.Namespace)
-	client := api.NewClient(item.Server, item.Username, password, namespace, f.Timeout)
+	client := api.NewClient(item.Server, item.Username, password, item.Namespace, f.Timeout)
 	return nacos.New(client, item.Server), nil
 }
 

@@ -811,11 +811,11 @@ func configContextDiff(ctx context.Context, f *cliFlags, key, sourceContext, tar
 	if key == "" {
 		return apperrors.New(apperrors.CodeUsageError, "--key is required", nil)
 	}
-	source, err := buildBackendFromNamedContext(ctx, f, sourceContext, "")
+	source, err := buildBackendFromNamedContext(ctx, f, sourceContext)
 	if err != nil {
 		return err
 	}
-	target, err := buildBackendFromNamedContext(ctx, f, targetContext, "")
+	target, err := buildBackendFromNamedContext(ctx, f, targetContext)
 	if err != nil {
 		return err
 	}

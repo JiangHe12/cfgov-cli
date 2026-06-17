@@ -52,6 +52,8 @@ func Set(name string, item Context) error { return store.SetContext(name, item) 
 
 func Use(name string) error { return store.UseContext(name) }
 
+func Delete(name string) error { return store.DeleteContext(name) }
+
 func ResolvePassword(ctx context.Context, name string, item Context) (string, error) {
 	return item.ResolvePasswordContext(ctx, name)
 }
