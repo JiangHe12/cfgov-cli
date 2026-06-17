@@ -171,6 +171,10 @@ func (b *Backend) Get(ctx context.Context, coord cfgov.Coordinate) (cfgov.Blob, 
 	return cfgov.Blob{Coordinate: cfgov.Coordinate{Namespace: ns, Key: key}, Content: content, Revision: itemRevision(item, content)}, nil
 }
 
+func (b *Backend) ValidateKey(key string) error {
+	return validatePart("key", key, false)
+}
+
 func (b *Backend) Put(ctx context.Context, req cfgov.PutRequest) (cfgov.Blob, error) {
 	ns, key, err := b.resolve(req.Coordinate)
 	if err != nil {
@@ -235,6 +239,11 @@ func (b *Backend) List(ctx context.Context, opts cfgov.ListOptions) ([]cfgov.Lis
 	if err := validatePart("namespace", ns, false); err != nil {
 		return nil, err
 	}
+	if opts.Query != "" {
+		if err := b.ValidateKey(opts.Query); err != nil {
+			return nil, err
+		}
+	}
 	body, status, err := b.do(ctx, http.MethodGet, b.itemsPath(ns), nil, nil)
 	if err != nil {
 		return nil, err
@@ -248,6 +257,9 @@ func (b *Backend) List(ctx context.Context, opts cfgov.ListOptions) ([]cfgov.Lis
 	}
 	out := make([]cfgov.ListItem, 0, len(items))
 	for _, item := range items {
+		if opts.Query != "" && item.Key != opts.Query {
+			continue
+		}
 		if opts.Prefix != "" && !strings.HasPrefix(item.Key, opts.Prefix) {
 			continue
 		}

@@ -24,6 +24,13 @@ func (f fakeConfigBackend) Get(_ context.Context, coord cfgov.Coordinate) (cfgov
 	return cfgov.Blob{Coordinate: coord, Content: content, Revision: sha256Bytes(content)}, nil
 }
 
+func (f fakeConfigBackend) ValidateKey(key string) error {
+	if key == "" || key == ".." {
+		return apperrors.New(apperrors.CodeValidationFailed, "invalid key", nil)
+	}
+	return nil
+}
+
 func (f fakeConfigBackend) Put(context.Context, cfgov.PutRequest) (cfgov.Blob, error) {
 	return cfgov.Blob{}, nil
 }

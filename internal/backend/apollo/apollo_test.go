@@ -59,6 +59,21 @@ func TestResolveRejectsUnsafeKey(t *testing.T) {
 	}
 }
 
+func TestValidateKeyRejectsUnsafeKeyWithoutNacosMessage(t *testing.T) {
+	t.Parallel()
+	backend, err := New(Options{Server: "http://apollo.example", AppID: "cfgov"})
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+	err = backend.ValidateKey("../..")
+	if apperrors.AsAppError(err).Code != apperrors.CodeValidationFailed {
+		t.Fatalf("key error = %v, want validation failed", err)
+	}
+	if strings.Contains(err.Error(), "group/dataId") {
+		t.Fatalf("apollo key error leaked Nacos wording: %v", err)
+	}
+}
+
 func TestRedactURLHidesSensitiveQuery(t *testing.T) {
 	t.Parallel()
 	out := redactURL("http://apollo.example/openapi/v1/items?token=secret&accessToken=abc&key=plain")

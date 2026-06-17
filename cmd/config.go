@@ -7,7 +7,10 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"encoding/xml"
+	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -54,10 +57,11 @@ func configGetCmd(f *cliFlags) *cobra.Command {
 		Short: "Read a config blob",
 		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			if _, err := cfgov.ParseNacosKey(key); err != nil {
+			backend, ctxMeta, err := buildBackend(f)
+			if err != nil {
 				return err
 			}
-			backend, ctxMeta, err := buildBackend(f)
+			key, err = validateConfigKey(backend, key)
 			if err != nil {
 				return err
 			}
@@ -87,7 +91,7 @@ func configGetCmd(f *cliFlags) *cobra.Command {
 }
 
 func configListCmd(f *cliFlags) *cobra.Command {
-	var group, prefix string
+	var group, query, prefix string
 	var page, pageSize, limit int
 	cmd := &cobra.Command{
 		Use:   "list",
@@ -98,9 +102,16 @@ func configListCmd(f *cliFlags) *cobra.Command {
 			if err != nil {
 				return err
 			}
+			if query != "" {
+				query, err = validateConfigKey(backend, query)
+				if err != nil {
+					return err
+				}
+			}
 			items, err := backend.List(cmd.Context(), cfgov.ListOptions{
 				Namespace: backend.Describe().Namespace,
 				Group:     group,
+				Query:     query,
 				Prefix:    prefix,
 				Page:      page,
 				PageSize:  pageSize,
@@ -127,6 +138,7 @@ func configListCmd(f *cliFlags) *cobra.Command {
 		},
 	}
 	cmd.Flags().StringVar(&group, "group", "", "Nacos group filter")
+	cmd.Flags().StringVarP(&query, "query", "q", "", "Exact key/dataId search")
 	cmd.Flags().StringVar(&prefix, "prefix", "", "Key prefix/search filter")
 	cmd.Flags().IntVar(&page, "page", 1, "Page number")
 	cmd.Flags().IntVar(&pageSize, "page-size", 20, "Items per page")
@@ -135,20 +147,21 @@ func configListCmd(f *cliFlags) *cobra.Command {
 }
 
 func configDiffCmd(f *cliFlags) *cobra.Command {
-	var key, file string
+	var key, file, inlineContent string
 	cmd := &cobra.Command{
-		Use:   "diff --key <key> --file <path>",
-		Short: "Compare remote config with a local file",
+		Use:   "diff --key <key> (--file <path>|--content <string>)",
+		Short: "Compare remote config with local content",
 		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			if _, err := cfgov.ParseNacosKey(key); err != nil {
+			backend, ctxMeta, err := buildBackend(f)
+			if err != nil {
 				return err
 			}
-			local, err := os.ReadFile(file) //nolint:gosec // Operator supplied path.
+			key, err = validateConfigKey(backend, key)
 			if err != nil {
-				return apperrors.New(apperrors.CodeLocalIOError, "failed to read local file", err)
+				return err
 			}
-			backend, ctxMeta, err := buildBackend(f)
+			local, err := readConfigInput(inlineContent, file)
 			if err != nil {
 				return err
 			}
@@ -168,21 +181,21 @@ func configDiffCmd(f *cliFlags) *cobra.Command {
 	}
 	cmd.Flags().StringVar(&key, "key", "", "Config key: dataId or group/dataId")
 	cmd.Flags().StringVar(&file, "file", "", "Local file")
+	cmd.Flags().StringVar(&inlineContent, "content", "", "Config content")
 	_ = cmd.MarkFlagRequired("key")
-	_ = cmd.MarkFlagRequired("file")
 	return cmd
 }
 
 func configValidateCmd(f *cliFlags) *cobra.Command {
-	var file, contentType string
+	var file, inlineContent, contentType string
 	cmd := &cobra.Command{
-		Use:   "validate --file <path>",
-		Short: "Validate a local config file",
+		Use:   "validate (--file <path>|--content <string>)",
+		Short: "Validate local config content",
 		Args:  cobra.NoArgs,
 		RunE: func(_ *cobra.Command, _ []string) error {
-			content, err := os.ReadFile(file) //nolint:gosec // Operator supplied path.
+			content, err := readConfigInput(inlineContent, file)
 			if err != nil {
-				return apperrors.New(apperrors.CodeLocalIOError, "failed to read local file", err)
+				return err
 			}
 			if contentType == "" {
 				contentType = inferType(file)
@@ -190,6 +203,7 @@ func configValidateCmd(f *cliFlags) *cobra.Command {
 			err = validateContent(content, contentType)
 			data := map[string]any{
 				"file":   file,
+				"source": configInputSource(inlineContent, file),
 				"type":   contentType,
 				"valid":  err == nil,
 				"sha256": sha256Bytes(content),
@@ -206,8 +220,8 @@ func configValidateCmd(f *cliFlags) *cobra.Command {
 		},
 	}
 	cmd.Flags().StringVar(&file, "file", "", "Local file")
-	cmd.Flags().StringVar(&contentType, "type", "", "Config type: text, properties, json, yaml")
-	_ = cmd.MarkFlagRequired("file")
+	cmd.Flags().StringVar(&inlineContent, "content", "", "Config content")
+	cmd.Flags().StringVar(&contentType, "type", "", "Config type: text, properties, json, yaml, xml")
 	return cmd
 }
 
@@ -218,10 +232,11 @@ func configPullCmd(f *cliFlags) *cobra.Command {
 		Short: "Pull a remote config into a local file",
 		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			if _, err := cfgov.ParseNacosKey(key); err != nil {
+			backend, ctxMeta, err := buildBackend(f)
+			if err != nil {
 				return err
 			}
-			backend, ctxMeta, err := buildBackend(f)
+			key, err = validateConfigKey(backend, key)
 			if err != nil {
 				return err
 			}
@@ -258,10 +273,11 @@ func configHistoryCmd(f *cliFlags) *cobra.Command {
 		Short: "Show config history",
 		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			if _, err := cfgov.ParseNacosKey(key); err != nil {
+			backend, ctxMeta, err := buildBackend(f)
+			if err != nil {
 				return err
 			}
-			backend, ctxMeta, err := buildBackend(f)
+			key, err = validateConfigKey(backend, key)
 			if err != nil {
 				return err
 			}
@@ -306,13 +322,14 @@ func configListenCmd(f *cliFlags) *cobra.Command {
 		Short: "Watch one config with bounded long-polling",
 		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			if _, err := cfgov.ParseNacosKey(key); err != nil {
-				return err
-			}
 			if maxEvents <= 0 {
 				return apperrors.New(apperrors.CodeUsageError, "--max-events must be greater than 0", nil)
 			}
 			backend, ctxMeta, err := buildBackend(f)
+			if err != nil {
+				return err
+			}
+			key, err = validateConfigKey(backend, key)
 			if err != nil {
 				return err
 			}
@@ -356,31 +373,35 @@ func configListenCmd(f *cliFlags) *cobra.Command {
 }
 
 func configPushCmd(f *cliFlags) *cobra.Command {
-	var key, file, contentType, expectedRevision string
+	var key, file, inlineContent, contentType, expectedRevision string
+	var noValidate bool
 	cmd := &cobra.Command{
-		Use:   "push --key <key> --file <path>",
+		Use:   "push --key <key> (--file <path>|--content <string>)",
 		Short: "Write a config blob",
 		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			if _, err := cfgov.ParseNacosKey(key); err != nil {
-				return err
-			}
-			content, err := os.ReadFile(file) //nolint:gosec // CLI reads the operator-specified config file.
-			if err != nil {
-				return apperrors.New(apperrors.CodeLocalIOError, "failed to read config file", err)
-			}
-			if contentType == "" {
-				contentType = inferType(file)
-			}
-			contentType = normalizeType(contentType)
-			if err := validateContent(content, contentType); err != nil {
-				return err
-			}
-			class := cfgclass.Classify(cfgclass.OperationPush, content, contentType)
 			backend, ctxMeta, err := buildBackend(f)
 			if err != nil {
 				return err
 			}
+			key, err = validateConfigKey(backend, key)
+			if err != nil {
+				return err
+			}
+			content, err := readConfigInput(inlineContent, file)
+			if err != nil {
+				return err
+			}
+			if contentType == "" {
+				contentType = inferType(firstNonEmpty(file, key))
+			}
+			contentType = normalizeType(contentType)
+			if !noValidate {
+				if err := validateContent(content, contentType); err != nil {
+					return err
+				}
+			}
+			class := cfgclass.Classify(cfgclass.OperationPush, content, contentType)
 			coord := cfgov.Coordinate{Namespace: backend.Describe().Namespace, Key: key}
 			plan := pushPlan(cmd.Context(), backend, coord, content, class)
 			if f.DryRun {
@@ -419,10 +440,11 @@ func configPushCmd(f *cliFlags) *cobra.Command {
 	}
 	cmd.Flags().StringVar(&key, "key", "", "Config key: dataId or group/dataId")
 	cmd.Flags().StringVar(&file, "file", "", "Config file to push")
-	cmd.Flags().StringVar(&contentType, "type", "", "Config type: text, properties, json, yaml")
+	cmd.Flags().StringVar(&inlineContent, "content", "", "Config content")
+	cmd.Flags().StringVar(&contentType, "type", "", "Config type: text, properties, json, yaml, xml")
 	cmd.Flags().StringVar(&expectedRevision, "expected-revision", "", "CAS revision precondition")
+	cmd.Flags().BoolVar(&noValidate, "no-validate", false, "Skip local content format validation")
 	_ = cmd.MarkFlagRequired("key")
-	_ = cmd.MarkFlagRequired("file")
 	return cmd
 }
 
@@ -433,10 +455,11 @@ func configDeleteCmd(f *cliFlags) *cobra.Command {
 		Short: "Delete a config blob",
 		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			if _, err := cfgov.ParseNacosKey(key); err != nil {
+			backend, ctxMeta, err := buildBackend(f)
+			if err != nil {
 				return err
 			}
-			backend, ctxMeta, err := buildBackend(f)
+			key, err = validateConfigKey(backend, key)
 			if err != nil {
 				return err
 			}
@@ -546,15 +569,15 @@ func maybeBackupConfig(ctx context.Context, f *cliFlags, backend cfgov.Backend, 
 	if err != nil {
 		return nil, err
 	}
-	key, err := cfgov.ParseNacosKey(coord.Key)
+	group, dataID, err := backupIdentity(backend, coord.Key)
 	if err != nil {
 		return nil, err
 	}
 	result, err := backup.Write(root, backup.Request{
 		Context:   f.contextName(),
 		Namespace: namespaceOrPublic(coord.Namespace),
-		Group:     key.Group,
-		DataID:    key.DataID,
+		Group:     group,
+		DataID:    dataID,
 		Content:   blob.Content,
 		Operator:  currentOperator(f),
 	})
@@ -599,8 +622,45 @@ func validateContent(content []byte, contentType string) error {
 		if err := yaml.Unmarshal(content, &v); err != nil {
 			return apperrors.New(apperrors.CodeValidationFailed, "invalid yaml config", err)
 		}
+	case "xml":
+		if err := validateXML(content); err != nil {
+			return err
+		}
 	default:
 		return apperrors.New(apperrors.CodeValidationFailed, "unsupported config type", nil)
+	}
+	return nil
+}
+
+func validateXML(content []byte) error {
+	decoder := xml.NewDecoder(bytes.NewReader(content))
+	seenRoot := false
+	depth := 0
+	for {
+		tok, err := decoder.Token()
+		if err != nil {
+			if errors.Is(err, io.EOF) {
+				break
+			}
+			return apperrors.New(apperrors.CodeValidationFailed, "invalid xml config", err)
+		}
+		switch tok.(type) {
+		case xml.StartElement:
+			if depth == 0 {
+				if seenRoot {
+					return apperrors.New(apperrors.CodeValidationFailed, "invalid xml config", nil)
+				}
+				seenRoot = true
+			}
+			depth++
+		case xml.EndElement:
+			if depth > 0 {
+				depth--
+			}
+		}
+	}
+	if !seenRoot {
+		return apperrors.New(apperrors.CodeValidationFailed, "invalid xml config", nil)
 	}
 	return nil
 }
@@ -628,6 +688,8 @@ func inferType(file string) string {
 		return "yaml"
 	case strings.HasSuffix(lower, ".properties"):
 		return "properties"
+	case strings.HasSuffix(lower, ".xml"):
+		return "xml"
 	default:
 		return "text"
 	}
@@ -643,9 +705,60 @@ func normalizeType(contentType string) string {
 		return "json"
 	case "yaml", "yml":
 		return "yaml"
+	case "xml":
+		return "xml"
 	default:
 		return strings.ToLower(strings.TrimSpace(contentType))
 	}
+}
+
+func readConfigInput(content, file string) ([]byte, error) {
+	if content != "" && file != "" {
+		return nil, apperrors.New(apperrors.CodeUsageError, "--content and --file are mutually exclusive", nil)
+	}
+	if content == "" && file == "" {
+		return nil, apperrors.New(apperrors.CodeUsageError, "specify --content or --file", nil)
+	}
+	if file == "" {
+		return []byte(content), nil
+	}
+	data, err := os.ReadFile(file) //nolint:gosec // Operator supplied path.
+	if err != nil {
+		return nil, apperrors.New(apperrors.CodeLocalIOError, "failed to read local file", err)
+	}
+	return data, nil
+}
+
+func configInputSource(content, file string) string {
+	if file != "" {
+		return "file"
+	}
+	if content != "" {
+		return "content"
+	}
+	return ""
+}
+
+func validateConfigKey(backend cfgov.Backend, key string) (string, error) {
+	key = strings.TrimSpace(key)
+	if err := backend.ValidateKey(key); err != nil {
+		return "", err
+	}
+	return key, nil
+}
+
+func backupIdentity(backend cfgov.Backend, key string) (string, string, error) {
+	if backend.Describe().Backend == "nacos" {
+		parsed, err := cfgov.ParseNacosKey(key)
+		if err != nil {
+			return "", "", err
+		}
+		return parsed.Group, parsed.DataID, nil
+	}
+	if err := backend.ValidateKey(key); err != nil {
+		return "", "", err
+	}
+	return backend.Describe().Backend, key, nil
 }
 
 func diffSummary(remote, local []byte) diffResult {

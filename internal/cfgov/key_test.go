@@ -20,6 +20,8 @@ func TestParseNacosKey(t *testing.T) {
 		{key: "../..", wantErr: true},
 		{key: "OPS/..", wantErr: true},
 		{key: "../app.yaml", wantErr: true},
+		{key: "OPS/a/../b", wantErr: true},
+		{key: `OPS\a\..\b`, wantErr: true},
 	}
 	for _, tt := range tests {
 		t.Run(tt.key, func(t *testing.T) {

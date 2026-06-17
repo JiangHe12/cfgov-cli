@@ -33,6 +33,7 @@ type DeleteRequest struct {
 type ListOptions struct {
 	Namespace string
 	Group     string
+	Query     string
 	Prefix    string
 	Page      int
 	PageSize  int
@@ -87,6 +88,7 @@ type Capabilities struct {
 }
 
 type Backend interface {
+	ValidateKey(key string) error
 	Get(ctx context.Context, coord Coordinate) (Blob, error)
 	Put(ctx context.Context, req PutRequest) (Blob, error)
 	Delete(ctx context.Context, req DeleteRequest) error

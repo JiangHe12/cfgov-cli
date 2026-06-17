@@ -31,6 +31,11 @@ var (
 	_ cfgov.RuleStore        = (*Backend)(nil)
 )
 
+func (b *Backend) ValidateKey(key string) error {
+	_, err := cfgov.ParseNacosKey(key)
+	return err
+}
+
 func (b *Backend) Get(ctx context.Context, coord cfgov.Coordinate) (cfgov.Blob, error) {
 	if err := b.requireNamespace(coord.Namespace); err != nil {
 		return cfgov.Blob{}, err
@@ -85,6 +90,11 @@ func (b *Backend) List(ctx context.Context, opts cfgov.ListOptions) ([]cfgov.Lis
 	if err := b.requireNamespace(opts.Namespace); err != nil {
 		return nil, err
 	}
+	if opts.Query != "" {
+		if err := b.ValidateKey(opts.Query); err != nil {
+			return nil, err
+		}
+	}
 	limit := opts.Limit
 	if limit <= 0 {
 		limit = 100
@@ -98,13 +108,13 @@ func (b *Backend) List(ctx context.Context, opts cfgov.ListOptions) ([]cfgov.Lis
 		if pageSize <= 0 {
 			pageSize = 20
 		}
-		paged, err := b.client.ListConfigs(ctx, opts.Group, opts.Prefix, page, pageSize)
+		paged, err := b.client.ListConfigs(ctx, opts.Group, firstNonEmpty(opts.Query, opts.Prefix), page, pageSize)
 		if err != nil {
 			return nil, err
 		}
 		return listItems(opts.Namespace, paged.PageItems), nil
 	}
-	list, _, err := b.client.ListConfigsAll(ctx, opts.Group, opts.Prefix, 50, limit)
+	list, _, err := b.client.ListConfigsAll(ctx, opts.Group, firstNonEmpty(opts.Query, opts.Prefix), 50, limit)
 	if err != nil {
 		return nil, err
 	}
@@ -351,4 +361,13 @@ func (b *Backend) checkCAS(ctx context.Context, coord cfgov.Coordinate, expected
 func md5Hex(content []byte) string {
 	sum := md5.Sum(content) // #nosec G401 -- Nacos revision compatibility fingerprint, not cryptography.
 	return hex.EncodeToString(sum[:])
+}
+
+func firstNonEmpty(values ...string) string {
+	for _, value := range values {
+		if value != "" {
+			return value
+		}
+	}
+	return ""
 }

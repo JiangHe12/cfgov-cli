@@ -37,6 +37,27 @@ func TestValidateContentRejectsMalformedJSON(t *testing.T) {
 	}
 }
 
+func TestValidateContentRejectsMalformedXML(t *testing.T) {
+	err := validateContent([]byte(`<root>`), "xml")
+	if apperrors.AsAppError(err).Code != apperrors.CodeValidationFailed {
+		t.Fatalf("error = %v, want validation failed", err)
+	}
+	if err := validateContent([]byte(`<root/>`), "xml"); err != nil {
+		t.Fatalf("valid xml rejected: %v", err)
+	}
+	err = validateContent([]byte(`<a/><b/>`), "xml")
+	if apperrors.AsAppError(err).Code != apperrors.CodeValidationFailed {
+		t.Fatalf("multi-root xml error = %v, want validation failed", err)
+	}
+}
+
+func TestReadConfigInputContentAndFileAreMutuallyExclusive(t *testing.T) {
+	_, err := readConfigInput("inline", "file")
+	if apperrors.AsAppError(err).Code != apperrors.CodeUsageError {
+		t.Fatalf("error = %v, want usage error", err)
+	}
+}
+
 func TestBuildBackendRequiresContextOrServer(t *testing.T) {
 	cfgovctx.SetConfigPath(filepath.Join(t.TempDir(), "config.yaml"))
 	_, _, err := buildBackend(newDefaultFlags())

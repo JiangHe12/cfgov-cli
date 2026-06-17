@@ -231,13 +231,14 @@ func configRollbackCmd(f *cliFlags) *cobra.Command {
 		Short: "Rollback one config from backup or history",
 		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			if _, err := cfgov.ParseNacosKey(key); err != nil {
-				return err
-			}
 			if countNonEmpty(backupFile, backupID, historyID) != 1 {
 				return apperrors.New(apperrors.CodeUsageError, "specify exactly one of --backup-file, --backup-id, or --history-id", nil)
 			}
 			backend, ctxMeta, err := buildBackend(f)
+			if err != nil {
+				return err
+			}
+			key, err = validateConfigKey(backend, key)
 			if err != nil {
 				return err
 			}
@@ -358,6 +359,11 @@ func applyUpserts(ctx context.Context, f *cliFlags, backend cfgov.Backend, meta 
 		if err := ctx.Err(); err != nil {
 			return err
 		}
+		key, err := validateConfigKey(backend, item.Key)
+		if err != nil {
+			return err
+		}
+		item.Key = key
 		class := cfgclass.Classify(cfgclass.OperationPush, item.Content, item.Type)
 		if err := authorize(f, class.Risk, meta, ""); err != nil {
 			return err
@@ -398,9 +404,6 @@ func readLocalConfigs(dir string) ([]localConfig, error) {
 			return nil
 		}
 		key := filepath.ToSlash(rel)
-		if _, err := cfgov.ParseNacosKey(key); err != nil {
-			return err
-		}
 		content, err := os.ReadFile(path) //nolint:gosec // path comes from operator-selected import directory walk.
 		if err != nil {
 			return err
@@ -421,9 +424,6 @@ func readManifestConfigs(dir string, data []byte) ([]localConfig, error) {
 	}
 	items := make([]localConfig, 0, len(archive.Items))
 	for _, entry := range archive.Items {
-		if _, err := cfgov.ParseNacosKey(entry.Key); err != nil {
-			return nil, err
-		}
 		cleanFile := filepath.Clean(filepath.FromSlash(entry.File))
 		if entry.File == "" || filepath.IsAbs(cleanFile) || cleanFile == "." || cleanFile == ".." || strings.HasPrefix(cleanFile, ".."+string(filepath.Separator)) {
 			return nil, apperrors.New(apperrors.CodeValidationFailed, "manifest contains unsafe file path", nil)
@@ -443,9 +443,14 @@ func readManifestConfigs(dir string, data []byte) ([]localConfig, error) {
 func buildUpsertPlan(ctx context.Context, backend cfgov.Backend, namespace string, locals []localConfig, action string) (configPlan, error) {
 	plan := configPlan{ResourceType: "config", Action: action, Risk: safety.R1}
 	for _, item := range orderedLocals(locals) {
-		coord := cfgov.Coordinate{Namespace: namespace, Key: item.Key}
+		key, err := validateConfigKey(backend, item.Key)
+		if err != nil {
+			return plan, err
+		}
+		item.Key = key
+		coord := cfgov.Coordinate{Namespace: namespace, Key: key}
 		remote, err := backend.Get(ctx, coord)
-		entry := planItem{Key: item.Key, LocalSHA256: sha256Bytes(item.Content), Bytes: len(item.Content)}
+		entry := planItem{Key: key, LocalSHA256: sha256Bytes(item.Content), Bytes: len(item.Content)}
 		if err != nil {
 			if apperrors.AsAppError(err).Code == apperrors.CodeResourceNotFound {
 				plan.Create = append(plan.Create, entry)
@@ -492,7 +497,8 @@ func buildReconcilePlan(ctx context.Context, backend cfgov.Backend, namespace st
 
 func sourceConfigs(ctx context.Context, backend cfgov.Backend, key, prefix string) ([]localConfig, error) {
 	if key != "" {
-		if _, err := cfgov.ParseNacosKey(key); err != nil {
+		key, err := validateConfigKey(backend, key)
+		if err != nil {
 			return nil, err
 		}
 		blob, err := backend.Get(ctx, cfgov.Coordinate{Namespace: backend.Describe().Namespace, Key: key})
