@@ -50,7 +50,18 @@ type ruleValidationResult struct {
 
 func newRuleCmd(f *cliFlags) *cobra.Command {
 	cmd := &cobra.Command{Use: "rule", Short: "Read and validate Sentinel rules"}
-	cmd.AddCommand(ruleListCmd(f), ruleGetCmd(f), ruleExportCmd(f), ruleDiffCmd(f), ruleValidateCmd(f))
+	cmd.AddCommand(
+		ruleListCmd(f),
+		ruleGetCmd(f),
+		ruleExportCmd(f),
+		ruleDiffCmd(f),
+		ruleValidateCmd(f),
+		ruleCreateCmd(f),
+		ruleUpdateCmd(f),
+		ruleImportCmd(f),
+		ruleDeleteCmd(f),
+		ruleRollbackCmd(f),
+	)
 	return cmd
 }
 

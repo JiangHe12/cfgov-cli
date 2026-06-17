@@ -37,6 +37,7 @@ const (
 	allowProductionPrune        = safety.AllowFlag("allow-production-prune")
 	allowProductionNamespaceDel = safety.AllowFlag("allow-production-namespace-delete")
 	allowProductionServiceDereg = safety.AllowFlag("allow-production-service-deregister")
+	allowProductionRuleDelete   = safety.AllowFlag("allow-production-rule-delete")
 )
 
 type cliFlags struct {
@@ -63,6 +64,7 @@ type cliFlags struct {
 	AllowPrune    bool
 	AllowNSDel    bool
 	AllowSvcDereg bool
+	AllowRuleDel  bool
 	Concurrency   int
 	OTLPEnd       string
 	OTLPMetrics   string
@@ -161,6 +163,7 @@ func newRootCmdWith(f *cliFlags) *cobra.Command {
 	cmd.PersistentFlags().BoolVar(&f.AllowPrune, "allow-production-prune", false, "Allow protected reconcile prune actions")
 	cmd.PersistentFlags().BoolVar(&f.AllowNSDel, "allow-production-namespace-delete", false, "Allow protected namespace delete")
 	cmd.PersistentFlags().BoolVar(&f.AllowSvcDereg, "allow-production-service-deregister", false, "Allow protected service deregister")
+	cmd.PersistentFlags().BoolVar(&f.AllowRuleDel, "allow-production-rule-delete", false, "Allow protected Sentinel rule delete")
 	cmd.PersistentFlags().IntVar(&f.Concurrency, "concurrency", 1, "Maximum concurrent batch operations")
 	cmd.PersistentFlags().StringVar(&f.OTLPEnd, "otel-endpoint", "", "OTLP trace endpoint")
 	cmd.PersistentFlags().StringVar(&f.OTLPMetrics, "otel-metrics-endpoint", "", "OTLP metrics endpoint")
@@ -264,6 +267,7 @@ func authorize(f *cliFlags, base safety.Risk, meta cfgovctx.Context, required sa
 			allowProductionPrune:        f.AllowPrune,
 			allowProductionNamespaceDel: f.AllowNSDel,
 			allowProductionServiceDereg: f.AllowSvcDereg,
+			allowProductionRuleDelete:   f.AllowRuleDel,
 		},
 		Roles:    meta.Roles,
 		Operator: currentOperator(f),

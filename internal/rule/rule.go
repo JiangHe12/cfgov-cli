@@ -2,6 +2,7 @@ package rule
 
 import (
 	"fmt"
+	"path"
 	"path/filepath"
 	"strings"
 
@@ -77,4 +78,26 @@ func InferTypeFromPath(path string) (Type, error) {
 		}
 	}
 	return "", apperrors.New(apperrors.CodeValidationFailed, "cannot infer rule type from file name", nil)
+}
+
+func Key(item map[string]any, ruleType Type) string {
+	if ruleType == TypeParam {
+		return fmt.Sprint(item["resource"]) + "\x00" + fmt.Sprint(item["paramIdx"])
+	}
+	limitApp := strings.TrimSpace(fmt.Sprint(item["limitApp"]))
+	if limitApp == "" || limitApp == "<nil>" {
+		limitApp = "default"
+	}
+	return fmt.Sprint(item["resource"]) + "\x00" + limitApp
+}
+
+func TypeFromDataID(dataID string) (Type, error) {
+	base := path.Base(strings.TrimSpace(dataID))
+	for _, ruleType := range AllTypes {
+		suffix := "-" + string(ruleType) + "-rules"
+		if strings.HasSuffix(base, suffix) {
+			return ruleType, nil
+		}
+	}
+	return "", apperrors.New(apperrors.CodeValidationFailed, "cannot infer rule type from backup dataId", nil)
 }
