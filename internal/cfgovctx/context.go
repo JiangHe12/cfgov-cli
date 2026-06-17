@@ -11,9 +11,13 @@ import (
 const SupportedContextAPIVersion = "cfgov-cli.io/context/v1"
 
 type Context struct {
-	corectx.Base `yaml:",inline"`
-	Backend      string `yaml:"backend"`
-	Namespace    string `yaml:"namespace,omitempty"`
+	corectx.Base    `yaml:",inline"`
+	Backend         string `yaml:"backend"`
+	Namespace       string `yaml:"namespace,omitempty"`
+	ApolloAppID     string `yaml:"apolloAppId,omitempty"`
+	ApolloEnv       string `yaml:"apolloEnv,omitempty"`
+	ApolloCluster   string `yaml:"apolloCluster,omitempty"`
+	ApolloNamespace string `yaml:"apolloNamespace,omitempty"`
 }
 
 func (c *Context) base() *corectx.Base { return &c.Base }

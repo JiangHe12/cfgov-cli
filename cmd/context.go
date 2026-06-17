@@ -21,6 +21,12 @@ func newContextCmd(f *cliFlags) *cobra.Command {
 func ctxSetCmd(f *cliFlags) *cobra.Command {
 	var protected bool
 	var credentialBackend string
+	var apolloAppID string
+	var apolloEnv string
+	var apolloCluster string
+	var apolloNamespace string
+	var apolloToken string
+	var apolloSecret string
 	cmd := &cobra.Command{
 		Use:   "set <name>",
 		Short: "Set a backend-bound context",
@@ -29,11 +35,21 @@ func ctxSetCmd(f *cliFlags) *cobra.Command {
 			if f.Backend == "" {
 				return apperrors.New(apperrors.CodeUsageError, "--backend is required", nil)
 			}
-			if f.Backend != "nacos" {
-				return apperrors.New(apperrors.CodeNotImplemented, "only nacos backend is supported in P0", nil)
+			if f.Backend != "nacos" && f.Backend != "apollo" {
+				return apperrors.New(apperrors.CodeNotImplemented, "backend is not supported", nil)
 			}
 			if err := validateServerURL(f.Server); err != nil {
 				return err
+			}
+			if f.Backend == "apollo" && apolloAppID == "" {
+				return apperrors.New(apperrors.CodeUsageError, "--apollo-app-id is required for apollo backend", nil)
+			}
+			if apolloToken != "" && apolloSecret != "" {
+				return apperrors.New(apperrors.CodeUsageError, "--apollo-token and --apollo-secret are mutually exclusive", nil)
+			}
+			credential := firstNonEmpty(f.Password, apolloToken, apolloSecret)
+			if f.Backend == "apollo" && credential != "" && (credentialBackend == "" || credentialBackend == "plain-yaml") {
+				return apperrors.New(apperrors.CodeUsageError, "apollo token must use a non-plain credential backend", nil)
 			}
 			item := cfgovctx.Context{
 				Base: corectx.Base{
@@ -43,11 +59,15 @@ func ctxSetCmd(f *cliFlags) *cobra.Command {
 					CredentialBackend: credentialBackend,
 					OTLPRedact:        true,
 				},
-				Backend:   f.Backend,
-				Namespace: f.Namespace,
+				Backend:         f.Backend,
+				Namespace:       f.Namespace,
+				ApolloAppID:     apolloAppID,
+				ApolloEnv:       apolloEnv,
+				ApolloCluster:   apolloCluster,
+				ApolloNamespace: firstNonEmpty(apolloNamespace, f.Namespace),
 			}
 			var err error
-			item, err = cfgovctx.StoreCredential(cmd.Context(), args[0], credentialBackend, f.Password, item)
+			item, err = cfgovctx.StoreCredential(cmd.Context(), args[0], credentialBackend, credential, item)
 			if err != nil {
 				return apperrors.New(apperrors.CodeCredentialStoreError, "failed to store credential", err)
 			}
@@ -61,11 +81,25 @@ func ctxSetCmd(f *cliFlags) *cobra.Command {
 				"server":    item.Server,
 				"namespace": item.Namespace,
 				"protected": item.Protected,
+				"apollo": map[string]string{
+					"appId":     item.ApolloAppID,
+					"env":       item.ApolloEnv,
+					"cluster":   item.ApolloCluster,
+					"namespace": item.ApolloNamespace,
+				},
 			})
 		},
 	}
 	cmd.Flags().BoolVar(&protected, "protected", false, "Mark context as protected")
 	cmd.Flags().StringVar(&credentialBackend, "credential-backend", "plain-yaml", "Credential backend")
+	cmd.Flags().StringVar(&apolloAppID, "apollo-app-id", "", "Apollo OpenAPI appId")
+	cmd.Flags().StringVar(&apolloEnv, "apollo-env", "", "Apollo environment")
+	cmd.Flags().StringVar(&apolloCluster, "apollo-cluster", "", "Apollo cluster")
+	cmd.Flags().StringVar(&apolloNamespace, "apollo-namespace", "", "Apollo namespace")
+	cmd.Flags().StringVar(&apolloToken, "apollo-token", "", "Apollo OpenAPI token")
+	cmd.Flags().StringVar(&apolloSecret, "apollo-secret", "", "Apollo OpenAPI secret")
+	_ = cmd.Flags().MarkHidden("apollo-token")
+	_ = cmd.Flags().MarkHidden("apollo-secret")
 	return cmd
 }
 
@@ -98,14 +132,18 @@ func ctxListCmd(f *cliFlags) *cobra.Command {
 			for name, item := range cfg.Contexts {
 				current := name == cfg.CurrentContext
 				items = append(items, map[string]any{
-					"name":      name,
-					"current":   current,
-					"backend":   item.Backend,
-					"server":    item.Server,
-					"namespace": item.Namespace,
-					"protected": item.Protected,
+					"name":            name,
+					"current":         current,
+					"backend":         item.Backend,
+					"server":          item.Server,
+					"namespace":       item.Namespace,
+					"protected":       item.Protected,
+					"apolloAppId":     item.ApolloAppID,
+					"apolloEnv":       item.ApolloEnv,
+					"apolloCluster":   item.ApolloCluster,
+					"apolloNamespace": item.ApolloNamespace,
 				})
-				rows = append(rows, []string{name, fmt.Sprint(current), item.Backend, item.Server, item.Namespace, fmt.Sprint(item.Protected)})
+				rows = append(rows, []string{name, fmt.Sprint(current), item.Backend, item.Server, firstNonEmpty(item.Namespace, item.ApolloNamespace), fmt.Sprint(item.Protected)})
 			}
 			p := newPrinter(f)
 			if f.Output == "json" {
@@ -133,6 +171,10 @@ func ctxCurrentCmd(f *cliFlags) *cobra.Command {
 				"server":             item.Server,
 				"namespace":          item.Namespace,
 				"protected":          item.Protected,
+				"apolloAppId":        item.ApolloAppID,
+				"apolloEnv":          item.ApolloEnv,
+				"apolloCluster":      item.ApolloCluster,
+				"apolloNamespace":    item.ApolloNamespace,
 				"credentialBackend":  item.CredentialBackend,
 				"credentialBackends": credstore.Available(),
 			})

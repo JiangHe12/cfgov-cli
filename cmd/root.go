@@ -25,6 +25,7 @@ import (
 	"github.com/JiangHe12/opskit-core/telemetry"
 
 	"github.com/JiangHe12/cfgov-cli/internal/api"
+	apolloBackend "github.com/JiangHe12/cfgov-cli/internal/backend/apollo"
 	nacosbackend "github.com/JiangHe12/cfgov-cli/internal/backend/nacos"
 	"github.com/JiangHe12/cfgov-cli/internal/cfgov"
 	"github.com/JiangHe12/cfgov-cli/internal/cfgovctx"
@@ -215,12 +216,16 @@ func buildBackend(f *cliFlags) (cfgov.Backend, cfgovctx.Context, error) {
 	if backendName == "" {
 		backendName = "nacos"
 	}
-	if backendName != "nacos" {
-		return nil, cfgovctx.Context{}, apperrors.New(apperrors.CodeNotImplemented, "only nacos backend is supported in P0", nil)
-	}
-	server := firstNonEmpty(f.Server, os.Getenv("NACOS_SERVER"), item.Server)
+	server := firstNonEmpty(f.Server, backendServerEnv(backendName), item.Server)
 	if err := validateServerURL(server); err != nil {
 		return nil, cfgovctx.Context{}, err
+	}
+	if backendName == "apollo" {
+		backend, err := buildApolloBackend(f, name, item, server)
+		return backend, item, err
+	}
+	if backendName != "nacos" {
+		return nil, cfgovctx.Context{}, apperrors.New(apperrors.CodeNotImplemented, "backend is not supported", nil)
 	}
 	username := firstNonEmpty(f.Username, os.Getenv("NACOS_USERNAME"), item.Username)
 	password := firstNonEmpty(f.Password, os.Getenv("NACOS_PASSWORD"))
@@ -234,6 +239,39 @@ func buildBackend(f *cliFlags) (cfgov.Backend, cfgovctx.Context, error) {
 	namespace := firstNonEmpty(f.Namespace, os.Getenv("NACOS_NAMESPACE"), item.Namespace)
 	client := api.NewClient(server, username, password, namespace, f.Timeout)
 	return nacosbackend.New(client, server), item, nil
+}
+
+func backendServerEnv(backendName string) string {
+	if backendName == "apollo" {
+		return os.Getenv("APOLLO_SERVER")
+	}
+	return os.Getenv("NACOS_SERVER")
+}
+
+func buildApolloBackend(f *cliFlags, contextName string, item cfgovctx.Context, server string) (cfgov.Backend, error) {
+	token := firstNonEmpty(f.Password, os.Getenv("APOLLO_TOKEN"), os.Getenv("APOLLO_SECRET"))
+	if token == "" {
+		resolved, err := cfgovctx.ResolvePassword(commandContext(f), contextName, item)
+		if err != nil {
+			return nil, err
+		}
+		token = resolved
+	}
+	backend, err := apolloBackend.New(apolloBackend.Options{
+		Server:    server,
+		Token:     token,
+		AppID:     firstNonEmpty(os.Getenv("APOLLO_APP_ID"), item.ApolloAppID, item.Username),
+		Env:       firstNonEmpty(os.Getenv("APOLLO_ENV"), item.ApolloEnv),
+		Cluster:   firstNonEmpty(os.Getenv("APOLLO_CLUSTER"), item.ApolloCluster),
+		Namespace: firstNonEmpty(f.Namespace, os.Getenv("APOLLO_NAMESPACE"), item.ApolloNamespace, item.Namespace),
+		Operator:  currentOperator(f),
+		Reason:    f.Reason,
+		Timeout:   f.Timeout,
+	})
+	if err != nil {
+		return nil, err
+	}
+	return backend, nil
 }
 
 func resolvedContext(f *cliFlags) (cfgovctx.Context, string, error) {

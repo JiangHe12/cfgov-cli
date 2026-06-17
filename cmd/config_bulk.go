@@ -16,6 +16,7 @@ import (
 	"github.com/JiangHe12/opskit-core/safety"
 
 	"github.com/JiangHe12/cfgov-cli/internal/api"
+	apolloBackend "github.com/JiangHe12/cfgov-cli/internal/backend/apollo"
 	"github.com/JiangHe12/cfgov-cli/internal/backend/nacos"
 	"github.com/JiangHe12/cfgov-cli/internal/backup"
 	"github.com/JiangHe12/cfgov-cli/internal/cfgclass"
@@ -572,12 +573,25 @@ func buildBackendFromNamedContext(parent context.Context, f *cliFlags, name, nam
 	if !ok {
 		return nil, apperrors.New(apperrors.CodeUsageError, "source context not found", nil)
 	}
-	if item.Backend != "" && item.Backend != "nacos" {
-		return nil, apperrors.New(apperrors.CodeNotImplemented, "only nacos backend is supported", nil)
+	if item.Backend != "" && item.Backend != "nacos" && item.Backend != "apollo" {
+		return nil, apperrors.New(apperrors.CodeNotImplemented, "backend is not supported", nil)
 	}
 	password, err := cfgovctx.ResolvePassword(parent, name, item)
 	if err != nil {
 		return nil, err
+	}
+	if item.Backend == "apollo" {
+		return apolloBackend.New(apolloBackend.Options{
+			Server:    item.Server,
+			Token:     password,
+			AppID:     item.ApolloAppID,
+			Env:       item.ApolloEnv,
+			Cluster:   item.ApolloCluster,
+			Namespace: firstNonEmpty(namespaceOverride, item.ApolloNamespace, item.Namespace),
+			Operator:  currentOperator(f),
+			Reason:    f.Reason,
+			Timeout:   f.Timeout,
+		})
 	}
 	namespace := firstNonEmpty(namespaceOverride, item.Namespace)
 	client := api.NewClient(item.Server, item.Username, password, namespace, f.Timeout)
