@@ -23,7 +23,11 @@ func New(client *api.Client, server string) *Backend {
 	return &Backend{client: client, server: strings.TrimRight(server, "/")}
 }
 
-var _ cfgov.Backend = (*Backend)(nil)
+var (
+	_ cfgov.Backend          = (*Backend)(nil)
+	_ cfgov.NamespaceManager = (*Backend)(nil)
+	_ cfgov.ServiceRegistry  = (*Backend)(nil)
+)
 
 func (b *Backend) Get(ctx context.Context, coord cfgov.Coordinate) (cfgov.Blob, error) {
 	if err := b.requireNamespace(coord.Namespace); err != nil {
@@ -203,12 +207,104 @@ func (b *Backend) Describe() cfgov.Description {
 func (b *Backend) Capabilities() cfgov.Capabilities {
 	return cfgov.Capabilities{
 		Backend:          "nacos",
-		ResourceTypes:    []string{"config"},
+		ResourceTypes:    []string{"config", "namespace", "service"},
 		Verbs:            []string{"get", "list", "diff", "validate", "pull", "history", "listen", "push", "delete"},
 		SupportsCAS:      true,
 		SupportsRevision: true,
 		SupportsHistory:  true,
 		SupportsWatch:    true,
+	}
+}
+
+func (b *Backend) ListNamespaces(ctx context.Context) ([]cfgov.NamespaceItem, error) {
+	items, err := b.client.ListNamespaces(ctx)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]cfgov.NamespaceItem, 0, len(items))
+	for _, item := range items {
+		out = append(out, cfgov.NamespaceItem{
+			ID:          item.Namespace,
+			Name:        item.NamespaceShowName,
+			Description: item.NamespaceDesc,
+			ConfigCount: item.ConfigCount,
+		})
+	}
+	return out, nil
+}
+
+func (b *Backend) CreateNamespace(ctx context.Context, id, name, description string) error {
+	return b.client.CreateNamespace(ctx, id, name, description)
+}
+
+func (b *Backend) UpdateNamespace(ctx context.Context, id, name, description string) error {
+	return b.client.UpdateNamespace(ctx, id, name, description)
+}
+
+func (b *Backend) DeleteNamespace(ctx context.Context, id string) error {
+	return b.client.DeleteNamespace(ctx, id)
+}
+
+func (b *Backend) NamespaceConfigCount(ctx context.Context, id string) (int, error) {
+	client := b.client.WithNamespace(id)
+	list, truncated, err := client.ListConfigsAll(ctx, "", "", 100, 100000)
+	if err != nil {
+		return 0, err
+	}
+	if list.TotalCount > 0 && !truncated {
+		return list.TotalCount, nil
+	}
+	return len(list.PageItems), nil
+}
+
+func (b *Backend) ListServices(ctx context.Context, page, pageSize int) (cfgov.ServiceList, error) {
+	result, err := b.client.ListServices(ctx, page, pageSize)
+	if err != nil {
+		return cfgov.ServiceList{}, err
+	}
+	return cfgov.ServiceList{Count: result.Count, Names: result.Doms}, nil
+}
+
+func (b *Backend) GetService(ctx context.Context, name string) (map[string]any, error) {
+	return b.client.GetService(ctx, name)
+}
+
+func (b *Backend) ListInstances(ctx context.Context, name, group string) ([]cfgov.ServiceInstance, error) {
+	items, err := b.client.ListInstances(ctx, name, group)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]cfgov.ServiceInstance, 0, len(items))
+	for _, item := range items {
+		out = append(out, cfgov.ServiceInstance{
+			IP:       item.IP,
+			Port:     item.Port,
+			Healthy:  item.Healthy,
+			Enabled:  item.Enabled,
+			Weight:   item.Weight,
+			Metadata: item.Metadata,
+		})
+	}
+	return out, nil
+}
+
+func (b *Backend) RegisterInstance(ctx context.Context, service, ip string, port int, opts cfgov.InstanceOptions) error {
+	return b.client.RegisterInstance(ctx, service, ip, port, apiInstanceOptions(opts))
+}
+
+func (b *Backend) DeregisterInstance(ctx context.Context, service, ip string, port int, opts cfgov.InstanceOptions) error {
+	return b.client.DeregisterInstance(ctx, service, ip, port, apiInstanceOptions(opts))
+}
+
+func apiInstanceOptions(opts cfgov.InstanceOptions) api.InstanceOptions {
+	return api.InstanceOptions{
+		GroupName: opts.GroupName,
+		Cluster:   opts.Cluster,
+		Weight:    opts.Weight,
+		Healthy:   opts.Healthy,
+		Enabled:   opts.Enabled,
+		Ephemeral: opts.Ephemeral,
+		Metadata:  opts.Metadata,
 	}
 }
 

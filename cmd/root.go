@@ -35,39 +35,43 @@ const (
 	auditAPIVersion             = "cfgov-cli.io/audit/v1"
 	allowProductionConfigDelete = safety.AllowFlag("allow-production-config-delete")
 	allowProductionPrune        = safety.AllowFlag("allow-production-prune")
+	allowProductionNamespaceDel = safety.AllowFlag("allow-production-namespace-delete")
+	allowProductionServiceDereg = safety.AllowFlag("allow-production-service-deregister")
 )
 
 type cliFlags struct {
-	Config      string
-	Backend     string
-	Server      string
-	Username    string
-	Password    string
-	Namespace   string
-	Timeout     time.Duration
-	Output      string
-	PlainHead   bool
-	DryRun      bool
-	Plan        bool
-	Diff        bool
-	Yes         bool
-	Backup      bool
-	NoBackup    bool
-	Ticket      string
-	Operator    string
-	Reason      string
-	NonInter    bool
-	AllowDel    bool
-	AllowPrune  bool
-	Concurrency int
-	OTLPEnd     string
-	OTLPMetrics string
-	OTLPInsec   bool
-	contextOnce sync.Once
-	cachedCtx   string
-	commandCtx  context.Context
-	commandName string
-	commandTime time.Time
+	Config        string
+	Backend       string
+	Server        string
+	Username      string
+	Password      string
+	Namespace     string
+	Timeout       time.Duration
+	Output        string
+	PlainHead     bool
+	DryRun        bool
+	Plan          bool
+	Diff          bool
+	Yes           bool
+	Backup        bool
+	NoBackup      bool
+	Ticket        string
+	Operator      string
+	Reason        string
+	NonInter      bool
+	AllowDel      bool
+	AllowPrune    bool
+	AllowNSDel    bool
+	AllowSvcDereg bool
+	Concurrency   int
+	OTLPEnd       string
+	OTLPMetrics   string
+	OTLPInsec     bool
+	contextOnce   sync.Once
+	cachedCtx     string
+	commandCtx    context.Context
+	commandName   string
+	commandTime   time.Time
 }
 
 var versionInfo = struct {
@@ -155,12 +159,14 @@ func newRootCmdWith(f *cliFlags) *cobra.Command {
 	cmd.PersistentFlags().BoolVar(&f.NonInter, "non-interactive", false, "Disable interactive confirmation")
 	cmd.PersistentFlags().BoolVar(&f.AllowDel, "allow-production-config-delete", false, "Allow protected config delete")
 	cmd.PersistentFlags().BoolVar(&f.AllowPrune, "allow-production-prune", false, "Allow protected reconcile prune actions")
+	cmd.PersistentFlags().BoolVar(&f.AllowNSDel, "allow-production-namespace-delete", false, "Allow protected namespace delete")
+	cmd.PersistentFlags().BoolVar(&f.AllowSvcDereg, "allow-production-service-deregister", false, "Allow protected service deregister")
 	cmd.PersistentFlags().IntVar(&f.Concurrency, "concurrency", 1, "Maximum concurrent batch operations")
 	cmd.PersistentFlags().StringVar(&f.OTLPEnd, "otel-endpoint", "", "OTLP trace endpoint")
 	cmd.PersistentFlags().StringVar(&f.OTLPMetrics, "otel-metrics-endpoint", "", "OTLP metrics endpoint")
 	cmd.PersistentFlags().BoolVar(&f.OTLPInsec, "otel-insecure", false, "Disable TLS for OTLP exporter")
 
-	cmd.AddCommand(newContextCmd(f), newConfigCmd(f), newCapabilitiesCmd(f), newAuditCmd(f), newVersionCmd(f))
+	cmd.AddCommand(newContextCmd(f), newConfigCmd(f), newNamespaceCmd(f), newServiceCmd(f), newCapabilitiesCmd(f), newAuditCmd(f), newVersionCmd(f))
 	return cmd
 }
 
@@ -256,6 +262,8 @@ func authorize(f *cliFlags, base safety.Risk, meta cfgovctx.Context, required sa
 		GrantedAllowFlags: map[safety.AllowFlag]bool{
 			allowProductionConfigDelete: f.AllowDel,
 			allowProductionPrune:        f.AllowPrune,
+			allowProductionNamespaceDel: f.AllowNSDel,
+			allowProductionServiceDereg: f.AllowSvcDereg,
 		},
 		Roles:    meta.Roles,
 		Operator: currentOperator(f),

@@ -183,8 +183,16 @@ func (c *Client) get(ctx context.Context, path string, params url.Values) ([]byt
 }
 
 // post 发起 POST 请求
+func (c *Client) post(ctx context.Context, path string, params url.Values) ([]byte, error) {
+	return c.do(ctx, http.MethodPost, path, params, true, false)
+}
+
 func (c *Client) postIdempotent(ctx context.Context, path string, params url.Values) ([]byte, error) {
 	return c.do(ctx, http.MethodPost, path, params, true, true)
+}
+
+func (c *Client) putIdempotent(ctx context.Context, path string, params url.Values) ([]byte, error) {
+	return c.do(ctx, http.MethodPut, path, params, true, true)
 }
 
 func (c *Client) deleteIdempotent(ctx context.Context, path string, params url.Values) ([]byte, error) {
@@ -722,6 +730,15 @@ func nacosErrorCodeToAppCode(code string) apperrors.Code {
 // Namespace 返回 Client 的 namespace，供 cmd 层读取
 func (c *Client) Namespace() string {
 	return c.namespace
+}
+
+func (c *Client) WithNamespace(namespace string) *Client {
+	next := NewClient(c.baseURL, c.username, c.password, namespace, c.httpClient.Timeout)
+	c.traceMu.RLock()
+	trace := c.trace
+	c.traceMu.RUnlock()
+	next.SetTrace(trace)
+	return next
 }
 
 func (c *Client) Ping(ctx context.Context) error {
