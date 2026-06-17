@@ -147,12 +147,15 @@ func configListCmd(f *cliFlags) *cobra.Command {
 }
 
 func configDiffCmd(f *cliFlags) *cobra.Command {
-	var key, file, inlineContent string
+	var key, file, inlineContent, sourceContext, targetContext string
 	cmd := &cobra.Command{
 		Use:   "diff --key <key> (--file <path>|--content <string>)",
 		Short: "Compare remote config with local content",
 		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
+			if sourceContext != "" || targetContext != "" {
+				return configContextDiff(cmd.Context(), f, key, sourceContext, targetContext)
+			}
 			backend, ctxMeta, err := buildBackend(f)
 			if err != nil {
 				return err
@@ -173,7 +176,11 @@ func configDiffCmd(f *cliFlags) *cobra.Command {
 			}
 			summary := diffSummary(remote.Content, local)
 			if f.Output == "plain" {
-				newPrinter(f).Info(summary.Summary)
+				p := newPrinter(f)
+				p.Info(summary.Summary)
+				for _, line := range summary.Lines {
+					p.Info(line)
+				}
 				return nil
 			}
 			return newPrinter(f).JSONData("DiffResult", summary)
@@ -182,6 +189,8 @@ func configDiffCmd(f *cliFlags) *cobra.Command {
 	cmd.Flags().StringVar(&key, "key", "", "Config key: dataId or group/dataId")
 	cmd.Flags().StringVar(&file, "file", "", "Local file")
 	cmd.Flags().StringVar(&inlineContent, "content", "", "Config content")
+	cmd.Flags().StringVar(&sourceContext, "source-context", "", "Source context")
+	cmd.Flags().StringVar(&targetContext, "target-context", "", "Target context")
 	_ = cmd.MarkFlagRequired("key")
 	return cmd
 }
@@ -508,14 +517,26 @@ type changePlan struct {
 }
 
 type diffResult struct {
-	Same         bool   `json:"same"`
-	Summary      string `json:"summary"`
-	RemoteSHA256 string `json:"remoteSha256"`
-	LocalSHA256  string `json:"localSha256"`
-	RemoteBytes  int    `json:"remoteBytes"`
-	LocalBytes   int    `json:"localBytes"`
-	AddedLines   int    `json:"addedLines"`
-	RemovedLines int    `json:"removedLines"`
+	Same         bool        `json:"same"`
+	Summary      string      `json:"summary"`
+	RemoteSHA256 string      `json:"remoteSha256"`
+	LocalSHA256  string      `json:"localSha256"`
+	RemoteBytes  int         `json:"remoteBytes"`
+	LocalBytes   int         `json:"localBytes"`
+	AddedLines   int         `json:"addedLines"`
+	RemovedLines int         `json:"removedLines"`
+	Lines        []string    `json:"lines"`
+	Source       *diffTarget `json:"source,omitempty"`
+	Target       *diffTarget `json:"target,omitempty"`
+}
+
+type diffTarget struct {
+	Context   string `json:"context"`
+	Backend   string `json:"backend"`
+	Namespace string `json:"namespace,omitempty"`
+	Key       string `json:"key"`
+	SHA256    string `json:"sha256"`
+	Bytes     int    `json:"bytes"`
 }
 
 func pushPlan(ctx context.Context, backend cfgov.Backend, coord cfgov.Coordinate, content []byte, class cfgclass.Result) changePlan {
@@ -779,7 +800,127 @@ func diffSummary(remote, local []byte) diffResult {
 		LocalBytes:   len(local),
 		AddedLines:   added,
 		RemovedLines: removed,
+		Lines:        buildLineDiff(remote, local),
 	}
+}
+
+func configContextDiff(ctx context.Context, f *cliFlags, key, sourceContext, targetContext string) error {
+	if sourceContext == "" || targetContext == "" {
+		return apperrors.New(apperrors.CodeUsageError, "--source-context and --target-context must both be specified", nil)
+	}
+	if key == "" {
+		return apperrors.New(apperrors.CodeUsageError, "--key is required", nil)
+	}
+	source, err := buildBackendFromNamedContext(ctx, f, sourceContext, "")
+	if err != nil {
+		return err
+	}
+	target, err := buildBackendFromNamedContext(ctx, f, targetContext, "")
+	if err != nil {
+		return err
+	}
+	sourceKey, err := validateConfigKey(source, key)
+	if err != nil {
+		return err
+	}
+	targetKey, err := validateConfigKey(target, key)
+	if err != nil {
+		return err
+	}
+	sourceCoord := cfgov.Coordinate{Namespace: source.Describe().Namespace, Key: sourceKey}
+	targetCoord := cfgov.Coordinate{Namespace: target.Describe().Namespace, Key: targetKey}
+	sourceBlob, err := source.Get(ctx, sourceCoord)
+	if err != nil {
+		appendAuditWarn(f, audit.EventType("config.diff"), cfgovctx.Context{}, audit.EventTarget{ResourceType: "config", Resource: key}, audit.StatusFailed, "", err)
+		return err
+	}
+	targetBlob, err := target.Get(ctx, targetCoord)
+	if err != nil {
+		appendAuditWarn(f, audit.EventType("config.diff"), cfgovctx.Context{}, audit.EventTarget{ResourceType: "config", Resource: key}, audit.StatusFailed, "", err)
+		return err
+	}
+	result := diffSummary(targetBlob.Content, sourceBlob.Content)
+	result.Source = diffTargetFor(sourceContext, source.Describe(), sourceKey, sourceBlob.Content)
+	result.Target = diffTargetFor(targetContext, target.Describe(), targetKey, targetBlob.Content)
+	appendAuditWarn(
+		f,
+		audit.EventType("config.diff"),
+		cfgovctx.Context{},
+		audit.EventTarget{ResourceType: "config", Resource: key},
+		audit.StatusSuccess,
+		fmt.Sprintf("sourceSha256=%s targetSha256=%s addedLines=%d removedLines=%d", result.LocalSHA256, result.RemoteSHA256, result.AddedLines, result.RemovedLines),
+		nil,
+	)
+	if f.Output == "plain" {
+		p := newPrinter(f)
+		p.Info(result.Summary)
+		for _, line := range result.Lines {
+			p.Info(line)
+		}
+		return nil
+	}
+	return newPrinter(f).JSONData("DiffResult", result)
+}
+
+func diffTargetFor(contextName string, desc cfgov.Description, key string, content []byte) *diffTarget {
+	return &diffTarget{
+		Context:   contextName,
+		Backend:   desc.Backend,
+		Namespace: desc.Namespace,
+		Key:       key,
+		SHA256:    sha256Bytes(content),
+		Bytes:     len(content),
+	}
+}
+
+func buildLineDiff(remote, local []byte) []string {
+	remoteLines := strings.Split(strings.ReplaceAll(string(remote), "\r\n", "\n"), "\n")
+	localLines := strings.Split(strings.ReplaceAll(string(local), "\r\n", "\n"), "\n")
+	const maxDiffLines = 1000
+	if len(remoteLines) > maxDiffLines || len(localLines) > maxDiffLines {
+		return []string{fmt.Sprintf("diff too large to display (%d remote lines, %d local lines; limit %d)", len(remoteLines), len(localLines), maxDiffLines)}
+	}
+	lcs := make([][]int, len(remoteLines)+1)
+	for i := range lcs {
+		lcs[i] = make([]int, len(localLines)+1)
+	}
+	for i := len(remoteLines) - 1; i >= 0; i-- {
+		for j := len(localLines) - 1; j >= 0; j-- {
+			if remoteLines[i] == localLines[j] {
+				lcs[i][j] = lcs[i+1][j+1] + 1
+				continue
+			}
+			if lcs[i+1][j] >= lcs[i][j+1] {
+				lcs[i][j] = lcs[i+1][j]
+			} else {
+				lcs[i][j] = lcs[i][j+1]
+			}
+		}
+	}
+	lines := make([]string, 0)
+	i, j := 0, 0
+	for i < len(remoteLines) && j < len(localLines) {
+		if remoteLines[i] == localLines[j] {
+			lines = append(lines, "  "+remoteLines[i])
+			i++
+			j++
+			continue
+		}
+		if lcs[i+1][j] >= lcs[i][j+1] {
+			lines = append(lines, "- "+remoteLines[i])
+			i++
+		} else {
+			lines = append(lines, "+ "+localLines[j])
+			j++
+		}
+	}
+	for ; i < len(remoteLines); i++ {
+		lines = append(lines, "- "+remoteLines[i])
+	}
+	for ; j < len(localLines); j++ {
+		lines = append(lines, "+ "+localLines[j])
+	}
+	return lines
 }
 
 func lineDelta(remote, local []byte) (int, int) {

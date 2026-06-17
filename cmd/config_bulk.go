@@ -24,7 +24,10 @@ import (
 	"github.com/JiangHe12/cfgov-cli/internal/cfgovctx"
 )
 
-const exportManifestName = "manifest.json"
+const (
+	exportManifestName = "manifest.json"
+	defaultMaxChanges  = 1000
+)
 
 type configArchive struct {
 	APIVersion string               `json:"apiVersion"`
@@ -50,15 +53,19 @@ type configPlan struct {
 	Update       []planItem  `json:"update"`
 	Delete       []planItem  `json:"delete"`
 	Prune        []planItem  `json:"prune"`
+	Skip         []planItem  `json:"skip"`
+	Conflict     []planItem  `json:"conflict"`
 	DryRun       bool        `json:"dryRun"`
 }
 
 type planSummary struct {
-	Create int `json:"create"`
-	Update int `json:"update"`
-	Delete int `json:"delete"`
-	Prune  int `json:"prune"`
-	Total  int `json:"total"`
+	Create   int `json:"create"`
+	Update   int `json:"update"`
+	Delete   int `json:"delete"`
+	Prune    int `json:"prune"`
+	Skip     int `json:"skip"`
+	Conflict int `json:"conflict"`
+	Total    int `json:"total"`
 }
 
 type planItem struct {
@@ -72,6 +79,19 @@ type localConfig struct {
 	Key     string
 	Content []byte
 	Type    string
+}
+
+type upsertPlanOptions struct {
+	Action       string
+	SkipExisting bool
+	Overwrite    bool
+	Validate     bool
+}
+
+type reconcilePlanOptions struct {
+	Prune       bool
+	PruneScopes []string
+	Overwrite   bool
 }
 
 func configExportCmd(f *cliFlags) *cobra.Command {
@@ -126,8 +146,9 @@ func configExportCmd(f *cliFlags) *cobra.Command {
 	return cmd
 }
 
-func configImportCmd(f *cliFlags) *cobra.Command {
+func configImportCmd(f *cliFlags) *cobra.Command { //nolint:gocyclo // Cobra wiring plus plan/apply gates are kept together for this command.
 	var dir string
+	var skipExisting, overwrite, validate, forceLarge bool
 	cmd := &cobra.Command{
 		Use:   "import --dir <dir>",
 		Short: "Import configs from a local directory",
@@ -137,22 +158,36 @@ func configImportCmd(f *cliFlags) *cobra.Command {
 			if err != nil {
 				return err
 			}
+			if skipExisting && overwrite {
+				return apperrors.New(apperrors.CodeUsageError, "--skip-existing and --overwrite are mutually exclusive", nil)
+			}
 			locals, err := readLocalConfigs(dir)
 			if err != nil {
 				return err
 			}
-			plan, err := buildUpsertPlan(cmd.Context(), backend, backend.Describe().Namespace, locals, "import")
+			plan, err := buildUpsertPlan(cmd.Context(), backend, backend.Describe().Namespace, locals, upsertPlanOptions{
+				Action:       "import",
+				SkipExisting: skipExisting,
+				Overwrite:    overwrite,
+				Validate:     validate,
+			})
 			if err != nil {
+				return err
+			}
+			if err := enforcePlanLimit(plan, forceLarge, "import"); err != nil {
 				return err
 			}
 			if f.DryRun || f.Plan {
 				plan.DryRun = true
 				return newPrinter(f).JSONData("ChangePlan", plan)
 			}
+			if len(plan.Conflict) > 0 {
+				return apperrors.New(apperrors.CodeConflict, fmt.Sprintf("%d config(s) conflict; use --overwrite or --skip-existing", len(plan.Conflict)), nil)
+			}
 			if err := validateBackupPolicy(f, ctxMeta); err != nil {
 				return err
 			}
-			for _, item := range orderedLocals(locals) {
+			for _, item := range localsForItems(locals, append(plan.Create, plan.Update...)) {
 				if err := cmd.Context().Err(); err != nil {
 					return err
 				}
@@ -174,12 +209,17 @@ func configImportCmd(f *cliFlags) *cobra.Command {
 		},
 	}
 	cmd.Flags().StringVar(&dir, "dir", "", "Input directory")
+	cmd.Flags().BoolVar(&skipExisting, "skip-existing", false, "Skip configs that already exist on remote")
+	cmd.Flags().BoolVar(&overwrite, "overwrite", false, "Overwrite existing remote configs")
+	cmd.Flags().BoolVar(&validate, "validate", false, "Validate config content before importing")
+	cmd.Flags().BoolVar(&forceLarge, "force-large-import", false, "Allow imports exceeding the default change limit")
 	_ = cmd.MarkFlagRequired("dir")
 	return cmd
 }
 
-func configPromoteCmd(f *cliFlags) *cobra.Command {
-	var sourceContext, key, prefix string
+func configPromoteCmd(f *cliFlags) *cobra.Command { //nolint:gocyclo // Cobra wiring plus promote plan gates are kept together for this command.
+	var sourceContext, key, prefix, contentType string
+	var validateSource, overwrite bool
 	cmd := &cobra.Command{
 		Use:   "promote --source-context <ctx>",
 		Short: "Promote configs from a source context to the current target",
@@ -200,7 +240,15 @@ func configPromoteCmd(f *cliFlags) *cobra.Command {
 			if err != nil {
 				return err
 			}
-			plan, err := buildUpsertPlan(cmd.Context(), target, target.Describe().Namespace, locals, "promote")
+			if contentType != "" {
+				locals = withConfigType(locals, contentType)
+			}
+			if validateSource {
+				if err := validateLocalConfigs(locals); err != nil {
+					return err
+				}
+			}
+			plan, err := buildUpsertPlan(cmd.Context(), target, target.Describe().Namespace, locals, upsertPlanOptions{Action: "promote", Overwrite: overwrite})
 			if err != nil {
 				return err
 			}
@@ -211,7 +259,10 @@ func configPromoteCmd(f *cliFlags) *cobra.Command {
 			if err := validateBackupPolicy(f, ctxMeta); err != nil {
 				return err
 			}
-			if err := applyUpserts(cmd.Context(), f, target, ctxMeta, locals, "config.promote"); err != nil {
+			if len(plan.Conflict) > 0 {
+				return apperrors.New(apperrors.CodeConflict, fmt.Sprintf("%d config(s) conflict; use --overwrite", len(plan.Conflict)), nil)
+			}
+			if err := applyUpserts(cmd.Context(), f, target, ctxMeta, localsForItems(locals, append(plan.Create, plan.Update...)), "config.promote"); err != nil {
 				return err
 			}
 			return newPrinter(f).JSONData("ChangeResult", map[string]any{"action": "config promote", "summary": plan.Summary})
@@ -220,12 +271,16 @@ func configPromoteCmd(f *cliFlags) *cobra.Command {
 	cmd.Flags().StringVar(&sourceContext, "source-context", "", "Source context")
 	cmd.Flags().StringVar(&key, "key", "", "Single key to promote")
 	cmd.Flags().StringVar(&prefix, "prefix", "", "Prefix/search filter")
+	cmd.Flags().StringVar(&contentType, "type", "", "Config type: text, properties, json, yaml, xml")
+	cmd.Flags().BoolVar(&validateSource, "validate", false, "Validate source config format before promoting")
+	cmd.Flags().BoolVar(&overwrite, "overwrite", false, "Overwrite existing target configs")
 	_ = cmd.MarkFlagRequired("source-context")
 	return cmd
 }
 
 func configRollbackCmd(f *cliFlags) *cobra.Command {
 	var key, backupFile, backupID, historyID string
+	var validateTarget bool
 	cmd := &cobra.Command{
 		Use:   "rollback --key <key>",
 		Short: "Rollback one config from backup or history",
@@ -245,6 +300,11 @@ func configRollbackCmd(f *cliFlags) *cobra.Command {
 			content, err := rollbackContent(cmd.Context(), backend, key, backupFile, backupID, historyID)
 			if err != nil {
 				return err
+			}
+			if validateTarget {
+				if err := validateContent(content, inferType(key)); err != nil {
+					return err
+				}
 			}
 			local := localConfig{Key: key, Content: content, Type: inferType(key)}
 			coord := cfgov.Coordinate{Namespace: backend.Describe().Namespace, Key: key}
@@ -270,13 +330,15 @@ func configRollbackCmd(f *cliFlags) *cobra.Command {
 	cmd.Flags().StringVar(&backupFile, "backup-file", "", "Local backup file")
 	cmd.Flags().StringVar(&backupID, "backup-id", "", "Local backup id")
 	cmd.Flags().StringVar(&historyID, "history-id", "", "Nacos history id")
+	cmd.Flags().BoolVar(&validateTarget, "validate", false, "Validate target content before rollback")
 	_ = cmd.MarkFlagRequired("key")
 	return cmd
 }
 
 func configReconcileCmd(f *cliFlags) *cobra.Command {
 	var dir string
-	var prune bool
+	var prune, overwrite, forceLarge bool
+	var pruneScopes []string
 	cmd := &cobra.Command{
 		Use:   "reconcile --dir <dir>",
 		Short: "Reconcile remote configs with a local directory",
@@ -290,13 +352,23 @@ func configReconcileCmd(f *cliFlags) *cobra.Command {
 			if err != nil {
 				return err
 			}
-			plan, err := buildReconcilePlan(cmd.Context(), backend, backend.Describe().Namespace, locals, prune)
+			plan, err := buildReconcilePlan(cmd.Context(), backend, backend.Describe().Namespace, locals, reconcilePlanOptions{
+				Prune:       prune,
+				PruneScopes: pruneScopes,
+				Overwrite:   overwrite,
+			})
 			if err != nil {
+				return err
+			}
+			if err := enforcePlanLimit(plan, forceLarge, "reconcile"); err != nil {
 				return err
 			}
 			if f.DryRun || f.Plan {
 				plan.DryRun = true
 				return newPrinter(f).JSONData("ChangePlan", plan)
+			}
+			if len(plan.Conflict) > 0 {
+				return apperrors.New(apperrors.CodeConflict, fmt.Sprintf("%d config(s) conflict; use --overwrite", len(plan.Conflict)), nil)
 			}
 			if err := validateBackupPolicy(f, ctxMeta); err != nil {
 				return err
@@ -327,6 +399,9 @@ func configReconcileCmd(f *cliFlags) *cobra.Command {
 	}
 	cmd.Flags().StringVar(&dir, "dir", "", "Input directory")
 	cmd.Flags().BoolVar(&prune, "prune", false, "Delete remote configs missing from local directory")
+	cmd.Flags().StringSliceVar(&pruneScopes, "prune-scope", nil, "Namespace[/group] scopes for prune")
+	cmd.Flags().BoolVar(&overwrite, "overwrite", false, "Overwrite existing remote configs")
+	cmd.Flags().BoolVar(&forceLarge, "force-large-reconcile", false, "Allow reconciles exceeding the default change limit")
 	_ = cmd.MarkFlagRequired("dir")
 	return cmd
 }
@@ -440,14 +515,21 @@ func readManifestConfigs(dir string, data []byte) ([]localConfig, error) {
 	return items, nil
 }
 
-func buildUpsertPlan(ctx context.Context, backend cfgov.Backend, namespace string, locals []localConfig, action string) (configPlan, error) {
-	plan := configPlan{ResourceType: "config", Action: action, Risk: safety.R1}
+func buildUpsertPlan(ctx context.Context, backend cfgov.Backend, namespace string, locals []localConfig, opts upsertPlanOptions) (configPlan, error) {
+	plan := configPlan{ResourceType: "config", Action: opts.Action, Risk: safety.R1}
 	for _, item := range orderedLocals(locals) {
 		key, err := validateConfigKey(backend, item.Key)
 		if err != nil {
 			return plan, err
 		}
 		item.Key = key
+		if opts.Validate {
+			if err := validateContent(item.Content, item.Type); err != nil {
+				entry := planItem{Key: key, LocalSHA256: sha256Bytes(item.Content), Bytes: len(item.Content)}
+				plan.Conflict = append(plan.Conflict, entry)
+				continue
+			}
+		}
 		coord := cfgov.Coordinate{Namespace: namespace, Key: key}
 		remote, err := backend.Get(ctx, coord)
 		entry := planItem{Key: key, LocalSHA256: sha256Bytes(item.Content), Bytes: len(item.Content)}
@@ -459,40 +541,65 @@ func buildUpsertPlan(ctx context.Context, backend cfgov.Backend, namespace strin
 			return plan, err
 		}
 		entry.RemoteSHA256 = sha256Bytes(remote.Content)
-		if entry.RemoteSHA256 != entry.LocalSHA256 {
+		switch {
+		case entry.RemoteSHA256 == entry.LocalSHA256:
+			plan.Skip = append(plan.Skip, entry)
+		case opts.SkipExisting:
+			plan.Skip = append(plan.Skip, entry)
+		case opts.Overwrite:
 			plan.Update = append(plan.Update, entry)
+		default:
+			plan.Conflict = append(plan.Conflict, entry)
 		}
 	}
 	plan.Summary = summarizePlan(plan)
 	return plan, nil
 }
 
-func buildReconcilePlan(ctx context.Context, backend cfgov.Backend, namespace string, locals []localConfig, prune bool) (configPlan, error) {
-	plan, err := buildUpsertPlan(ctx, backend, namespace, locals, "reconcile")
+func buildReconcilePlan(ctx context.Context, backend cfgov.Backend, namespace string, locals []localConfig, opts reconcilePlanOptions) (configPlan, error) {
+	scopes, err := parsePruneScopes(opts.PruneScopes, namespace, opts.Prune)
+	if err != nil {
+		return configPlan{}, err
+	}
+	plan, err := buildUpsertPlan(ctx, backend, namespace, locals, upsertPlanOptions{Action: "reconcile", Overwrite: opts.Overwrite})
 	if err != nil {
 		return plan, err
 	}
 	plan.Risk = safety.R2
-	if prune {
-		remote, err := backend.List(ctx, cfgov.ListOptions{Namespace: namespace, Limit: 10000})
-		if err != nil {
+	if opts.Prune {
+		if err := appendPruneItems(ctx, backend, namespace, locals, scopes, &plan); err != nil {
 			return plan, err
-		}
-		localSet := map[string]bool{}
-		for _, item := range locals {
-			localSet[item.Key] = true
-		}
-		for _, item := range remote {
-			if !localSet[item.Coordinate.Key] {
-				plan.Prune = append(plan.Prune, planItem{Key: item.Coordinate.Key, RemoteSHA256: item.Revision})
-			}
-		}
-		if len(plan.Prune) > 0 {
-			plan.Risk = safety.R3
 		}
 	}
 	plan.Summary = summarizePlan(plan)
 	return plan, nil
+}
+
+func appendPruneItems(ctx context.Context, backend cfgov.Backend, namespace string, locals []localConfig, scopes []pruneScope, plan *configPlan) error {
+	remote, err := backend.List(ctx, cfgov.ListOptions{Namespace: namespace, Limit: 10000})
+	if err != nil {
+		return err
+	}
+	localSet := map[string]bool{}
+	for _, item := range locals {
+		key, err := validateConfigKey(backend, item.Key)
+		if err != nil {
+			return err
+		}
+		localSet[key] = true
+	}
+	for _, item := range remote {
+		if !pruneScopeContains(scopes, namespace, item.Coordinate.Key) {
+			continue
+		}
+		if !localSet[item.Coordinate.Key] {
+			plan.Prune = append(plan.Prune, planItem{Key: item.Coordinate.Key, RemoteSHA256: item.Revision})
+		}
+	}
+	if len(plan.Prune) > 0 {
+		plan.Risk = safety.R3
+	}
+	return nil
 }
 
 func sourceConfigs(ctx context.Context, backend cfgov.Backend, key, prefix string) ([]localConfig, error) {
@@ -639,12 +746,113 @@ func localsForItems(locals []localConfig, items []planItem) []localConfig {
 
 func summarizePlan(plan configPlan) planSummary {
 	return planSummary{
-		Create: len(plan.Create),
-		Update: len(plan.Update),
-		Delete: len(plan.Delete),
-		Prune:  len(plan.Prune),
-		Total:  len(plan.Create) + len(plan.Update) + len(plan.Delete) + len(plan.Prune),
+		Create:   len(plan.Create),
+		Update:   len(plan.Update),
+		Delete:   len(plan.Delete),
+		Prune:    len(plan.Prune),
+		Skip:     len(plan.Skip),
+		Conflict: len(plan.Conflict),
+		Total:    len(plan.Create) + len(plan.Update) + len(plan.Delete) + len(plan.Prune) + len(plan.Skip) + len(plan.Conflict),
 	}
+}
+
+func enforcePlanLimit(plan configPlan, forceLarge bool, operation string) error {
+	if forceLarge {
+		return nil
+	}
+	count := len(plan.Create) + len(plan.Update) + len(plan.Delete) + len(plan.Prune)
+	if count > defaultMaxChanges {
+		return apperrors.New(
+			apperrors.CodeValidationFailed,
+			fmt.Sprintf("%s actionable changes %d exceed limit %d; use --force-large-%s to override the limit only", operation, count, defaultMaxChanges, operation),
+			nil,
+		)
+	}
+	return nil
+}
+
+func validateLocalConfigs(items []localConfig) error {
+	for _, item := range items {
+		if err := validateContent(item.Content, item.Type); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func withConfigType(items []localConfig, contentType string) []localConfig {
+	contentType = normalizeType(contentType)
+	out := make([]localConfig, len(items))
+	for i, item := range items {
+		item.Type = contentType
+		out[i] = item
+	}
+	return out
+}
+
+type pruneScope struct {
+	Namespace string
+	Group     string
+}
+
+func parsePruneScopes(values []string, namespace string, prune bool) ([]pruneScope, error) {
+	if len(values) == 0 {
+		if prune {
+			return nil, apperrors.New(apperrors.CodeUsageError, "--prune-scope is required when --prune is set", nil)
+		}
+		return []pruneScope{{Namespace: namespace}}, nil
+	}
+	out := make([]pruneScope, 0, len(values))
+	seen := map[string]bool{}
+	for _, raw := range values {
+		value := strings.TrimSpace(raw)
+		if value == "" {
+			continue
+		}
+		parts := strings.Split(value, "/")
+		if len(parts) > 2 || parts[0] == "" {
+			return nil, apperrors.New(apperrors.CodeUsageError, "invalid --prune-scope", nil)
+		}
+		scope := pruneScope{Namespace: parts[0]}
+		if len(parts) == 2 {
+			if parts[1] == "" {
+				return nil, apperrors.New(apperrors.CodeUsageError, "invalid --prune-scope", nil)
+			}
+			scope.Group = parts[1]
+		}
+		if scope.Namespace != namespace {
+			return nil, apperrors.New(apperrors.CodeUsageError, fmt.Sprintf("--prune-scope namespace %q does not match current namespace %q", scope.Namespace, namespace), nil)
+		}
+		key := scope.Namespace + "/" + scope.Group
+		if seen[key] {
+			continue
+		}
+		seen[key] = true
+		out = append(out, scope)
+	}
+	if len(out) == 0 {
+		if prune {
+			return nil, apperrors.New(apperrors.CodeUsageError, "--prune-scope is required when --prune is set", nil)
+		}
+		return []pruneScope{{Namespace: namespace}}, nil
+	}
+	return out, nil
+}
+
+func pruneScopeContains(scopes []pruneScope, namespace, key string) bool {
+	group := ""
+	if parsed, err := cfgov.ParseNacosKey(key); err == nil {
+		group = parsed.Group
+	}
+	for _, scope := range scopes {
+		if scope.Namespace != namespace {
+			continue
+		}
+		if scope.Group == "" || scope.Group == group {
+			return true
+		}
+	}
+	return false
 }
 
 func archiveAuditSummary(items []configArchiveEntry) string {

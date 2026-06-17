@@ -73,7 +73,10 @@ func TestReconcilePrunePlanIsR3(t *testing.T) {
 		"orphan.yaml": []byte("old\n"),
 	}}
 	locals := []localConfig{{Key: "app.yaml", Content: []byte("enabled: false\n"), Type: "yaml"}}
-	plan, err := buildReconcilePlan(context.Background(), backend, "ns", locals, true)
+	plan, err := buildReconcilePlan(context.Background(), backend, "ns", locals, reconcilePlanOptions{
+		Prune:       true,
+		PruneScopes: []string{"ns"},
+	})
 	if err != nil {
 		t.Fatalf("buildReconcilePlan() error = %v", err)
 	}
@@ -82,6 +85,50 @@ func TestReconcilePrunePlanIsR3(t *testing.T) {
 	}
 	if len(plan.Prune) != 1 || plan.Prune[0].Key != "orphan.yaml" {
 		t.Fatalf("prune = %#v, want orphan.yaml", plan.Prune)
+	}
+}
+
+func TestImportPlanSkipExistingAndOverwriteAreDistinct(t *testing.T) {
+	t.Parallel()
+	backend := fakeConfigBackend{namespace: "ns", blobs: map[string][]byte{
+		"app.yaml": []byte("old\n"),
+	}}
+	locals := []localConfig{{Key: "app.yaml", Content: []byte("new\n"), Type: "yaml"}}
+	plan, err := buildUpsertPlan(context.Background(), backend, "ns", locals, upsertPlanOptions{Action: "import", SkipExisting: true})
+	if err != nil {
+		t.Fatalf("buildUpsertPlan skip error = %v", err)
+	}
+	if len(plan.Skip) != 1 || len(plan.Update) != 0 || len(plan.Conflict) != 0 {
+		t.Fatalf("skip plan = %#v", plan)
+	}
+	plan, err = buildUpsertPlan(context.Background(), backend, "ns", locals, upsertPlanOptions{Action: "import", Overwrite: true})
+	if err != nil {
+		t.Fatalf("buildUpsertPlan overwrite error = %v", err)
+	}
+	if len(plan.Update) != 1 || len(plan.Skip) != 0 || len(plan.Conflict) != 0 {
+		t.Fatalf("overwrite plan = %#v", plan)
+	}
+	plan, err = buildUpsertPlan(context.Background(), backend, "ns", locals, upsertPlanOptions{Action: "import"})
+	if err != nil {
+		t.Fatalf("buildUpsertPlan conflict error = %v", err)
+	}
+	if len(plan.Conflict) != 1 || len(plan.Update) != 0 {
+		t.Fatalf("conflict plan = %#v", plan)
+	}
+}
+
+func TestPruneScopeRequiresExplicitScopeWhenPruning(t *testing.T) {
+	t.Parallel()
+	_, err := parsePruneScopes(nil, "ns", true)
+	if apperrors.AsAppError(err).Code != apperrors.CodeUsageError {
+		t.Fatalf("error = %v, want usage error", err)
+	}
+	scopes, err := parsePruneScopes([]string{"ns/DEFAULT_GROUP"}, "ns", true)
+	if err != nil {
+		t.Fatalf("parsePruneScopes error = %v", err)
+	}
+	if !pruneScopeContains(scopes, "ns", "app.yaml") || pruneScopeContains(scopes, "other", "app.yaml") {
+		t.Fatalf("scope containment mismatch: %#v", scopes)
 	}
 }
 

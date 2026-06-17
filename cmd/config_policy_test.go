@@ -58,6 +58,22 @@ func TestReadConfigInputContentAndFileAreMutuallyExclusive(t *testing.T) {
 	}
 }
 
+func TestDiffSummaryIncludesLineDiff(t *testing.T) {
+	result := diffSummary([]byte("a\nb\n"), []byte("a\nc\n"))
+	if result.Same {
+		t.Fatal("expected diff")
+	}
+	want := []string{"  a", "- b", "+ c", "  "}
+	if len(result.Lines) != len(want) {
+		t.Fatalf("lines = %#v, want %#v", result.Lines, want)
+	}
+	for i := range want {
+		if result.Lines[i] != want[i] {
+			t.Fatalf("line[%d] = %q, want %q; all=%#v", i, result.Lines[i], want[i], result.Lines)
+		}
+	}
+}
+
 func TestBuildBackendRequiresContextOrServer(t *testing.T) {
 	cfgovctx.SetConfigPath(filepath.Join(t.TempDir(), "config.yaml"))
 	_, _, err := buildBackend(newDefaultFlags())
