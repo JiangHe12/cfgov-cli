@@ -24,6 +24,7 @@ type capBackend struct {
 	ResourceTypes   []string `json:"resourceTypes"`
 	SupportsHistory bool     `json:"supportsHistory"`
 	SupportsWatch   bool     `json:"supportsWatch"`
+	SupportsRules   bool     `json:"supportsRules"`
 }
 
 type capSupported struct {
@@ -35,6 +36,7 @@ type capSupported struct {
 	Kinds              []string     `json:"kinds"`
 	CredentialBackends []string     `json:"credentialBackends"`
 	Environment        []string     `json:"environmentVariables"`
+	RuleTypes          []string     `json:"ruleTypes"`
 }
 
 type capCommand struct {
@@ -65,7 +67,7 @@ func buildCapabilities() capabilitiesData {
 	v, c, _ := getVersionInfo()
 	return capabilitiesData{
 		Tool:    capTool{Name: "cfgov-cli", Version: v, Commit: c},
-		Backend: capBackend{Name: "nacos", ResourceTypes: []string{"config", "namespace", "service"}, SupportsHistory: true, SupportsWatch: true},
+		Backend: capBackend{Name: "nacos", ResourceTypes: []string{"config", "namespace", "service", "rule"}, SupportsHistory: true, SupportsWatch: true, SupportsRules: true},
 		Supported: capSupported{
 			Commands: []capCommand{
 				{Noun: "config", Verb: "get", Risk: "R0"},
@@ -95,14 +97,20 @@ func buildCapabilities() capabilitiesData {
 				{Noun: "service", Verb: "register", Risk: "R1"},
 				{Noun: "service", Verb: "deregister", Risk: "R2", AllowFlag: "allow-production-service-deregister"},
 				{Noun: "service", Verb: "deregister(protected ctx)", Risk: "R3", AllowFlag: "allow-production-service-deregister"},
+				{Noun: "rule", Verb: "list", Risk: "R0"},
+				{Noun: "rule", Verb: "get", Risk: "R0"},
+				{Noun: "rule", Verb: "export", Risk: "R0"},
+				{Noun: "rule", Verb: "diff", Risk: "R0"},
+				{Noun: "rule", Verb: "validate", Risk: "R0"},
 			},
 			ContextAPIVersions: []string{"cfgov-cli.io/context/v1"},
 			AuditAPIVersions:   []string{auditAPIVersion},
 			ErrorCodes:         errorCodeStrings(),
 			ExitCodes:          apperrors.AllExitCodes(),
-			Kinds:              []string{"AuditQueryResult", "AuditVerifyResult", "Capabilities", "ChangePlan", "ChangeResult", "ConfigExport", "ConfigItem", "ConfigList", "ConfigListenEvent", "ContextItem", "ContextList", "DiffResult", "Error", "ExportResult", "HistoryList", "NamespaceItem", "NamespaceList", "ServiceInstanceList", "ServiceItem", "ServiceList", "ValidationResult", "VersionInfo"},
+			Kinds:              []string{"AuditQueryResult", "AuditVerifyResult", "Capabilities", "ChangePlan", "ChangeResult", "ConfigExport", "ConfigItem", "ConfigList", "ConfigListenEvent", "ContextItem", "ContextList", "DiffResult", "Error", "ExportResult", "HistoryList", "NamespaceItem", "NamespaceList", "RuleDiff", "RuleExport", "RuleList", "RuleSet", "RuleValidation", "ServiceInstanceList", "ServiceItem", "ServiceList", "ValidationResult", "VersionInfo"},
 			CredentialBackends: credstore.Available(),
 			Environment:        []string{"CFGOV_CLI_AUDIT_PRIVATE_KEY", "CFGOV_CLI_CREDENTIAL_PASSPHRASE", "CFGOV_CLI_OPERATOR", "NACOS_SERVER", "NACOS_USERNAME", "NACOS_PASSWORD", "NACOS_NAMESPACE"},
+			RuleTypes:          []string{"flow", "degrade", "system", "authority", "param"},
 		},
 	}
 }

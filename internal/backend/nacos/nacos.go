@@ -12,6 +12,7 @@ import (
 
 	"github.com/JiangHe12/cfgov-cli/internal/api"
 	"github.com/JiangHe12/cfgov-cli/internal/cfgov"
+	"github.com/JiangHe12/cfgov-cli/internal/rule"
 )
 
 type Backend struct {
@@ -27,6 +28,7 @@ var (
 	_ cfgov.Backend          = (*Backend)(nil)
 	_ cfgov.NamespaceManager = (*Backend)(nil)
 	_ cfgov.ServiceRegistry  = (*Backend)(nil)
+	_ cfgov.RuleStore        = (*Backend)(nil)
 )
 
 func (b *Backend) Get(ctx context.Context, coord cfgov.Coordinate) (cfgov.Blob, error) {
@@ -213,7 +215,23 @@ func (b *Backend) Capabilities() cfgov.Capabilities {
 		SupportsRevision: true,
 		SupportsHistory:  true,
 		SupportsWatch:    true,
+		SupportsRules:    true,
 	}
+}
+
+func (b *Backend) RuleCoordinate(app, ruleType string) (cfgov.Coordinate, error) {
+	parsed, err := rule.ParseType(ruleType)
+	if err != nil {
+		return cfgov.Coordinate{}, err
+	}
+	key, err := rule.NacosKey(app, parsed)
+	if err != nil {
+		return cfgov.Coordinate{}, err
+	}
+	if _, err := cfgov.ParseNacosKey(key); err != nil {
+		return cfgov.Coordinate{}, err
+	}
+	return cfgov.Coordinate{Namespace: b.client.Namespace(), Key: key}, nil
 }
 
 func (b *Backend) ListNamespaces(ctx context.Context) ([]cfgov.NamespaceItem, error) {

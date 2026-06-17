@@ -83,6 +83,7 @@ type Capabilities struct {
 	SupportsRevision bool     `json:"supportsRevision"`
 	SupportsHistory  bool     `json:"supportsHistory"`
 	SupportsWatch    bool     `json:"supportsWatch"`
+	SupportsRules    bool     `json:"supportsRules"`
 }
 
 type Backend interface {
@@ -96,4 +97,8 @@ type Backend interface {
 	Ping(ctx context.Context) error
 	Describe() Description
 	Capabilities() Capabilities
+}
+
+type RuleStore interface {
+	RuleCoordinate(app, ruleType string) (Coordinate, error)
 }
