@@ -25,6 +25,7 @@ func ctxSetCmd(f *cliFlags) *cobra.Command {
 	var apolloEnv string
 	var apolloCluster string
 	var apolloNamespace string
+	var apolloRuleNamespace string
 	var apolloToken string
 	var apolloSecret string
 	cmd := &cobra.Command{
@@ -59,12 +60,13 @@ func ctxSetCmd(f *cliFlags) *cobra.Command {
 					CredentialBackend: credentialBackend,
 					OTLPRedact:        true,
 				},
-				Backend:         f.Backend,
-				Namespace:       f.Namespace,
-				ApolloAppID:     apolloAppID,
-				ApolloEnv:       apolloEnv,
-				ApolloCluster:   apolloCluster,
-				ApolloNamespace: firstNonEmpty(apolloNamespace, f.Namespace),
+				Backend:             f.Backend,
+				Namespace:           f.Namespace,
+				ApolloAppID:         apolloAppID,
+				ApolloEnv:           apolloEnv,
+				ApolloCluster:       apolloCluster,
+				ApolloNamespace:     firstNonEmpty(apolloNamespace, f.Namespace),
+				ApolloRuleNamespace: apolloRuleNamespace,
 			}
 			var err error
 			item, err = cfgovctx.StoreCredential(cmd.Context(), args[0], credentialBackend, credential, item)
@@ -82,10 +84,11 @@ func ctxSetCmd(f *cliFlags) *cobra.Command {
 				"namespace": item.Namespace,
 				"protected": item.Protected,
 				"apollo": map[string]string{
-					"appId":     item.ApolloAppID,
-					"env":       item.ApolloEnv,
-					"cluster":   item.ApolloCluster,
-					"namespace": item.ApolloNamespace,
+					"appId":         item.ApolloAppID,
+					"env":           item.ApolloEnv,
+					"cluster":       item.ApolloCluster,
+					"namespace":     item.ApolloNamespace,
+					"ruleNamespace": item.ApolloRuleNamespace,
 				},
 			})
 		},
@@ -96,6 +99,7 @@ func ctxSetCmd(f *cliFlags) *cobra.Command {
 	cmd.Flags().StringVar(&apolloEnv, "apollo-env", "", "Apollo environment")
 	cmd.Flags().StringVar(&apolloCluster, "apollo-cluster", "", "Apollo cluster")
 	cmd.Flags().StringVar(&apolloNamespace, "apollo-namespace", "", "Apollo namespace")
+	cmd.Flags().StringVar(&apolloRuleNamespace, "apollo-rule-namespace", "", "Apollo namespace for Sentinel rules")
 	cmd.Flags().StringVar(&apolloToken, "apollo-token", "", "Apollo OpenAPI token")
 	cmd.Flags().StringVar(&apolloSecret, "apollo-secret", "", "Apollo OpenAPI secret")
 	_ = cmd.Flags().MarkHidden("apollo-token")
@@ -132,16 +136,17 @@ func ctxListCmd(f *cliFlags) *cobra.Command {
 			for name, item := range cfg.Contexts {
 				current := name == cfg.CurrentContext
 				items = append(items, map[string]any{
-					"name":            name,
-					"current":         current,
-					"backend":         item.Backend,
-					"server":          item.Server,
-					"namespace":       item.Namespace,
-					"protected":       item.Protected,
-					"apolloAppId":     item.ApolloAppID,
-					"apolloEnv":       item.ApolloEnv,
-					"apolloCluster":   item.ApolloCluster,
-					"apolloNamespace": item.ApolloNamespace,
+					"name":                name,
+					"current":             current,
+					"backend":             item.Backend,
+					"server":              item.Server,
+					"namespace":           item.Namespace,
+					"protected":           item.Protected,
+					"apolloAppId":         item.ApolloAppID,
+					"apolloEnv":           item.ApolloEnv,
+					"apolloCluster":       item.ApolloCluster,
+					"apolloNamespace":     item.ApolloNamespace,
+					"apolloRuleNamespace": item.ApolloRuleNamespace,
 				})
 				rows = append(rows, []string{name, fmt.Sprint(current), item.Backend, item.Server, firstNonEmpty(item.Namespace, item.ApolloNamespace), fmt.Sprint(item.Protected)})
 			}
@@ -166,17 +171,18 @@ func ctxCurrentCmd(f *cliFlags) *cobra.Command {
 				return err
 			}
 			return newPrinter(f).JSONData("ContextItem", map[string]any{
-				"name":               name,
-				"backend":            item.Backend,
-				"server":             item.Server,
-				"namespace":          item.Namespace,
-				"protected":          item.Protected,
-				"apolloAppId":        item.ApolloAppID,
-				"apolloEnv":          item.ApolloEnv,
-				"apolloCluster":      item.ApolloCluster,
-				"apolloNamespace":    item.ApolloNamespace,
-				"credentialBackend":  item.CredentialBackend,
-				"credentialBackends": credstore.Available(),
+				"name":                name,
+				"backend":             item.Backend,
+				"server":              item.Server,
+				"namespace":           item.Namespace,
+				"protected":           item.Protected,
+				"apolloAppId":         item.ApolloAppID,
+				"apolloEnv":           item.ApolloEnv,
+				"apolloCluster":       item.ApolloCluster,
+				"apolloNamespace":     item.ApolloNamespace,
+				"apolloRuleNamespace": item.ApolloRuleNamespace,
+				"credentialBackend":   item.CredentialBackend,
+				"credentialBackends":  credstore.Available(),
 			})
 		},
 	}

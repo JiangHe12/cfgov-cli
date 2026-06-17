@@ -582,15 +582,16 @@ func buildBackendFromNamedContext(parent context.Context, f *cliFlags, name, nam
 	}
 	if item.Backend == "apollo" {
 		return apolloBackend.New(apolloBackend.Options{
-			Server:    item.Server,
-			Token:     password,
-			AppID:     item.ApolloAppID,
-			Env:       item.ApolloEnv,
-			Cluster:   item.ApolloCluster,
-			Namespace: firstNonEmpty(namespaceOverride, item.ApolloNamespace, item.Namespace),
-			Operator:  currentOperator(f),
-			Reason:    f.Reason,
-			Timeout:   f.Timeout,
+			Server:        item.Server,
+			Token:         password,
+			AppID:         item.ApolloAppID,
+			Env:           item.ApolloEnv,
+			Cluster:       item.ApolloCluster,
+			Namespace:     firstNonEmpty(namespaceOverride, item.ApolloNamespace, item.Namespace),
+			RuleNamespace: item.ApolloRuleNamespace,
+			Operator:      currentOperator(f),
+			Reason:        f.Reason,
+			Timeout:       f.Timeout,
 		})
 	}
 	namespace := firstNonEmpty(namespaceOverride, item.Namespace)

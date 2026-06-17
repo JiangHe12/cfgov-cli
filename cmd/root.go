@@ -258,15 +258,16 @@ func buildApolloBackend(f *cliFlags, contextName string, item cfgovctx.Context, 
 		token = resolved
 	}
 	backend, err := apolloBackend.New(apolloBackend.Options{
-		Server:    server,
-		Token:     token,
-		AppID:     firstNonEmpty(os.Getenv("APOLLO_APP_ID"), item.ApolloAppID, item.Username),
-		Env:       firstNonEmpty(os.Getenv("APOLLO_ENV"), item.ApolloEnv),
-		Cluster:   firstNonEmpty(os.Getenv("APOLLO_CLUSTER"), item.ApolloCluster),
-		Namespace: firstNonEmpty(f.Namespace, os.Getenv("APOLLO_NAMESPACE"), item.ApolloNamespace, item.Namespace),
-		Operator:  currentOperator(f),
-		Reason:    f.Reason,
-		Timeout:   f.Timeout,
+		Server:        server,
+		Token:         token,
+		AppID:         firstNonEmpty(os.Getenv("APOLLO_APP_ID"), item.ApolloAppID, item.Username),
+		Env:           firstNonEmpty(os.Getenv("APOLLO_ENV"), item.ApolloEnv),
+		Cluster:       firstNonEmpty(os.Getenv("APOLLO_CLUSTER"), item.ApolloCluster),
+		Namespace:     firstNonEmpty(f.Namespace, os.Getenv("APOLLO_NAMESPACE"), item.ApolloNamespace, item.Namespace),
+		RuleNamespace: firstNonEmpty(os.Getenv("APOLLO_RULE_NAMESPACE"), item.ApolloRuleNamespace),
+		Operator:      currentOperator(f),
+		Reason:        f.Reason,
+		Timeout:       f.Timeout,
 	})
 	if err != nil {
 		return nil, err

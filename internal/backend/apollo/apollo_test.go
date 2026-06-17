@@ -77,7 +77,7 @@ func TestCapabilitiesAndUnsupportedMethods(t *testing.T) {
 		t.Fatalf("New() error = %v", err)
 	}
 	caps := backend.Capabilities()
-	if caps.Backend != "apollo" || caps.SupportsHistory || caps.SupportsWatch || caps.SupportsRules {
+	if caps.Backend != "apollo" || caps.SupportsHistory || caps.SupportsWatch || !caps.SupportsRules {
 		t.Fatalf("capabilities = %#v", caps)
 	}
 	if _, _, err := backend.History(context.Background(), cfgov.Coordinate{}, cfgov.HistoryOptions{}); apperrors.AsAppError(err).Code != apperrors.CodeNotImplemented {
@@ -85,5 +85,47 @@ func TestCapabilitiesAndUnsupportedMethods(t *testing.T) {
 	}
 	if _, err := backend.Watch(context.Background(), cfgov.Coordinate{}, "", cfgov.WatchOptions{}); apperrors.AsAppError(err).Code != apperrors.CodeNotImplemented {
 		t.Fatalf("watch error = %v, want not implemented", err)
+	}
+}
+
+func TestRuleCoordinateDefaultsToSentinelNamespace(t *testing.T) {
+	t.Parallel()
+	backend, err := New(Options{Server: "http://apollo.example", AppID: "cfgov"})
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+	coord, err := backend.RuleCoordinate("order-service", "flow")
+	if err != nil {
+		t.Fatalf("RuleCoordinate() error = %v", err)
+	}
+	if coord.Namespace != "SENTINEL" || coord.Key != "order-service-flow-rules" {
+		t.Fatalf("coord = %#v", coord)
+	}
+}
+
+func TestRuleCoordinateUsesOverrideNamespace(t *testing.T) {
+	t.Parallel()
+	backend, err := New(Options{Server: "http://apollo.example", AppID: "cfgov", RuleNamespace: "RULES"})
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+	coord, err := backend.RuleCoordinate("order-service", "param")
+	if err != nil {
+		t.Fatalf("RuleCoordinate() error = %v", err)
+	}
+	if coord.Namespace != "RULES" || coord.Key != "order-service-param-rules" {
+		t.Fatalf("coord = %#v", coord)
+	}
+}
+
+func TestRuleCoordinateRejectsInjectedApp(t *testing.T) {
+	t.Parallel()
+	backend, err := New(Options{Server: "http://apollo.example", AppID: "cfgov"})
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+	_, err = backend.RuleCoordinate("../prod", "flow")
+	if apperrors.AsAppError(err).Code != apperrors.CodeValidationFailed {
+		t.Fatalf("error = %v, want validation failed", err)
 	}
 }

@@ -6,10 +6,12 @@
 //     backend default namespace.
 //   - cfgov.Coordinate.Key maps to the Apollo item key inside that namespace.
 //
-// This item-level mapping is wire-compatible with sentinel-cli's Apollo storage:
-// Sentinel rule sets are plain Apollo items named "{sentinel-app}-{type}-rules"
-// in the configured namespace, so cfgov can read/write the same values as
-// ordinary config blobs. P3-S1 intentionally does not implement RuleStore.
+// Rule coordinate mapping:
+//   - RuleCoordinate(app, type) maps to Coordinate{Namespace: ruleNamespace,
+//     Key: "{app}-{type}-rules"}.
+//   - ruleNamespace defaults to "SENTINEL" to match sentinel-cli Apollo wire
+//     format and is intentionally separate from the config namespace default
+//     "application".
 package apollo
 
 import (
@@ -30,40 +32,44 @@ import (
 	"github.com/JiangHe12/opskit-core/apperrors"
 
 	"github.com/JiangHe12/cfgov-cli/internal/cfgov"
+	"github.com/JiangHe12/cfgov-cli/internal/rule"
 )
 
 const (
-	defaultCluster   = "default"
-	defaultNamespace = "application"
-	defaultEnv       = "DEV"
+	defaultCluster       = "default"
+	defaultNamespace     = "application"
+	defaultRuleNamespace = "SENTINEL"
+	defaultEnv           = "DEV"
 )
 
 type Options struct {
-	Server    string
-	Token     string
-	AppID     string
-	Env       string
-	Cluster   string
-	Namespace string
-	Operator  string
-	Reason    string
-	Timeout   time.Duration
-	Trace     bool
-	TraceOut  io.Writer
+	Server        string
+	Token         string
+	AppID         string
+	Env           string
+	Cluster       string
+	Namespace     string
+	RuleNamespace string
+	Operator      string
+	Reason        string
+	Timeout       time.Duration
+	Trace         bool
+	TraceOut      io.Writer
 }
 
 type Backend struct {
-	server     string
-	token      string
-	appID      string
-	env        string
-	cluster    string
-	namespace  string
-	operator   string
-	reason     string
-	httpClient *http.Client
-	trace      bool
-	traceOut   io.Writer
+	server        string
+	token         string
+	appID         string
+	env           string
+	cluster       string
+	namespace     string
+	ruleNamespace string
+	operator      string
+	reason        string
+	httpClient    *http.Client
+	trace         bool
+	traceOut      io.Writer
 }
 
 type itemResponse struct {
@@ -97,7 +103,10 @@ type errorResponse struct {
 	Exception string `json:"exception"`
 }
 
-var _ cfgov.Backend = (*Backend)(nil)
+var (
+	_ cfgov.Backend   = (*Backend)(nil)
+	_ cfgov.RuleStore = (*Backend)(nil)
+)
 
 func New(opts Options) (*Backend, error) {
 	if err := validatePart("server", opts.Server, true); err != nil {
@@ -118,6 +127,10 @@ func New(opts Options) (*Backend, error) {
 	if err := validatePart("namespace", namespace, false); err != nil {
 		return nil, err
 	}
+	ruleNamespace := firstNonEmpty(opts.RuleNamespace, defaultRuleNamespace)
+	if err := validatePart("rule namespace", ruleNamespace, false); err != nil {
+		return nil, err
+	}
 	timeout := opts.Timeout
 	if timeout <= 0 {
 		timeout = 30 * time.Second
@@ -127,17 +140,18 @@ func New(opts Options) (*Backend, error) {
 		out = os.Stderr
 	}
 	return &Backend{
-		server:     strings.TrimRight(opts.Server, "/"),
-		token:      opts.Token,
-		appID:      opts.AppID,
-		env:        env,
-		cluster:    cluster,
-		namespace:  namespace,
-		operator:   firstNonEmpty(opts.Operator, "cfgov-cli"),
-		reason:     opts.Reason,
-		httpClient: &http.Client{Timeout: timeout},
-		trace:      opts.Trace,
-		traceOut:   out,
+		server:        strings.TrimRight(opts.Server, "/"),
+		token:         opts.Token,
+		appID:         opts.AppID,
+		env:           env,
+		cluster:       cluster,
+		namespace:     namespace,
+		ruleNamespace: ruleNamespace,
+		operator:      firstNonEmpty(opts.Operator, "cfgov-cli"),
+		reason:        opts.Reason,
+		httpClient:    &http.Client{Timeout: timeout},
+		trace:         opts.Trace,
+		traceOut:      out,
 	}, nil
 }
 
@@ -280,14 +294,32 @@ func (b *Backend) Describe() cfgov.Description {
 func (b *Backend) Capabilities() cfgov.Capabilities {
 	return cfgov.Capabilities{
 		Backend:          "apollo",
-		ResourceTypes:    []string{"config"},
-		Verbs:            []string{"get", "list", "diff", "validate", "pull", "push", "delete"},
+		ResourceTypes:    []string{"config", "rule"},
+		Verbs:            []string{"get", "list", "diff", "validate", "pull", "push", "delete", "rule"},
 		SupportsCAS:      true,
 		SupportsRevision: true,
 		SupportsHistory:  false,
 		SupportsWatch:    false,
-		SupportsRules:    false,
+		SupportsRules:    true,
 	}
+}
+
+func (b *Backend) RuleCoordinate(app, ruleType string) (cfgov.Coordinate, error) {
+	parsed, err := rule.ParseType(ruleType)
+	if err != nil {
+		return cfgov.Coordinate{}, err
+	}
+	dataID, err := rule.DataID(app, parsed)
+	if err != nil {
+		return cfgov.Coordinate{}, err
+	}
+	if err := validatePart("rule namespace", b.ruleNamespace, false); err != nil {
+		return cfgov.Coordinate{}, err
+	}
+	if err := validatePart("rule key", dataID, false); err != nil {
+		return cfgov.Coordinate{}, err
+	}
+	return cfgov.Coordinate{Namespace: b.ruleNamespace, Key: dataID}, nil
 }
 
 func (b *Backend) resolve(coord cfgov.Coordinate) (string, string, error) {
