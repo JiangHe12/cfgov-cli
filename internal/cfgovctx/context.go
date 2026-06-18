@@ -24,6 +24,8 @@ type Context struct {
 	EtcdCACert          string `yaml:"etcdCaCert,omitempty"`
 	EtcdClientCert      string `yaml:"etcdClientCert,omitempty"`
 	EtcdClientKey       string `yaml:"etcdClientKey,omitempty"`
+	K8sKubeconfig       string `yaml:"k8sKubeconfig,omitempty"`
+	K8sContext          string `yaml:"k8sContext,omitempty"`
 }
 
 func (c *Context) base() *corectx.Base { return &c.Base }

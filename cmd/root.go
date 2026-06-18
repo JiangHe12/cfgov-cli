@@ -30,6 +30,7 @@ import (
 	"github.com/JiangHe12/cfgov-cli/internal/api"
 	apolloBackend "github.com/JiangHe12/cfgov-cli/internal/backend/apollo"
 	etcdBackend "github.com/JiangHe12/cfgov-cli/internal/backend/etcd"
+	k8sBackend "github.com/JiangHe12/cfgov-cli/internal/backend/k8s"
 	nacosbackend "github.com/JiangHe12/cfgov-cli/internal/backend/nacos"
 	"github.com/JiangHe12/cfgov-cli/internal/cfgov"
 	"github.com/JiangHe12/cfgov-cli/internal/cfgovctx"
@@ -79,6 +80,8 @@ type cliFlags struct {
 	AllowSvcDereg  bool
 	AllowRuleDel   bool
 	Concurrency    int
+	K8sKubeconfig  string
+	K8sContext     string
 	OTLPEnd        string
 	OTLPMetrics    string
 	OTLPInsec      bool
@@ -165,7 +168,7 @@ func newRootCmdWith(f *cliFlags) *cobra.Command {
 	}
 	cmd.PersistentFlags().StringVar(&f.Config, "config", "", "Override context config path")
 	cmd.PersistentFlags().StringVar(&f.Context, "context", "", "Temporarily use a named context for this command")
-	cmd.PersistentFlags().StringVar(&f.Backend, "backend", "", "Backend override: nacos | apollo | etcd")
+	cmd.PersistentFlags().StringVar(&f.Backend, "backend", "", "Backend override: nacos | apollo | etcd | k8s")
 	cmd.PersistentFlags().StringVar(&f.Server, "server", "", "Backend server URL")
 	cmd.PersistentFlags().StringVar(&f.Username, "username", "", "Backend username")
 	cmd.PersistentFlags().StringVar(&f.Password, "password", "", "Backend password")
@@ -197,6 +200,8 @@ func newRootCmdWith(f *cliFlags) *cobra.Command {
 	cmd.PersistentFlags().BoolVar(&f.AllowSvcDereg, "allow-production-service-deregister", false, "Allow protected service deregister")
 	cmd.PersistentFlags().BoolVar(&f.AllowRuleDel, "allow-production-rule-delete", false, "Allow protected Sentinel rule delete")
 	cmd.PersistentFlags().IntVar(&f.Concurrency, "concurrency", 1, "Maximum concurrent batch operations")
+	cmd.PersistentFlags().StringVar(&f.K8sKubeconfig, "k8s-kubeconfig", "", "Kubernetes kubeconfig path")
+	cmd.PersistentFlags().StringVar(&f.K8sContext, "k8s-context", "", "Kubernetes kubeconfig context")
 	cmd.PersistentFlags().StringVar(&f.OTLPEnd, "otel-endpoint", "", "OTLP trace endpoint")
 	cmd.PersistentFlags().StringVar(&f.OTLPMetrics, "otel-metrics-endpoint", "", "OTLP metrics endpoint")
 	cmd.PersistentFlags().BoolVar(&f.OTLPInsec, "otel-insecure", false, "Disable TLS for OTLP exporter")
@@ -297,6 +302,10 @@ func buildBackend(f *cliFlags) (cfgov.Backend, cfgovctx.Context, error) {
 		backend, err := buildEtcdBackend(f, name, item, server)
 		return backend, item, err
 	}
+	if backendName == "k8s" {
+		backend, err := buildK8sBackend(f, item)
+		return backend, item, err
+	}
 	if backendName != "nacos" {
 		return nil, cfgovctx.Context{}, apperrors.New(apperrors.CodeNotImplemented, "backend is not supported", nil)
 	}
@@ -324,9 +333,26 @@ func backendServerEnv(backendName string) string {
 		return os.Getenv("APOLLO_SERVER")
 	case "etcd":
 		return firstNonEmpty(os.Getenv("ETCD_ENDPOINTS"), os.Getenv("ETCD_SERVER"))
+	case "k8s":
+		return ""
 	default:
 		return os.Getenv("NACOS_SERVER")
 	}
+}
+
+func buildK8sBackend(f *cliFlags, item cfgovctx.Context) (cfgov.Backend, error) {
+	backend, err := k8sBackend.New(k8sBackend.Options{
+		Kubeconfig: firstNonEmpty(f.K8sKubeconfig, item.K8sKubeconfig, os.Getenv("KUBECONFIG")),
+		Context:    firstNonEmpty(f.K8sContext, item.K8sContext),
+		Namespace:  firstNonEmpty(f.Namespace, item.Namespace),
+		Timeout:    f.Timeout,
+		Trace:      f.Debug || f.Trace,
+		TraceOut:   os.Stderr,
+	})
+	if err != nil {
+		return nil, err
+	}
+	return backend, nil
 }
 
 func buildApolloBackend(f *cliFlags, contextName string, item cfgovctx.Context, server string) (cfgov.Backend, error) {
@@ -402,7 +428,7 @@ func resolvedContext(f *cliFlags) (cfgovctx.Context, string, error) {
 	ctx, name, err := cfgovctx.Current()
 	if err != nil {
 		backendName := firstNonEmpty(f.Backend, "nacos")
-		if f.Server == "" && backendServerEnv(backendName) == "" {
+		if backendName != "k8s" && f.Server == "" && backendServerEnv(backendName) == "" {
 			return cfgovctx.Context{}, "", err
 		}
 		return cfgovctx.Context{Backend: backendName, Namespace: f.Namespace}, "direct", nil

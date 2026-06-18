@@ -74,7 +74,7 @@ func ctxSetCmd(f *cliFlags) *cobra.Command { //nolint:gocyclo // Cobra wiring fo
 			if f.Backend == "" {
 				return apperrors.New(apperrors.CodeUsageError, "--backend is required", nil)
 			}
-			if f.Backend != "nacos" && f.Backend != "apollo" && f.Backend != "etcd" {
+			if f.Backend != "nacos" && f.Backend != "apollo" && f.Backend != "etcd" && f.Backend != "k8s" {
 				return apperrors.New(apperrors.CodeNotImplemented, "backend is not supported", nil)
 			}
 			if f.Backend == "etcd" {
@@ -84,7 +84,7 @@ func ctxSetCmd(f *cliFlags) *cobra.Command { //nolint:gocyclo // Cobra wiring fo
 				if err := etcdBackend.ValidateKeyPrefix(etcdKeyPrefix); err != nil {
 					return err
 				}
-			} else {
+			} else if f.Backend != "k8s" {
 				if err := validateServerURL(f.Server); err != nil {
 					return err
 				}
@@ -139,6 +139,8 @@ func ctxSetCmd(f *cliFlags) *cobra.Command { //nolint:gocyclo // Cobra wiring fo
 				EtcdCACert:          etcdCACert,
 				EtcdClientCert:      etcdClientCert,
 				EtcdClientKey:       etcdClientKey,
+				K8sKubeconfig:       f.K8sKubeconfig,
+				K8sContext:          f.K8sContext,
 			}
 			var err error
 			item, err = cfgovctx.StoreCredential(cmd.Context(), args[0], credentialBackend, credential, item)
@@ -647,7 +649,7 @@ func credentialBackendForContext(item cfgovctx.Context) (credstore.Backend, erro
 }
 
 func validateImportedContext(item cfgovctx.Context) error {
-	if item.Backend != "nacos" && item.Backend != "apollo" && item.Backend != "etcd" {
+	if item.Backend != "nacos" && item.Backend != "apollo" && item.Backend != "etcd" && item.Backend != "k8s" {
 		return apperrors.New(apperrors.CodeNotImplemented, "backend is not supported", nil)
 	}
 	if item.Backend == "etcd" {
@@ -657,7 +659,7 @@ func validateImportedContext(item cfgovctx.Context) error {
 		if err := etcdBackend.ValidateKeyPrefix(item.EtcdKeyPrefix); err != nil {
 			return err
 		}
-	} else {
+	} else if item.Backend != "k8s" {
 		if err := validateServerURL(item.Server); err != nil {
 			return err
 		}
@@ -728,6 +730,8 @@ func contextView(name string, item cfgovctx.Context, current, showSecrets bool) 
 		"etcdCaCert":          item.EtcdCACert,
 		"etcdClientCert":      item.EtcdClientCert,
 		"etcdClientKey":       item.EtcdClientKey,
+		"k8sKubeconfig":       item.K8sKubeconfig,
+		"k8sContext":          item.K8sContext,
 	}
 }
 

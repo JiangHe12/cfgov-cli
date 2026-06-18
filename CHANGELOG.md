@@ -5,6 +5,7 @@ All notable changes to this project are documented in this file.
 ## [Unreleased]
 
 ### Added
+- Kubernetes config backend: config-only `k8s` adapter for ConfigMap/Secret data keys (`configmap|secret/<name>/<dataKey>`) with kubeconfig context wiring, fail-closed coordinate validation, Secret-safe trace redaction, resourceVersion CAS, and honest `SupportsRules=false` / `SupportsHistory=false` / `SupportsWatch=false` capability reporting.
 - etcd rules-over-backend support: etcd now implements `cfgov.RuleStore`, deriving Sentinel rule coordinates as `{app}-{type}-rules` under a separate `etcdRuleNamespace` / `ETCD_RULE_NAMESPACE` override with default `SENTINEL`.
 - etcd config backend: `cfgov.Backend` adapter with safe single-segment namespace/key mapping, CAS revisions, real watch support, TLS/mTLS connection options, context wiring, and honest `SupportsHistory=false` capability reporting.
 - Rule deep-validation parity with sentinel-cli: ported the 5 cross-rule deep checks (`MULTIPLE_SYSTEM_RULES`, `FLOW_REFRESOURCE_MISSING` — ERROR; `PARAM_WITHOUT_FLOW`, `AUTHORITY_MIXED_STRATEGY`, `FLOW_DEGRADE_GRADE_MISMATCH` — WARNING) alongside the existing duplicate-key and dangerous-threshold checks. New `rule validate --dir <dir>` aggregates every `<type>.json` and runs the full cross-rule check set in one pass (`--file` XOR `--dir`). Single-file `rule validate --file --deep` now runs only intra-type checks (`IntraTypeDeepCheck`), so it no longer false-positives on cross-type rules; ERROR checks still block `rule create/update/import/rollback`.

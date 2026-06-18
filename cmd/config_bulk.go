@@ -18,6 +18,7 @@ import (
 	"github.com/JiangHe12/cfgov-cli/internal/api"
 	apolloBackend "github.com/JiangHe12/cfgov-cli/internal/backend/apollo"
 	etcdBackend "github.com/JiangHe12/cfgov-cli/internal/backend/etcd"
+	k8sBackend "github.com/JiangHe12/cfgov-cli/internal/backend/k8s"
 	"github.com/JiangHe12/cfgov-cli/internal/backend/nacos"
 	"github.com/JiangHe12/cfgov-cli/internal/backup"
 	"github.com/JiangHe12/cfgov-cli/internal/cfgclass"
@@ -716,7 +717,7 @@ func buildBackendFromNamedContext(parent context.Context, f *cliFlags, name stri
 	if !ok {
 		return nil, apperrors.New(apperrors.CodeUsageError, "source context not found", nil)
 	}
-	if item.Backend != "" && item.Backend != "nacos" && item.Backend != "apollo" && item.Backend != "etcd" {
+	if item.Backend != "" && item.Backend != "nacos" && item.Backend != "apollo" && item.Backend != "etcd" && item.Backend != "k8s" {
 		return nil, apperrors.New(apperrors.CodeNotImplemented, "backend is not supported", nil)
 	}
 	password, err := cfgovctx.ResolvePassword(parent, name, item)
@@ -753,6 +754,16 @@ func buildBackendFromNamedContext(parent context.Context, f *cliFlags, name stri
 			Timeout:       f.Timeout,
 			Trace:         f.Debug || f.Trace,
 			TraceOut:      os.Stderr,
+		})
+	}
+	if item.Backend == "k8s" {
+		return k8sBackend.New(k8sBackend.Options{
+			Kubeconfig: item.K8sKubeconfig,
+			Context:    item.K8sContext,
+			Namespace:  item.Namespace,
+			Timeout:    f.Timeout,
+			Trace:      f.Debug || f.Trace,
+			TraceOut:   os.Stderr,
 		})
 	}
 	client := api.NewClient(item.Server, item.Username, password, item.Namespace, f.Timeout)
