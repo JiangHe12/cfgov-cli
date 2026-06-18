@@ -385,14 +385,17 @@ func configListenCmd(f *cliFlags) *cobra.Command {
 	return cmd
 }
 
-func configPushCmd(f *cliFlags) *cobra.Command {
+func configPushCmd(f *cliFlags) *cobra.Command { //nolint:gocyclo // Cobra handler keeps config push safety, backup, dry-run, CAS, and strict-mode flow together.
 	var key, file, inlineContent, contentType, expectedRevision string
-	var noValidate bool
+	var noValidate, createOnly, updateOnly bool
 	cmd := &cobra.Command{
 		Use:   "push --key <key> (--file <path>|--content <string>)",
 		Short: "Write a config blob",
 		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
+			if createOnly && updateOnly {
+				return apperrors.New(apperrors.CodeUsageError, "--create-only and --update-only are mutually exclusive", nil)
+			}
 			backend, ctxMeta, err := buildBackend(f)
 			if err != nil {
 				return err
@@ -417,7 +420,17 @@ func configPushCmd(f *cliFlags) *cobra.Command {
 			class := cfgclass.Classify(cfgclass.OperationPush, content, contentType)
 			coord := cfgov.Coordinate{Namespace: backend.Describe().Namespace, Key: key}
 			plan := pushPlan(cmd.Context(), backend, coord, content, class)
+			plan.CreateOnly = createOnly
+			plan.UpdateOnly = updateOnly
+			remote, exists, err := inspectConfigPushTarget(cmd.Context(), backend, coord)
+			if err != nil {
+				return err
+			}
+			plan.TargetExists = &exists
 			if f.DryRun {
+				if err := validateConfigPushMode(createOnly, updateOnly, exists); err != nil {
+					return err
+				}
 				appendAuditWarn(f, audit.EventType("config.write"), ctxMeta, audit.EventTarget{ResourceType: "config", Resource: key}, audit.StatusSuccess, plan.Impact, nil)
 				return newPrinter(f).JSONData("ChangePlan", plan)
 			}
@@ -427,7 +440,10 @@ func configPushCmd(f *cliFlags) *cobra.Command {
 			if err := authorize(f, class.Risk, ctxMeta, ""); err != nil {
 				return err
 			}
-			if done, err := finishIdempotentConfigPush(cmd.Context(), f, backend, ctxMeta, coord, content, plan); done || err != nil {
+			if err := validateConfigPushMode(createOnly, updateOnly, exists); err != nil {
+				return err
+			}
+			if done, err := finishIdempotentConfigPush(f, ctxMeta, coord, content, plan, remote, exists); done || err != nil {
 				return err
 			}
 			backupResult, err := maybeBackupConfig(cmd.Context(), f, backend, ctxMeta, coord)
@@ -460,6 +476,8 @@ func configPushCmd(f *cliFlags) *cobra.Command {
 	cmd.Flags().StringVar(&contentType, "type", "", "Config type: text, properties, json, yaml, xml")
 	cmd.Flags().StringVar(&expectedRevision, "expected-revision", "", "CAS revision precondition")
 	cmd.Flags().BoolVar(&noValidate, "no-validate", false, "Skip local content format validation")
+	cmd.Flags().BoolVar(&createOnly, "create-only", false, "Fail if the target config already exists")
+	cmd.Flags().BoolVar(&updateOnly, "update-only", false, "Fail if the target config does not exist")
 	_ = cmd.MarkFlagRequired("key")
 	return cmd
 }
@@ -522,6 +540,9 @@ type changePlan struct {
 	Impact       string           `json:"impact"`
 	SHA256       string           `json:"sha256"`
 	Bytes        int              `json:"bytes"`
+	CreateOnly   bool             `json:"createOnly,omitempty"`
+	UpdateOnly   bool             `json:"updateOnly,omitempty"`
+	TargetExists *bool            `json:"targetExists,omitempty"`
 }
 
 type diffResult struct {
@@ -565,16 +586,33 @@ func pushPlan(ctx context.Context, backend cfgov.Backend, coord cfgov.Coordinate
 	}
 }
 
-func handleIdempotentConfigPush(ctx context.Context, f *cliFlags, backend cfgov.Backend, meta cfgovctx.Context, coord cfgov.Coordinate, content []byte, plan changePlan) (bool, error) {
+func inspectConfigPushTarget(ctx context.Context, backend cfgov.Backend, coord cfgov.Coordinate) (cfgov.Blob, bool, error) {
 	remote, err := backend.Get(ctx, coord)
 	if err != nil {
 		if apperrors.AsAppError(err).Code == apperrors.CodeResourceNotFound {
-			return false, nil
+			return cfgov.Blob{}, false, nil
 		}
-		return false, err
+		return cfgov.Blob{}, false, err
+	}
+	return remote, true, nil
+}
+
+func validateConfigPushMode(createOnly, updateOnly, exists bool) error {
+	if createOnly && exists {
+		return apperrors.New(apperrors.CodeResourceAlreadyExists, "config already exists", nil)
+	}
+	if updateOnly && !exists {
+		return apperrors.New(apperrors.CodeResourceNotFound, "config does not exist", nil)
+	}
+	return nil
+}
+
+func handleIdempotentConfigPush(f *cliFlags, meta cfgovctx.Context, coord cfgov.Coordinate, content []byte, plan changePlan, remote cfgov.Blob, exists bool) bool {
+	if !exists {
+		return false
 	}
 	if sha256Bytes(remote.Content) != sha256Bytes(content) {
-		return false, nil
+		return false
 	}
 	appendAuditWarn(
 		f,
@@ -585,13 +623,13 @@ func handleIdempotentConfigPush(ctx context.Context, f *cliFlags, backend cfgov.
 		plan.Impact,
 		nil,
 	)
-	return true, nil
+	return true
 }
 
-func finishIdempotentConfigPush(ctx context.Context, f *cliFlags, backend cfgov.Backend, meta cfgovctx.Context, coord cfgov.Coordinate, content []byte, plan changePlan) (bool, error) {
-	skipped, err := handleIdempotentConfigPush(ctx, f, backend, meta, coord, content, plan)
-	if err != nil || !skipped {
-		return skipped, err
+func finishIdempotentConfigPush(f *cliFlags, meta cfgovctx.Context, coord cfgov.Coordinate, content []byte, plan changePlan, remote cfgov.Blob, exists bool) (bool, error) {
+	skipped := handleIdempotentConfigPush(f, meta, coord, content, plan, remote, exists)
+	if !skipped {
+		return false, nil
 	}
 	if isStrictNoChange(f) {
 		return true, apperrors.New(apperrors.CodeNoChangeRequired, "config already matches remote", nil)

@@ -21,6 +21,8 @@ cfgov ctx set <name> --backend apollo --server <url> --apollo-app-id <appId> --a
 cfgov ctx use <name>
 cfgov ctx list -o json
 cfgov ctx current -o json
+cfgov ctx role set <name> --target-operator <operator> --role reader|writer|admin
+cfgov ctx role list <name> -o json
 ```
 
 `--backend` can temporarily override the current context for one command. Nacos supports config, rule, namespace, service, config history, and config listen. Apollo supports config and rule storage; namespace/service management, history, and listen are not supported and fail closed.

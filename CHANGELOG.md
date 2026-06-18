@@ -6,6 +6,8 @@ All notable changes to this project are documented in this file.
 
 ### Added
 - Rule deep-validation parity with sentinel-cli: ported the 5 cross-rule deep checks (`MULTIPLE_SYSTEM_RULES`, `FLOW_REFRESOURCE_MISSING` — ERROR; `PARAM_WITHOUT_FLOW`, `AUTHORITY_MIXED_STRATEGY`, `FLOW_DEGRADE_GRADE_MISMATCH` — WARNING) alongside the existing duplicate-key and dangerous-threshold checks. New `rule validate --dir <dir>` aggregates every `<type>.json` and runs the full cross-rule check set in one pass (`--file` XOR `--dir`). Single-file `rule validate --file --deep` now runs only intra-type checks (`IntraTypeDeepCheck`), so it no longer false-positives on cross-type rules; ERROR checks still block `rule create/update/import/rollback`.
+- `config push --create-only` / `--update-only` (mutually exclusive): fail-if-exists (`RESOURCE_ALREADY_EXISTS`) / fail-if-not-found (`RESOURCE_NOT_FOUND`) semantics layered on the existing upsert as a post-authorization pre-write check; default `push` stays upsert, and CAS / backup / dry-run / audit / risk classification are unchanged.
+- Local RBAC role management: `ctx role set/unset/list` write per-operator `reader`/`writer`/`admin` roles into the context (`reader`→R0, `writer`→R2, `admin`→R3 ceiling, enforced through `opskit-core/safety`); independent of the `--roles-source`/`--roles-url` remote role path.
 
 ## v0.1.0
 

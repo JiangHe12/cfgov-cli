@@ -9,6 +9,7 @@ import (
 
 	"github.com/JiangHe12/opskit-core/apperrors"
 	corectx "github.com/JiangHe12/opskit-core/ctx"
+	"github.com/JiangHe12/opskit-core/safety"
 	"gopkg.in/yaml.v3"
 
 	"github.com/JiangHe12/cfgov-cli/internal/cfgovctx"
@@ -88,6 +89,48 @@ func TestCtxImportDoesNotOverwriteWithoutForce(t *testing.T) {
 	err = runCtxImport(newDefaultFlags(), path, "", false)
 	if apperrors.AsAppError(err).Code != apperrors.CodeUsageError {
 		t.Fatalf("error = %v, want usage error", err)
+	}
+}
+
+func TestCtxRoleLifecycleAndRBAC(t *testing.T) {
+	dir := t.TempDir()
+	cfgovctx.SetConfigPath(filepath.Join(dir, "config.yaml"))
+	if err := cfgovctx.Set("dev", cfgovctx.Context{Base: corectx.Base{Server: "http://127.0.0.1:8848"}, Backend: "nacos"}); err != nil {
+		t.Fatal(err)
+	}
+
+	f := newDefaultFlags()
+	if err := runCtxRoleSet(f, "dev", roleOptions{targetOperator: "alice", role: safety.RoleReader}); err != nil {
+		t.Fatalf("runCtxRoleSet error = %v", err)
+	}
+	cfg, err := cfgovctx.Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Contexts["dev"].Roles["alice"] != safety.RoleReader {
+		t.Fatalf("roles = %#v", cfg.Contexts["dev"].Roles)
+	}
+	roles := roleItems(cfg.Contexts["dev"].Roles)
+	if len(roles) != 1 || roles[0].Operator != "alice" || roles[0].Role != safety.RoleReader {
+		t.Fatalf("role items = %#v", roles)
+	}
+
+	writer := newDefaultFlags()
+	writer.Operator = "alice"
+	writer.Yes = true
+	if err := authorize(writer, safety.R1, cfg.Contexts["dev"], ""); apperrors.AsAppError(err).Code != apperrors.CodeAuthorizationRequired {
+		t.Fatalf("reader write authorize error = %v, want authorization required", err)
+	}
+
+	if err := runCtxRoleUnset(f, "dev", roleOptions{targetOperator: "alice"}); err != nil {
+		t.Fatalf("runCtxRoleUnset error = %v", err)
+	}
+	cfg, err = cfgovctx.Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Contexts["dev"].Roles != nil {
+		t.Fatalf("roles after unset = %#v, want nil", cfg.Contexts["dev"].Roles)
 	}
 }
 

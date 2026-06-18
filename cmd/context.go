@@ -16,6 +16,7 @@ import (
 	"github.com/JiangHe12/opskit-core/audit"
 	"github.com/JiangHe12/opskit-core/credstore"
 	corectx "github.com/JiangHe12/opskit-core/ctx"
+	"github.com/JiangHe12/opskit-core/safety"
 
 	"github.com/JiangHe12/cfgov-cli/internal/cfgov"
 	"github.com/JiangHe12/cfgov-cli/internal/cfgovctx"
@@ -37,9 +38,19 @@ type contextImportResult struct {
 	CredentialRedacted bool   `json:"credentialRedacted"`
 }
 
+type roleOptions struct {
+	targetOperator string
+	role           string
+}
+
+type roleItem struct {
+	Operator string `json:"operator"`
+	Role     string `json:"role"`
+}
+
 func newContextCmd(f *cliFlags) *cobra.Command {
 	cmd := &cobra.Command{Use: "ctx", Aliases: []string{"context"}, Short: "Manage cfgov contexts"}
-	cmd.AddCommand(ctxSetCmd(f), ctxUseCmd(f), ctxListCmd(f), ctxCurrentCmd(f), ctxDeleteCmd(f), ctxExportCmd(f), ctxImportCmd(f), ctxTestCmd(f))
+	cmd.AddCommand(ctxSetCmd(f), ctxUseCmd(f), ctxListCmd(f), ctxCurrentCmd(f), ctxDeleteCmd(f), ctxExportCmd(f), ctxImportCmd(f), ctxTestCmd(f), ctxRoleCmd(f))
 	return cmd
 }
 
@@ -330,6 +341,157 @@ func ctxTestCmd(f *cliFlags) *cobra.Command {
 	}
 }
 
+func ctxRoleCmd(f *cliFlags) *cobra.Command {
+	cmd := &cobra.Command{
+		Use:   "role",
+		Short: "Manage context RBAC roles",
+	}
+	cmd.AddCommand(ctxRoleSetCmd(f), ctxRoleUnsetCmd(f), ctxRoleListCmd(f))
+	return cmd
+}
+
+func ctxRoleSetCmd(f *cliFlags) *cobra.Command {
+	var opts roleOptions
+	cmd := &cobra.Command{
+		Use:   "set <context>",
+		Short: "Assign an operator role for a context",
+		Args:  cobra.ExactArgs(1),
+		RunE: func(_ *cobra.Command, args []string) error {
+			return runCtxRoleSet(f, args[0], opts)
+		},
+	}
+	cmd.Flags().StringVar(&opts.targetOperator, "target-operator", "", "Operator identity to assign")
+	cmd.Flags().StringVar(&opts.role, "role", "", "Role: reader, writer, admin")
+	return cmd
+}
+
+func ctxRoleUnsetCmd(f *cliFlags) *cobra.Command {
+	var opts roleOptions
+	cmd := &cobra.Command{
+		Use:   "unset <context>",
+		Short: "Remove an operator role from a context",
+		Args:  cobra.ExactArgs(1),
+		RunE: func(_ *cobra.Command, args []string) error {
+			return runCtxRoleUnset(f, args[0], opts)
+		},
+	}
+	cmd.Flags().StringVar(&opts.targetOperator, "target-operator", "", "Operator identity to remove")
+	return cmd
+}
+
+func ctxRoleListCmd(f *cliFlags) *cobra.Command {
+	return &cobra.Command{
+		Use:   "list <context>",
+		Short: "List operator roles for a context",
+		Args:  cobra.ExactArgs(1),
+		RunE: func(_ *cobra.Command, args []string) error {
+			return runCtxRoleList(f, args[0])
+		},
+	}
+}
+
+func runCtxRoleSet(f *cliFlags, contextName string, opts roleOptions) error {
+	if opts.targetOperator == "" {
+		return apperrors.New(apperrors.CodeUsageError, "--target-operator is required", nil)
+	}
+	if !validRole(opts.role) {
+		return apperrors.New(apperrors.CodeUsageError, "--role must be reader, writer, or admin", nil)
+	}
+	item, err := loadContextForRole(contextName)
+	if err != nil {
+		return err
+	}
+	if item.Roles == nil {
+		item.Roles = map[string]string{}
+	}
+	item.Roles[opts.targetOperator] = opts.role
+	if err := cfgovctx.Set(contextName, item); err != nil {
+		return err
+	}
+	appendRoleAuditWarn(f, audit.EventRoleAssign, contextName, item, opts.targetOperator, opts.role, nil)
+	if f.Output == "json" {
+		return newPrinter(f).JSONData("ContextItem", map[string]any{"context": contextName, "operator": opts.targetOperator, "role": opts.role})
+	}
+	newPrinter(f).Success(fmt.Sprintf("role %q assigned to %q in context %q", opts.role, opts.targetOperator, contextName))
+	return nil
+}
+
+func runCtxRoleUnset(f *cliFlags, contextName string, opts roleOptions) error {
+	if opts.targetOperator == "" {
+		return apperrors.New(apperrors.CodeUsageError, "--target-operator is required", nil)
+	}
+	item, err := loadContextForRole(contextName)
+	if err != nil {
+		return err
+	}
+	if item.Roles != nil {
+		delete(item.Roles, opts.targetOperator)
+		if len(item.Roles) == 0 {
+			item.Roles = nil
+		}
+	}
+	if err := cfgovctx.Set(contextName, item); err != nil {
+		return err
+	}
+	appendRoleAuditWarn(f, audit.EventRoleRevoke, contextName, item, opts.targetOperator, "", nil)
+	if f.Output == "json" {
+		return newPrinter(f).JSONData("ContextItem", map[string]any{"context": contextName, "operator": opts.targetOperator, "removed": true})
+	}
+	newPrinter(f).Success(fmt.Sprintf("role removed from %q in context %q", opts.targetOperator, contextName))
+	return nil
+}
+
+func runCtxRoleList(f *cliFlags, contextName string) error {
+	item, err := loadContextForRole(contextName)
+	if err != nil {
+		return err
+	}
+	items := roleItems(item.Roles)
+	p := newPrinter(f)
+	if f.Output == "json" {
+		return p.JSONList("RoleList", items, len(items), 1, len(items), false)
+	}
+	if len(items) == 0 {
+		p.Info("(no roles assigned)")
+		return nil
+	}
+	rows := make([][]string, 0, len(items))
+	for _, item := range items {
+		rows = append(rows, []string{item.Operator, item.Role})
+	}
+	p.Table([]string{"OPERATOR", "ROLE"}, rows)
+	return nil
+}
+
+func loadContextForRole(name string) (cfgovctx.Context, error) {
+	cfg, err := cfgovctx.Load()
+	if err != nil {
+		return cfgovctx.Context{}, err
+	}
+	item, ok := cfg.Contexts[name]
+	if !ok {
+		return cfgovctx.Context{}, apperrors.New(apperrors.CodeUsageError, fmt.Sprintf("context %q not found", name), nil)
+	}
+	return item, nil
+}
+
+func validRole(role string) bool {
+	return role == safety.RoleReader || role == safety.RoleWriter || role == safety.RoleAdmin
+}
+
+func roleItems(roles map[string]string) []roleItem {
+	operators := make([]string, 0, len(roles))
+	for operator := range roles {
+		operators = append(operators, operator)
+	}
+	sort.Strings(operators)
+	items := make([]roleItem, 0, len(operators))
+	for _, operator := range operators {
+		items = append(items, roleItem{Operator: operator, Role: roles[operator]})
+	}
+	return items
+}
+
 func runCtxExport(f *cliFlags, name string, includeCredentials bool) error {
 	cfg, err := cfgovctx.Load()
 	if err != nil {
@@ -542,4 +704,34 @@ func appendContextAuditWarn(f *cliFlags, eventType audit.EventType, item cfgovct
 		diff,
 		err,
 	)
+}
+
+func appendRoleAuditWarn(f *cliFlags, eventType audit.EventType, contextName string, item cfgovctx.Context, operator, role string, err error) {
+	path, pathErr := audit.DefaultPath()
+	if pathErr != nil {
+		_, _ = fmt.Fprintf(os.Stderr, "warning: audit path failed: %v\n", pathErr)
+		return
+	}
+	status := audit.StatusSuccess
+	if err != nil {
+		status = audit.StatusFailed
+	}
+	evt := audit.Event{
+		EventType: eventType,
+		Operator:  currentOperator(f),
+		Context:   audit.EventContext{Name: contextName, Env: item.Env, Protected: item.Protected},
+		Target:    audit.EventTarget{ResourceType: "role", Resource: operator},
+		Status:    status,
+		RoleChange: &audit.EventRoleChange{
+			ChangedOperator: operator,
+			Role:            role,
+		},
+	}
+	if err != nil {
+		appErr := apperrors.AsAppError(err)
+		evt.Error = &audit.EventError{Code: string(appErr.Code), Message: appErr.Message}
+	}
+	if appendErr := audit.AppendWithOptions(path, evt, auditOptions(f)); appendErr != nil {
+		_, _ = fmt.Fprintf(os.Stderr, "warning: audit write failed: %v\n", appendErr)
+	}
 }

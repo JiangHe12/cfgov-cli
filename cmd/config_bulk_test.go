@@ -117,6 +117,28 @@ func TestImportPlanSkipExistingAndOverwriteAreDistinct(t *testing.T) {
 	}
 }
 
+func TestConfigPushStrictModes(t *testing.T) {
+	t.Parallel()
+	if err := validateConfigPushMode(true, false, true); apperrors.AsAppError(err).Code != apperrors.CodeResourceAlreadyExists {
+		t.Fatalf("create-only existing error = %v, want already exists", err)
+	}
+	if err := validateConfigPushMode(false, true, false); apperrors.AsAppError(err).Code != apperrors.CodeResourceNotFound {
+		t.Fatalf("update-only missing error = %v, want not found", err)
+	}
+	if err := validateConfigPushMode(false, false, true); err != nil {
+		t.Fatalf("default upsert with existing error = %v", err)
+	}
+	if err := validateConfigPushMode(false, false, false); err != nil {
+		t.Fatalf("default upsert with missing error = %v", err)
+	}
+	if err := validateConfigPushMode(true, false, false); err != nil {
+		t.Fatalf("create-only missing error = %v", err)
+	}
+	if err := validateConfigPushMode(false, true, true); err != nil {
+		t.Fatalf("update-only existing error = %v", err)
+	}
+}
+
 func TestPruneScopeRequiresExplicitScopeWhenPruning(t *testing.T) {
 	t.Parallel()
 	_, err := parsePruneScopes(nil, "ns", true)

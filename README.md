@@ -207,6 +207,7 @@ cfgov ctx set <name> --backend nacos  --server <url> [--namespace <ns>] [--prote
 cfgov ctx set <name> --backend apollo --server <url> --apollo-app-id <id> --apollo-env <env> \
                      --apollo-cluster <c> --apollo-namespace <ns>
 cfgov ctx use|list|current|delete|export|import|test
+cfgov ctx role set|unset|list <context>
 
 # Diagnostics & ecosystem
 cfgov doctor -o json            # read-only health check (redacted output)
