@@ -4,7 +4,7 @@
 
 **面向人类与 AI 智能体的「带治理」配置 & Sentinel 规则操作命令行。**
 
-一个安全的命令行,统一管理 **Nacos** 与 **Apollo** 上的应用配置和流控规则——读取、对比、修改、备份、回滚、审计,再也不会手滑改挂生产。
+一个安全的命令行,统一管理 **Nacos**、**Apollo**、**etcd** 与 **Kubernetes** 上的应用配置和流控规则——读取、对比、修改、备份、回滚、审计,再也不会手滑改挂生产。
 
 [![npm version](https://img.shields.io/npm/v/cfgov-cli.svg)](https://www.npmjs.com/package/cfgov-cli)
 [![CI](https://github.com/JiangHe12/cfgov-cli/actions/workflows/ci.yml/badge.svg)](https://github.com/JiangHe12/cfgov-cli/actions/workflows/ci.yml)
@@ -19,7 +19,7 @@
 
 ## 🧭 这是什么?(先看这里)
 
-应用的行为往往不只在代码里,还活在 **Nacos / Apollo** 这类配置中心中:数据库地址、功能开关、超时时间,以及 **Sentinel** 的流控 / 熔断规则。手动改(或让脚本去改)这些东西很可怕:一条 `delete` 写错就能搞挂生产,而且通常没有预览、没有备份、也没人知道是谁改了什么。
+应用的行为往往不只在代码里,还活在 **Nacos / Apollo / etcd / Kubernetes**(ConfigMap/Secret)这类配置中心或键值存储中:数据库地址、功能开关、超时时间,以及 **Sentinel** 的流控 / 熔断规则。手动改(或让脚本去改)这些东西很可怕:一条 `delete` 写错就能搞挂生产,而且通常没有预览、没有备份、也没人知道是谁改了什么。
 
 **cfgov-cli 给每一个这样的操作都套上了护栏。** 把它想成一个谨慎的助手:
 
@@ -29,7 +29,7 @@
 - 📜 **所有操作记入防篡改审计日志**——只记指纹,绝不记你的明文密钥。
 - 🤖 **可以放心交给 AI 智能体**——智能体能自由读取、预览,但**无法**伪造危险操作所需的人类审批。
 
-如果你以前用 `nacos-cli` 或 `sentinel-cli`,**cfgov-cli 同时取代了这两者**——能力一致,一个带治理的工具,双后端。
+如果你以前用 `nacos-cli` 或 `sentinel-cli`,**cfgov-cli 同时取代了这两者**——能力一致,一个带治理的工具,四后端。
 
 ---
 
@@ -37,7 +37,7 @@
 
 | | |
 |---|---|
-| 🗄️ **双后端** | **Nacos**(配置、Sentinel 规则、命名空间、服务、历史、实时监听)与 **Apollo**(配置 + Sentinel 规则)。可按上下文绑定,也可按命令临时覆盖。 |
+| 🗄️ **四后端** | **Nacos**(配置、Sentinel 规则、命名空间、服务、历史、实时监听)、**Apollo**(配置 + 规则)、**etcd**(配置 + 规则、原生 watch)与 **Kubernetes**(ConfigMap/Secret 配置 + 规则)。可按上下文绑定,也可按命令临时覆盖。 |
 | ⚙️ **完整配置生命周期** | get · list · diff · validate · pull · history · listen · push · delete · export · import · promote · rollback · reconcile |
 | 🚦 **Sentinel 规则** | flow · degrade · system · authority · param——读取、校验(浅 **+** 深)、创建、更新、导入、回滚、删除。与 Sentinel 运行时**线格式兼容**。 |
 | 🏷️ **Nacos 命名空间 & 服务** | 命名空间 list / create / update / delete;服务实例 list / register / deregister。 |
@@ -61,7 +61,7 @@ npm install -g cfgov-cli
 <summary>其它安装方式</summary>
 
 - **直接下载**——从 [Releases 页面](https://github.com/JiangHe12/cfgov-cli/releases)取对应平台二进制,用(cosign 签名的)`checksums.txt` 校验,放进 `PATH` 并重命名为 `cfgov`。
-- **从源码**——`go install github.com/JiangHe12/cfgov-cli@latest`(Go 1.22+)。
+- **从源码**——`go install github.com/JiangHe12/cfgov-cli@latest`(Go 1.26+)。
 - **镜像 / 内网隔离**——设置 `CFGOV_CLI_DOWNLOAD_MIRROR=<base-url>`,从你自己的镜像拉二进制。
 
 验证安装:
@@ -170,11 +170,11 @@ cfgov rule rollback --app <app> --backup <ref> --yes                            
 cfgov rule delete   --app <app> --type <type> --yes --ticket <t> [--allow-production-rule-delete]  # R2 / R3
 ```
 
-每个规则写入都会先过浅层 JSON/schema 校验;create/update/import/rollback 还会跑**深层**语义检查,且标志无法绕过。`rule validate --file --deep` 只跑对单个孤立规则类型有意义的检查;跨类型检查(如 param 没有对应 flow、flow/degrade grade 不一致)请用 `rule validate --dir --deep`。规则集以配置 blob 形式存储(Nacos group `SENTINEL_GROUP`、dataId `{app}-{type}-rules`;Apollo namespace `SENTINEL`、item `{app}-{type}-rules`),从而与 Sentinel 运行时保持线格式兼容。
+每个规则写入都会先过浅层 JSON/schema 校验;create/update/import/rollback 还会跑**深层**语义检查,且标志无法绕过。`rule validate --file --deep` 只跑对单个孤立规则类型有意义的检查;跨类型检查(如 param 没有对应 flow、flow/degrade grade 不一致)请用 `rule validate --dir --deep`。规则集以配置 blob 形式存储(Nacos group `SENTINEL_GROUP`、dataId `{app}-{type}-rules`;Apollo namespace `SENTINEL`、item `{app}-{type}-rules`;etcd key `<keyPrefix>SENTINEL/{app}-{type}-rules`;Kubernetes ConfigMap `{app}-{type}-rules`、数据键 `rules.json`),从而与 Sentinel 运行时保持线格式兼容。其中 Kubernetes 采用的是 ConfigMap / file-datasource 约定,而非基于 CRD 的 datasource。
 </details>
 
 <details>
-<summary><b>namespace</b> 与 <b>service</b> — 仅 Nacos(Apollo 会 fail-closed 返回 NotImplemented)</summary>
+<summary><b>namespace</b> 与 <b>service</b> — 仅 Nacos(Apollo、etcd 与 Kubernetes 均 fail-closed 返回 NotImplemented)</summary>
 
 ```bash
 cfgov namespace list   -o json                                                           # R0
@@ -207,6 +207,10 @@ cfgov audit prune  (--before <…> | --keep-last <n>) [--confirm]               
 cfgov ctx set <name> --backend nacos  --server <url> [--namespace <ns>] [--protected]
 cfgov ctx set <name> --backend apollo --server <url> --apollo-app-id <id> --apollo-env <env> \
                      --apollo-cluster <c> --apollo-namespace <ns>
+cfgov ctx set <name> --backend etcd   --server <host:port,host:port> [--etcd-key-prefix <p>] \
+                     [--etcd-rule-namespace SENTINEL] [--namespace <ns>] \
+                     [--etcd-ca-cert <f>] [--etcd-client-cert <f>] [--etcd-client-key <f>]
+cfgov ctx set <name> --backend k8s    [--k8s-kubeconfig <path>] [--k8s-context <c>] --namespace <k8s-ns>
 cfgov ctx use|list|current|delete|export|import|test
 cfgov ctx role set|unset|list <context>
 

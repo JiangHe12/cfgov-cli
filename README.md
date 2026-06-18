@@ -4,7 +4,7 @@
 
 **Governed configuration & Sentinel-rule operations for humans _and_ AI agents.**
 
-One safe command line for **Nacos** and **Apollo** — read, diff, change, back up, roll back, and audit your app config and flow-control rules without ever fat-fingering production.
+One safe command line for **Nacos**, **Apollo**, **etcd**, and **Kubernetes** — read, diff, change, back up, roll back, and audit your app config and flow-control rules without ever fat-fingering production.
 
 [![npm version](https://img.shields.io/npm/v/cfgov-cli.svg)](https://www.npmjs.com/package/cfgov-cli)
 [![CI](https://github.com/JiangHe12/cfgov-cli/actions/workflows/ci.yml/badge.svg)](https://github.com/JiangHe12/cfgov-cli/actions/workflows/ci.yml)
@@ -19,7 +19,7 @@ One safe command line for **Nacos** and **Apollo** — read, diff, change, back 
 
 ## 🧭 What is this? (read me first)
 
-Your application's behaviour often lives **outside** your code — in a config center like **Nacos** or **Apollo**: database URLs, feature flags, timeouts, and **Sentinel** flow-control / circuit-breaker rules. Editing those by hand (or letting a script do it) is scary: one wrong `delete` can take down production, and you usually have no preview, no backup, and no record of who changed what.
+Your application's behaviour often lives **outside** your code — in a config center or key-value store like **Nacos**, **Apollo**, **etcd**, or **Kubernetes** ConfigMaps/Secrets: database URLs, feature flags, timeouts, and **Sentinel** flow-control / circuit-breaker rules. Editing those by hand (or letting a script do it) is scary: one wrong `delete` can take down production, and you usually have no preview, no backup, and no record of who changed what.
 
 **cfgov-cli puts guardrails around every one of those operations.** Think of it as a careful assistant that:
 
@@ -29,7 +29,7 @@ Your application's behaviour often lives **outside** your code — in a config c
 - 📜 **Records everything in a tamper-evident audit log** — fingerprints only, never your secrets.
 - 🤖 **Is safe to hand to an AI agent** — the agent can read and preview freely, but **cannot** invent the human approvals required for dangerous actions.
 
-If you used to run `nacos-cli` or `sentinel-cli`, **cfgov-cli replaces both** — same capabilities, one governed tool, two backends.
+If you used to run `nacos-cli` or `sentinel-cli`, **cfgov-cli replaces both** — same capabilities, one governed tool, four backends.
 
 ---
 
@@ -37,7 +37,7 @@ If you used to run `nacos-cli` or `sentinel-cli`, **cfgov-cli replaces both** �
 
 | | |
 |---|---|
-| 🗄️ **Two backends** | **Nacos** (config, Sentinel rules, namespaces, services, history, live-watch) and **Apollo** (config + Sentinel rules). Pick per context or override per command. |
+| 🗄️ **Four backends** | **Nacos** (config, Sentinel rules, namespaces, services, history, live-watch), **Apollo** (config + rules), **etcd** (config + rules, native watch), and **Kubernetes** (ConfigMap/Secret config + rules). Pick per context or override per command. |
 | ⚙️ **Full config lifecycle** | get · list · diff · validate · pull · history · listen · push · delete · export · import · promote · rollback · reconcile |
 | 🚦 **Sentinel rules** | flow · degrade · system · authority · param — read, validate (shallow **and** deep), create, update, import, roll back, delete. Wire-compatible with the Sentinel runtime. |
 | 🏷️ **Nacos namespaces & services** | list / create / update / delete namespaces; list / register / deregister service instances. |
@@ -61,7 +61,7 @@ This installs a tiny launcher; on first run it downloads the right pre-built bin
 <summary>Other ways to install</summary>
 
 - **Direct download** — grab the binary for your platform from the [Releases page](https://github.com/JiangHe12/cfgov-cli/releases), verify it against `checksums.txt` (cosign-signed), put it on your `PATH`, and rename it to `cfgov`.
-- **From source** — `go install github.com/JiangHe12/cfgov-cli@latest` (Go 1.22+).
+- **From source** — `go install github.com/JiangHe12/cfgov-cli@latest` (Go 1.26+).
 - **Mirror / air-gapped** — set `CFGOV_CLI_DOWNLOAD_MIRROR=<base-url>` to fetch the binary from your own mirror.
 
 Verify the install:
@@ -170,11 +170,11 @@ cfgov rule rollback --app <app> --backup <ref> --yes                            
 cfgov rule delete   --app <app> --type <type> --yes --ticket <t> [--allow-production-rule-delete]  # R2 / R3
 ```
 
-Every rule write passes shallow JSON/schema validation; create/update/import/rollback also run **deep** semantic checks that flags cannot bypass. `rule validate --file --deep` runs checks that are meaningful for one isolated rule type; use `rule validate --dir --deep` for cross-rule checks such as `param` without matching `flow` or `flow`/`degrade` grade mismatch. Rule sets are stored as config blobs (Nacos group `SENTINEL_GROUP`, dataId `{app}-{type}-rules`; Apollo namespace `SENTINEL`, item `{app}-{type}-rules`) so they stay wire-compatible with the Sentinel runtime.
+Every rule write passes shallow JSON/schema validation; create/update/import/rollback also run **deep** semantic checks that flags cannot bypass. `rule validate --file --deep` runs checks that are meaningful for one isolated rule type; use `rule validate --dir --deep` for cross-rule checks such as `param` without matching `flow` or `flow`/`degrade` grade mismatch. Rule sets are stored as config blobs (Nacos group `SENTINEL_GROUP`, dataId `{app}-{type}-rules`; Apollo namespace `SENTINEL`, item `{app}-{type}-rules`; etcd key `<keyPrefix>SENTINEL/{app}-{type}-rules`; Kubernetes ConfigMap `{app}-{type}-rules`, data key `rules.json`) so they stay wire-compatible with the Sentinel runtime. The Kubernetes layout is a ConfigMap / file-datasource convention, not a CRD datasource.
 </details>
 
 <details>
-<summary><b>namespace</b> & <b>service</b> — Nacos only (Apollo fails closed with NotImplemented)</summary>
+<summary><b>namespace</b> & <b>service</b> — Nacos only (Apollo, etcd & Kubernetes fail closed with NotImplemented)</summary>
 
 ```bash
 cfgov namespace list   -o json                                                           # R0
@@ -207,6 +207,10 @@ cfgov audit prune  (--before <…> | --keep-last <n>) [--confirm]               
 cfgov ctx set <name> --backend nacos  --server <url> [--namespace <ns>] [--protected]
 cfgov ctx set <name> --backend apollo --server <url> --apollo-app-id <id> --apollo-env <env> \
                      --apollo-cluster <c> --apollo-namespace <ns>
+cfgov ctx set <name> --backend etcd   --server <host:port,host:port> [--etcd-key-prefix <p>] \
+                     [--etcd-rule-namespace SENTINEL] [--namespace <ns>] \
+                     [--etcd-ca-cert <f>] [--etcd-client-cert <f>] [--etcd-client-key <f>]
+cfgov ctx set <name> --backend k8s    [--k8s-kubeconfig <path>] [--k8s-context <c>] --namespace <k8s-ns>
 cfgov ctx use|list|current|delete|export|import|test
 cfgov ctx role set|unset|list <context>
 
