@@ -5,8 +5,11 @@
 //   - cfgov.Coordinate.Key maps to exactly "<kind>/<name>/<dataKey>".
 //   - kind is either "configmap" or "secret".
 //
-// This backend intentionally implements config storage only. Sentinel rules,
-// history, and watch are not supported here.
+// Rule coordinate mapping:
+//   - RuleCoordinate(app, type) maps to Coordinate{Namespace: backend namespace,
+//     Key: "configmap/{app}-{type}-rules/rules.json"}.
+//
+// History and watch are not supported here.
 package k8s
 
 import (
@@ -30,12 +33,14 @@ import (
 	"github.com/JiangHe12/opskit-core/apperrors"
 
 	"github.com/JiangHe12/cfgov-cli/internal/cfgov"
+	"github.com/JiangHe12/cfgov-cli/internal/rule"
 )
 
 const (
 	defaultNamespace = "default"
 	kindConfigMap    = "configmap"
 	kindSecret       = "secret"
+	ruleDataKey      = "rules.json"
 )
 
 type Options struct {
@@ -73,7 +78,10 @@ type typedSecretClient interface {
 	Update(ctx context.Context, secret *corev1.Secret, opts metav1.UpdateOptions) (*corev1.Secret, error)
 }
 
-var _ cfgov.Backend = (*Backend)(nil)
+var (
+	_ cfgov.Backend   = (*Backend)(nil)
+	_ cfgov.RuleStore = (*Backend)(nil)
+)
 
 func New(opts Options) (*Backend, error) {
 	namespace := firstNonEmpty(opts.Namespace, defaultNamespace)
@@ -224,14 +232,30 @@ func (b *Backend) Describe() cfgov.Description {
 func (b *Backend) Capabilities() cfgov.Capabilities {
 	return cfgov.Capabilities{
 		Backend:          "k8s",
-		ResourceTypes:    []string{"config"},
+		ResourceTypes:    []string{"config", "rule"},
 		Verbs:            []string{"get", "list", "diff", "validate", "pull", "push", "delete"},
 		SupportsCAS:      true,
 		SupportsRevision: true,
 		SupportsHistory:  false,
 		SupportsWatch:    false,
-		SupportsRules:    false,
+		SupportsRules:    true,
 	}
+}
+
+func (b *Backend) RuleCoordinate(app, ruleType string) (cfgov.Coordinate, error) {
+	parsed, err := rule.ParseType(ruleType)
+	if err != nil {
+		return cfgov.Coordinate{}, err
+	}
+	dataID, err := rule.DataID(app, parsed)
+	if err != nil {
+		return cfgov.Coordinate{}, err
+	}
+	key := kindConfigMap + "/" + dataID + "/" + ruleDataKey
+	if _, err := parseKey(key); err != nil {
+		return cfgov.Coordinate{}, err
+	}
+	return cfgov.Coordinate{Namespace: b.namespace, Key: key}, nil
 }
 
 func (b *Backend) getConfigMap(ctx context.Context, resolved coordinate) (cfgov.Blob, error) {

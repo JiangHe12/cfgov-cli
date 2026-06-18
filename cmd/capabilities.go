@@ -119,13 +119,13 @@ func currentBackendCapabilities(f *cliFlags) cfgov.Capabilities {
 	case "k8s":
 		return cfgov.Capabilities{
 			Backend:          "k8s",
-			ResourceTypes:    []string{"config"},
+			ResourceTypes:    []string{"config", "rule"},
 			Verbs:            []string{"get", "list", "diff", "validate", "pull", "push", "delete"},
 			SupportsCAS:      true,
 			SupportsRevision: true,
 			SupportsHistory:  false,
 			SupportsWatch:    false,
-			SupportsRules:    false,
+			SupportsRules:    true,
 		}
 	default:
 		return cfgov.Capabilities{

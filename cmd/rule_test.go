@@ -1,11 +1,14 @@
 package cmd
 
 import (
+	"os"
+	"path/filepath"
 	"testing"
 
 	"github.com/JiangHe12/opskit-core/apperrors"
 
 	etcdBackend "github.com/JiangHe12/cfgov-cli/internal/backend/etcd"
+	k8sBackend "github.com/JiangHe12/cfgov-cli/internal/backend/k8s"
 	"github.com/JiangHe12/cfgov-cli/internal/cfgov"
 )
 
@@ -36,6 +39,32 @@ func TestRuleStoreEtcdBackendSupported(t *testing.T) {
 	}
 }
 
+func TestRuleStoreK8sBackendSupported(t *testing.T) {
+	t.Parallel()
+	backend, err := k8sBackend.New(k8sBackend.Options{Kubeconfig: writeTestKubeconfig(t), Context: "fake", Namespace: "default"})
+	if err != nil {
+		t.Fatalf("k8s New() error = %v", err)
+	}
+	_, store, err := ensureRuleStore(backend)
+	if err != nil {
+		t.Fatalf("ensureRuleStore(k8s) error = %v", err)
+	}
+	if store == nil {
+		t.Fatal("ensureRuleStore(k8s) returned nil store")
+	}
+}
+
+func TestK8sCapabilitiesSupportRules(t *testing.T) {
+	t.Parallel()
+	caps := currentBackendCapabilities(&cliFlags{Backend: "k8s"})
+	if caps.Backend != "k8s" || !caps.SupportsRules {
+		t.Fatalf("k8s capabilities = %#v, want SupportsRules=true", caps)
+	}
+	if len(caps.ResourceTypes) != 2 || caps.ResourceTypes[0] != "config" || caps.ResourceTypes[1] != "rule" {
+		t.Fatalf("k8s resourceTypes = %#v, want config/rule", caps.ResourceTypes)
+	}
+}
+
 func TestRuleGetExposesResourceFlagOnly(t *testing.T) {
 	t.Parallel()
 	root := newRootCmdWith(newDefaultFlags())
@@ -57,6 +86,33 @@ func TestRuleGetExposesResourceFlagOnly(t *testing.T) {
 	if listCmd.Flags().Lookup("resource") != nil {
 		t.Fatal("rule list must not expose --resource flag")
 	}
+}
+
+func writeTestKubeconfig(t *testing.T) string {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "kubeconfig.yaml")
+	data := []byte(`apiVersion: v1
+kind: Config
+clusters:
+- name: fake
+  cluster:
+    server: http://127.0.0.1:6443
+users:
+- name: fake
+  user:
+    token: fake-token
+contexts:
+- name: fake
+  context:
+    cluster: fake
+    user: fake
+    namespace: default
+current-context: fake
+`)
+	if err := os.WriteFile(path, data, 0o600); err != nil {
+		t.Fatalf("write kubeconfig: %v", err)
+	}
+	return path
 }
 
 func TestSelectedRuleTypes(t *testing.T) {

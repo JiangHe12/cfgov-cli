@@ -33,7 +33,7 @@ cfgov ctx role set <name> --target-operator <operator> --role reader|writer|admi
 cfgov ctx role list <name> -o json
 ```
 
-`--backend` can temporarily override the current context for one command. Nacos supports config, rule, namespace, service, config history, and config listen. Apollo supports config and rule storage; namespace/service management, history, and listen are not supported and fail closed. etcd supports config and rule storage plus native watch (`config listen`); history, namespace, and service are not supported. Kubernetes (ConfigMap/Secret) supports config only — keys are `<kind>/<name>/<dataKey>` where `<kind>` is `configmap` or `secret`, the context `--namespace` is the Kubernetes namespace, and rule/namespace/service, history, and watch are not supported and fail closed. Always check `cfgov capabilities -o json` for the bound backend.
+`--backend` can temporarily override the current context for one command. Nacos supports config, rule, namespace, service, config history, and config listen. Apollo supports config and rule storage; namespace/service management, history, and listen are not supported and fail closed. etcd supports config and rule storage plus native watch (`config listen`); history, namespace, and service are not supported. Kubernetes (ConfigMap/Secret) supports config and rule storage — config keys are `<kind>/<name>/<dataKey>` where `<kind>` is `configmap` or `secret`, rule sets use ConfigMap keys `configmap/{app}-{type}-rules/rules.json` in the context `--namespace`, and namespace/service, history, and watch are not supported and fail closed. Always check `cfgov capabilities -o json` for the bound backend.
 
 Credentials are stored through cfgov context credential handling. Hidden token/secret flags exist for setup paths; do not print secrets.
 
@@ -71,7 +71,7 @@ Use `--backup` or `--no-backup` according to policy. Protected destructive write
 
 ## Sentinel Rules
 
-Rule types are `flow`, `degrade`, `system`, `authority`, and `param`. Rule storage is schema-over-backend config: Nacos uses `SENTINEL_GROUP` and dataId `{app}-{type}-rules`; Apollo uses item key `{app}-{type}-rules` in rule namespace `SENTINEL` by default; etcd uses key `<keyPrefix><ruleNamespace>/{app}-{type}-rules` with rule namespace `SENTINEL` by default. Kubernetes does not support rules.
+Rule types are `flow`, `degrade`, `system`, `authority`, and `param`. Rule storage is schema-over-backend config: Nacos uses `SENTINEL_GROUP` and dataId `{app}-{type}-rules`; Apollo uses item key `{app}-{type}-rules` in rule namespace `SENTINEL` by default; etcd uses key `<keyPrefix><ruleNamespace>/{app}-{type}-rules` with rule namespace `SENTINEL` by default; Kubernetes uses ConfigMap data key `configmap/{app}-{type}-rules/rules.json` in the context namespace. The Kubernetes convention is for ConfigMap/file-datasource consumption, not a Sentinel CRD datasource.
 
 R0 read and validation:
 

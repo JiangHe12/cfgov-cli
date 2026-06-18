@@ -15,6 +15,7 @@ import (
 	"k8s.io/client-go/kubernetes/fake"
 
 	"github.com/JiangHe12/cfgov-cli/internal/cfgov"
+	"github.com/JiangHe12/cfgov-cli/internal/rule"
 )
 
 func TestValidateKeyFailClosed(t *testing.T) {
@@ -222,6 +223,76 @@ func TestTraceDoesNotPrintDataValues(t *testing.T) {
 	}
 	if !strings.Contains(trace, "value=<redacted:") {
 		t.Fatalf("trace did not include redacted value marker: %s", trace)
+	}
+}
+
+func TestRuleCoordinateDerivesConfigMapRuleKeys(t *testing.T) {
+	t.Parallel()
+	backend := newTestBackend()
+	tests := map[rule.Type]string{
+		rule.TypeFlow:      "configmap/demo-flow-rules/rules.json",
+		rule.TypeDegrade:   "configmap/demo-degrade-rules/rules.json",
+		rule.TypeSystem:    "configmap/demo-system-rules/rules.json",
+		rule.TypeAuthority: "configmap/demo-authority-rules/rules.json",
+		rule.TypeParam:     "configmap/demo-param-rules/rules.json",
+	}
+	for ruleType, wantKey := range tests {
+		t.Run(string(ruleType), func(t *testing.T) {
+			t.Parallel()
+			coord, err := backend.RuleCoordinate("demo", string(ruleType))
+			if err != nil {
+				t.Fatalf("RuleCoordinate() error = %v", err)
+			}
+			if coord.Namespace != "default" || coord.Key != wantKey {
+				t.Fatalf("RuleCoordinate() = %#v, want default/%s", coord, wantKey)
+			}
+		})
+	}
+}
+
+func TestRuleCoordinateRejectsInvalidAppBeforeAPI(t *testing.T) {
+	t.Parallel()
+	tests := []string{"MyApp", "bad/app", "..", "bad\napp"}
+	for _, app := range tests {
+		t.Run(strings.ReplaceAll(app, "\n", "\\n"), func(t *testing.T) {
+			t.Parallel()
+			backend := newTestBackend()
+			_, err := backend.RuleCoordinate(app, "flow")
+			if err == nil {
+				t.Fatalf("RuleCoordinate(%q) error = nil, want fail-closed error", app)
+			}
+			client := backend.client.(*fake.Clientset)
+			if actions := client.Actions(); len(actions) != 0 {
+				t.Fatalf("RuleCoordinate(%q) made API calls: %#v", app, actions)
+			}
+		})
+	}
+}
+
+func TestRuleCoordinatePutGetRoundTrip(t *testing.T) {
+	t.Parallel()
+	backend := newTestBackend()
+	coord, err := backend.RuleCoordinate("demo", "flow")
+	if err != nil {
+		t.Fatalf("RuleCoordinate() error = %v", err)
+	}
+	payload := []byte(`[{"resource":"GET:/demo","count":1}]`)
+	if _, err := backend.Put(context.Background(), cfgov.PutRequest{Coordinate: coord, Content: payload}); err != nil {
+		t.Fatalf("Put() error = %v", err)
+	}
+	cm, err := backend.client.CoreV1().ConfigMaps("default").Get(context.Background(), "demo-flow-rules", metav1.GetOptions{})
+	if err != nil {
+		t.Fatalf("Get ConfigMap error = %v", err)
+	}
+	if cm.Data[ruleDataKey] != string(payload) {
+		t.Fatalf("ConfigMap %s = %q, want %q", ruleDataKey, cm.Data[ruleDataKey], payload)
+	}
+	blob, err := backend.Get(context.Background(), coord)
+	if err != nil {
+		t.Fatalf("Get() error = %v", err)
+	}
+	if string(blob.Content) != string(payload) {
+		t.Fatalf("Get() content = %q, want %q", blob.Content, payload)
 	}
 }
 
