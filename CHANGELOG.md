@@ -2,7 +2,7 @@
 
 All notable changes to this project are documented in this file.
 
-## [Unreleased]
+## v0.2.0
 
 ### Added
 - Kubernetes rules-over-backend support: K8s now implements `cfgov.RuleStore` by storing Sentinel rule JSON arrays in ConfigMap data keys at `configmap/{app}-{type}-rules/rules.json` (ConfigMap/file-datasource convention, not a CRD datasource).
