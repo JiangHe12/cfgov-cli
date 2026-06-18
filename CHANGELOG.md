@@ -13,6 +13,9 @@ All notable changes to this project are documented in this file.
 - Local RBAC role management: `ctx role set/unset/list` write per-operator `reader`/`writer`/`admin` roles into the context (`reader`→R0, `writer`→R2, `admin`→R3 ceiling, enforced through `opskit-core/safety`); independent of the `--roles-source`/`--roles-url` remote role path.
 - Convenience polish: `rule list --type` filter; `rule diff --dir` directory batch diff; `config listen` transient-error backoff (2s→60s, abort after 20 consecutive failures; auth failures still return immediately); `doctor` `auth` and `write-probe` checks (write-probe only confirms the governance write path / effective-risk is computable — never mutates a backend); `capabilities.supported.outputFormats`; bare parent commands now list their subcommands and mistyped subcommands keep closest-match suggestions.
 
+### Fixed
+- Embedded AI Skill (`skills/cfgov-cli/SKILL.md`): added the required YAML frontmatter (`name`/`description`/`allowed-tools`) — it was missing since v0.1.0, so agent skill loaders (e.g. cc-switch) rejected it with "missing YAML frontmatter delimited by ---" — and refreshed the documented backends to Nacos, Apollo, etcd, and Kubernetes.
+
 ## v0.1.0
 
 ### Added

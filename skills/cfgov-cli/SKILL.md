@@ -1,6 +1,12 @@
+---
+name: cfgov-cli
+description: Governed configuration and Sentinel rule operations across Nacos, Apollo, etcd, and Kubernetes with R0-R3 authorization, backup-before-write, redaction, and fingerprint-only audit.
+allowed-tools: Bash(cfgov:*), Bash(cfgov-cli:*)
+---
+
 # cfgov-cli
 
-Use `cfgov` for governed configuration operations across Nacos and Apollo. It wraps reads, writes, backups, audit, and R0-R3 authorization for config blobs and Sentinel rule sets.
+Use `cfgov` for governed configuration operations across Nacos, Apollo, etcd, and Kubernetes. It wraps reads, writes, backups, audit, and R0-R3 authorization for config blobs and Sentinel rule sets.
 
 ## Hard Rules For AI Agents
 
@@ -18,6 +24,8 @@ Create and select contexts with:
 ```bash
 cfgov ctx set <name> --backend nacos --server <url> --namespace <namespace> [--protected]
 cfgov ctx set <name> --backend apollo --server <url> --apollo-app-id <appId> --apollo-env <env> --apollo-cluster <cluster> --apollo-namespace <namespace> [--apollo-rule-namespace SENTINEL] [--protected]
+cfgov ctx set <name> --backend etcd --server <host:port,host:port> [--etcd-key-prefix <prefix>] [--etcd-rule-namespace SENTINEL] [--namespace <namespace>] [--etcd-ca-cert <path>] [--etcd-client-cert <path>] [--etcd-client-key <path>] [--protected]
+cfgov ctx set <name> --backend k8s [--k8s-kubeconfig <path>] [--k8s-context <ctx>] --namespace <k8s-namespace> [--protected]
 cfgov ctx use <name>
 cfgov ctx list -o json
 cfgov ctx current -o json
@@ -25,7 +33,7 @@ cfgov ctx role set <name> --target-operator <operator> --role reader|writer|admi
 cfgov ctx role list <name> -o json
 ```
 
-`--backend` can temporarily override the current context for one command. Nacos supports config, rule, namespace, service, config history, and config listen. Apollo supports config and rule storage; namespace/service management, history, and listen are not supported and fail closed.
+`--backend` can temporarily override the current context for one command. Nacos supports config, rule, namespace, service, config history, and config listen. Apollo supports config and rule storage; namespace/service management, history, and listen are not supported and fail closed. etcd supports config and rule storage plus native watch (`config listen`); history, namespace, and service are not supported. Kubernetes (ConfigMap/Secret) supports config only — keys are `<kind>/<name>/<dataKey>` where `<kind>` is `configmap` or `secret`, the context `--namespace` is the Kubernetes namespace, and rule/namespace/service, history, and watch are not supported and fail closed. Always check `cfgov capabilities -o json` for the bound backend.
 
 Credentials are stored through cfgov context credential handling. Hidden token/secret flags exist for setup paths; do not print secrets.
 
@@ -63,7 +71,7 @@ Use `--backup` or `--no-backup` according to policy. Protected destructive write
 
 ## Sentinel Rules
 
-Rule types are `flow`, `degrade`, `system`, `authority`, and `param`. Rule storage is schema-over-backend config: Nacos uses `SENTINEL_GROUP` and dataId `{app}-{type}-rules`; Apollo uses item key `{app}-{type}-rules` in rule namespace `SENTINEL` by default.
+Rule types are `flow`, `degrade`, `system`, `authority`, and `param`. Rule storage is schema-over-backend config: Nacos uses `SENTINEL_GROUP` and dataId `{app}-{type}-rules`; Apollo uses item key `{app}-{type}-rules` in rule namespace `SENTINEL` by default; etcd uses key `<keyPrefix><ruleNamespace>/{app}-{type}-rules` with rule namespace `SENTINEL` by default. Kubernetes does not support rules.
 
 R0 read and validation:
 
@@ -93,7 +101,7 @@ Every rule write must pass shallow JSON/schema validation before authorization. 
 
 ## Namespace
 
-Namespace commands are Nacos-only. Apollo returns NotImplemented.
+Namespace commands are Nacos-only. Apollo, etcd, and Kubernetes return NotImplemented.
 
 ```bash
 cfgov namespace list -o json
@@ -106,7 +114,7 @@ Risk model: `list` is R0; `create` and `update` are R1; `delete` is R2 and prote
 
 ## Service
 
-Service registry commands are Nacos-only. Apollo returns NotImplemented.
+Service registry commands are Nacos-only. Apollo, etcd, and Kubernetes return NotImplemented.
 
 ```bash
 cfgov service list [--page 1 --page-size 20] -o json
