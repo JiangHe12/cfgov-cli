@@ -15,6 +15,9 @@ import (
 func TestCapabilitiesDoNotDeclareBackupCleanRiskContract(t *testing.T) {
 	t.Parallel()
 	data := buildCapabilities(newDefaultFlags(), currentBackendCapabilities(&cliFlags{Backend: "nacos"}))
+	if strings.Join(data.Supported.OutputFormats, ",") != "table,json,plain" {
+		t.Fatalf("outputFormats = %#v", data.Supported.OutputFormats)
+	}
 	for _, item := range data.Supported.Commands {
 		if item.Noun == "backup" && item.Verb == "clean" {
 			t.Fatalf("backup clean must not be in R0-R3 risk table: %#v", item)
@@ -126,6 +129,17 @@ func TestSuggestionsMinimumDistanceIsRecursive(t *testing.T) {
 	}
 	if configCmd.SuggestionsMinimumDistance != 1 {
 		t.Fatalf("config suggestion distance = %d, want 1", configCmd.SuggestionsMinimumDistance)
+	}
+}
+
+func TestParentCommandReportsSubcommands(t *testing.T) {
+	t.Parallel()
+	cmd := newRootCmdWith(newDefaultFlags())
+	cmd.SetArgs([]string{"rule"})
+	err := cmd.Execute()
+	appErr := apperrors.AsAppError(err)
+	if err == nil || !strings.Contains(appErr.Message, "requires a subcommand") || !strings.Contains(appErr.Suggestion, "Available subcommands") {
+		t.Fatalf("error = %v, want subcommand suggestion", err)
 	}
 }
 

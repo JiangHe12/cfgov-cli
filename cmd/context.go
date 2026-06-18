@@ -49,7 +49,7 @@ type roleItem struct {
 }
 
 func newContextCmd(f *cliFlags) *cobra.Command {
-	cmd := &cobra.Command{Use: "ctx", Aliases: []string{"context"}, Short: "Manage cfgov contexts"}
+	cmd := &cobra.Command{Use: "ctx", Aliases: []string{"context"}, Short: "Manage cfgov contexts", Args: requireSubcommand, RunE: runParentHelp}
 	cmd.AddCommand(ctxSetCmd(f), ctxUseCmd(f), ctxListCmd(f), ctxCurrentCmd(f), ctxDeleteCmd(f), ctxExportCmd(f), ctxImportCmd(f), ctxTestCmd(f), ctxRoleCmd(f))
 	return cmd
 }
@@ -345,6 +345,8 @@ func ctxRoleCmd(f *cliFlags) *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "role",
 		Short: "Manage context RBAC roles",
+		Args:  requireSubcommand,
+		RunE:  runParentHelp,
 	}
 	cmd.AddCommand(ctxRoleSetCmd(f), ctxRoleUnsetCmd(f), ctxRoleListCmd(f))
 	return cmd

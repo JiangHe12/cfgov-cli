@@ -54,7 +54,7 @@ type ruleValidationResult struct {
 }
 
 func newRuleCmd(f *cliFlags) *cobra.Command {
-	cmd := &cobra.Command{Use: "rule", Short: "Read and validate Sentinel rules"}
+	cmd := &cobra.Command{Use: "rule", Short: "Read and validate Sentinel rules", Args: requireSubcommand, RunE: runParentHelp}
 	cmd.AddCommand(
 		ruleListCmd(f),
 		ruleGetCmd(f),
@@ -71,7 +71,7 @@ func newRuleCmd(f *cliFlags) *cobra.Command {
 }
 
 func ruleListCmd(f *cliFlags) *cobra.Command {
-	var app string
+	var app, typeName string
 	cmd := &cobra.Command{
 		Use:   "list --app <app>",
 		Short: "List Sentinel rule counts",
@@ -81,8 +81,12 @@ func ruleListCmd(f *cliFlags) *cobra.Command {
 			if err != nil {
 				return err
 			}
-			items := make([]ruleSetResult, 0, len(rule.AllTypes))
-			for _, ruleType := range rule.AllTypes {
+			ruleTypes, err := selectedRuleTypes(typeName)
+			if err != nil {
+				return err
+			}
+			items := make([]ruleSetResult, 0, len(ruleTypes))
+			for _, ruleType := range ruleTypes {
 				result, err := readRuleSet(cmd.Context(), backend, store, app, ruleType)
 				if err != nil {
 					appendRuleAudit(f, ctxMeta, "list", app, ruleType, audit.StatusFailed, "", err)
@@ -104,6 +108,7 @@ func ruleListCmd(f *cliFlags) *cobra.Command {
 		},
 	}
 	cmd.Flags().StringVar(&app, "app", "", "Sentinel app")
+	cmd.Flags().StringVar(&typeName, "type", "", "Rule type: flow, degrade, system, authority, param")
 	_ = cmd.MarkFlagRequired("app")
 	return cmd
 }
@@ -182,12 +187,21 @@ func ruleExportCmd(f *cliFlags) *cobra.Command {
 }
 
 func ruleDiffCmd(f *cliFlags) *cobra.Command {
-	var app, typeName, file string
+	var app, typeName, file, dir string
 	cmd := &cobra.Command{
-		Use:   "diff --app <app> --type <ruleType> --file <path>",
+		Use:   "diff --app <app> (--type <ruleType> --file <path>|--dir <dir>)",
 		Short: "Compare remote and local Sentinel rules",
 		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
+			if dir != "" {
+				if file != "" {
+					return apperrors.New(apperrors.CodeUsageError, "--dir and --file are mutually exclusive", nil)
+				}
+				return ruleDiffDir(cmd.Context(), f, app, typeName, dir)
+			}
+			if file == "" {
+				return apperrors.New(apperrors.CodeUsageError, "--file is required unless --dir is specified", nil)
+			}
 			ruleType, err := rule.ParseType(typeName)
 			if err != nil {
 				return err
@@ -220,10 +234,58 @@ func ruleDiffCmd(f *cliFlags) *cobra.Command {
 	cmd.Flags().StringVar(&app, "app", "", "Sentinel app")
 	cmd.Flags().StringVar(&typeName, "type", "", "Rule type: flow, degrade, system, authority, param")
 	cmd.Flags().StringVar(&file, "file", "", "Local rule file")
+	cmd.Flags().StringVar(&dir, "dir", "", "Directory containing <type>.json files")
 	_ = cmd.MarkFlagRequired("app")
-	_ = cmd.MarkFlagRequired("type")
-	_ = cmd.MarkFlagRequired("file")
 	return cmd
+}
+
+func ruleDiffDir(ctx context.Context, f *cliFlags, app, typeName, dir string) error {
+	ruleTypes, err := selectedRuleTypes(typeName)
+	if err != nil {
+		return err
+	}
+	locals, _, _, err := readRuleValidationDirectory(dir)
+	if err != nil {
+		return err
+	}
+	backend, store, ctxMeta, err := buildRuleStore(f)
+	if err != nil {
+		return err
+	}
+	items := make([]ruleDiffResult, 0, len(ruleTypes))
+	for _, ruleType := range ruleTypes {
+		localRules, ok := locals[ruleType]
+		if !ok {
+			continue
+		}
+		remote, err := readRuleSet(ctx, backend, store, app, ruleType)
+		appendRuleAudit(f, ctxMeta, "diff", app, ruleType, auditStatus(err), ruleSetAudit(remote), err)
+		if err != nil {
+			return err
+		}
+		localPayload, err := json.Marshal(localRules)
+		if err != nil {
+			return apperrors.New(apperrors.CodeLocalIOError, "failed to marshal local rules", err)
+		}
+		item := ruleDiffResult{
+			App:          app,
+			Type:         ruleType,
+			RemoteSHA256: remote.SHA256,
+			LocalSHA256:  sha256Bytes(localPayload),
+			RemoteCount:  remote.Count,
+			LocalCount:   len(localRules),
+		}
+		item.Same = item.RemoteSHA256 == item.LocalSHA256 && item.RemoteCount == item.LocalCount
+		items = append(items, item)
+	}
+	same := true
+	for _, item := range items {
+		if !item.Same {
+			same = false
+			break
+		}
+	}
+	return newPrinter(f).JSONData("RuleDiff", map[string]any{"app": app, "dir": dir, "same": same, "items": items})
 }
 
 func ruleValidateCmd(f *cliFlags) *cobra.Command {
@@ -338,6 +400,17 @@ func countRuleIssues(issues []rule.Issue) (int, int) {
 		}
 	}
 	return errorsCount, warningsCount
+}
+
+func selectedRuleTypes(typeName string) ([]rule.Type, error) {
+	if strings.TrimSpace(typeName) == "" {
+		return append([]rule.Type{}, rule.AllTypes...), nil
+	}
+	ruleType, err := rule.ParseType(typeName)
+	if err != nil {
+		return nil, err
+	}
+	return []rule.Type{ruleType}, nil
 }
 
 func buildRuleStore(f *cliFlags) (cfgov.Backend, cfgov.RuleStore, cfgovctx.Context, error) {

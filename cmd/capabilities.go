@@ -54,6 +54,7 @@ type capSupported struct {
 	Commands           []capCommand `json:"commands"`
 	ContextAPIVersions []string     `json:"contextApiVersions"`
 	AuditAPIVersions   []string     `json:"auditApiVersions"`
+	OutputFormats      []string     `json:"outputFormats"`
 	ErrorCodes         []string     `json:"errorCodes"`
 	ExitCodes          []int        `json:"exitCodes"`
 	Kinds              []string     `json:"kinds"`
@@ -174,6 +175,7 @@ func buildCapabilities(f *cliFlags, backend cfgov.Capabilities) capabilitiesData
 			},
 			ContextAPIVersions: []string{"cfgov-cli.io/context/v1"},
 			AuditAPIVersions:   []string{auditAPIVersion},
+			OutputFormats:      []string{"table", "json", "plain"},
 			ErrorCodes:         errorCodeStrings(),
 			ExitCodes:          apperrors.AllExitCodes(),
 			Kinds:              []string{"AuditPruneResult", "AuditQueryResult", "AuditVerifyResult", "BackupCleanResult", "BackupList", "Capabilities", "ChangePlan", "ChangeResult", "ConfigExport", "ConfigItem", "ConfigList", "ConfigListenEvent", "ContextImportResult", "ContextItem", "ContextList", "ContextTestResult", "DiffResult", "DoctorResult", "Error", "ExportResult", "HistoryList", "NamespaceItem", "NamespaceList", "RoleList", "RuleDiff", "RuleExport", "RuleList", "RuleSet", "RuleValidation", "ServiceInstanceList", "ServiceItem", "ServiceList", "ValidationResult", "VersionInfo"},

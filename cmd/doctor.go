@@ -12,6 +12,9 @@ import (
 	"github.com/JiangHe12/opskit-core/apperrors"
 	"github.com/JiangHe12/opskit-core/audit"
 	"github.com/JiangHe12/opskit-core/redact"
+	"github.com/JiangHe12/opskit-core/safety"
+
+	"github.com/JiangHe12/cfgov-cli/internal/cfgovctx"
 )
 
 type doctorResult struct {
@@ -43,24 +46,21 @@ func runDoctor(ctx context.Context, f *cliFlags) error {
 	result := doctorResult{OK: true}
 	ctxMeta, ctxName, ctxErr := resolvedContext(f)
 	if ctxErr != nil {
-		result.OK = false
-		result.Checks = append(result.Checks, doctorFailed("context", ctxErr))
+		result.add(doctorFailed("context", ctxErr))
 	} else {
-		result.Checks = append(result.Checks, doctorCheck{Name: "context", Status: audit.StatusSuccess, Context: ctxName, Message: redact.String("context loaded")})
+		result.add(doctorCheck{Name: "context", Status: audit.StatusSuccess, Context: ctxName, Message: redact.String("context loaded")})
+		result.add(doctorAuthCheck(f, ctxMeta, ctxName))
+		result.add(doctorWriteProbeCheck(ctxMeta, ctxName))
 	}
 
 	backend, _, backendErr := buildBackend(f)
 	if backendErr != nil {
-		result.OK = false
-		result.Checks = append(result.Checks, doctorFailed("backend", backendErr))
+		result.add(doctorFailed("backend", backendErr))
 	} else {
 		start := time.Now()
 		err := backend.Ping(ctx)
 		status := auditStatus(err)
-		if err != nil {
-			result.OK = false
-		}
-		result.Checks = append(result.Checks, doctorCheck{
+		result.add(doctorCheck{
 			Name:    "backend",
 			Status:  status,
 			Message: doctorMessage("ping ok", err),
@@ -70,7 +70,7 @@ func runDoctor(ctx context.Context, f *cliFlags) error {
 		})
 	}
 
-	result.Checks = append(result.Checks, doctorAuditCheck(f))
+	result.add(doctorAuditCheck(f))
 	appendAuditWarn(f, audit.EventType("doctor"), ctxMeta, audit.EventTarget{ResourceType: "diagnostic"}, audit.StatusSuccess, "doctor checks="+intString(len(result.Checks)), nil)
 	if err := printDoctorResult(f, result); err != nil {
 		return err
@@ -79,6 +79,36 @@ func runDoctor(ctx context.Context, f *cliFlags) error {
 		return apperrors.New(apperrors.CodeValidationFailed, "doctor checks failed", nil)
 	}
 	return nil
+}
+
+func (r *doctorResult) add(check doctorCheck) {
+	if check.Status == audit.StatusFailed {
+		r.OK = false
+	}
+	r.Checks = append(r.Checks, check)
+}
+
+func doctorAuthCheck(f *cliFlags, meta cfgovctx.Context, ctxName string) doctorCheck {
+	if _, err := cfgovctx.ResolvePassword(commandContext(f), ctxName, meta); err != nil {
+		return doctorFailed("auth", err)
+	}
+	return doctorCheck{Name: "auth", Status: audit.StatusSuccess, Message: redact.String("credentials resolvable"), Context: ctxName}
+}
+
+func doctorWriteProbeCheck(meta cfgovctx.Context, ctxName string) doctorCheck {
+	effective := safety.EffectiveRisk(safety.R1, safety.ContextMeta{
+		Env:             meta.Env,
+		Protected:       meta.Protected,
+		TicketPattern:   meta.TicketPattern,
+		TicketValidator: meta.TicketValidator,
+		Roles:           meta.Roles,
+	})
+	return doctorCheck{
+		Name:    "write-probe",
+		Status:  audit.StatusSuccess,
+		Message: redact.String(fmt.Sprintf("write governance path reachable; effectiveRisk=%v; backend mutation not attempted", effective)),
+		Context: ctxName,
+	}
 }
 
 func doctorAuditCheck(f *cliFlags) doctorCheck {

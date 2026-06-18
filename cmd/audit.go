@@ -62,7 +62,7 @@ type auditPruneResult struct {
 }
 
 func newAuditCmd(f *cliFlags) *cobra.Command {
-	cmd := &cobra.Command{Use: "audit", Short: "Inspect cfgov audit log"}
+	cmd := &cobra.Command{Use: "audit", Short: "Inspect cfgov audit log", Args: requireSubcommand, RunE: runParentHelp}
 	cmd.AddCommand(auditQueryCmd(f), auditVerifyCmd(f), auditPruneCmd(f))
 	return cmd
 }

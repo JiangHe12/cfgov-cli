@@ -68,10 +68,11 @@ Rule types are `flow`, `degrade`, `system`, `authority`, and `param`. Rule stora
 R0 read and validation:
 
 ```bash
-cfgov rule list --app <app> -o json
+cfgov rule list --app <app> [--type <type>] -o json
 cfgov rule get --app <app> --type <flow|degrade|system|authority|param> -o json
 cfgov rule export --app <app> --dir <dir> -o json
 cfgov rule diff --app <app> --type <type> --file <path> -o json
+cfgov rule diff --app <app> --dir <dir> -o json
 cfgov rule validate --file <path> [--deep] -o json
 cfgov rule validate --dir <dir> --deep [--fail-on-warnings] -o json
 ```

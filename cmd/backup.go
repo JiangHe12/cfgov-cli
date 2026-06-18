@@ -24,7 +24,7 @@ type backupCleanOptions struct {
 }
 
 func newBackupCmd(f *cliFlags) *cobra.Command {
-	cmd := &cobra.Command{Use: "backup", Short: "Manage local cfgov backups"}
+	cmd := &cobra.Command{Use: "backup", Short: "Manage local cfgov backups", Args: requireSubcommand, RunE: runParentHelp}
 	cmd.AddCommand(backupListCmd(f), backupCleanCmd(f))
 	return cmd
 }

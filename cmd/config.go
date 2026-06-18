@@ -30,7 +30,7 @@ import (
 )
 
 func newConfigCmd(f *cliFlags) *cobra.Command {
-	cmd := &cobra.Command{Use: "config", Short: "Govern config blobs"}
+	cmd := &cobra.Command{Use: "config", Short: "Govern config blobs", Args: requireSubcommand, RunE: runParentHelp}
 	cmd.AddCommand(
 		configGetCmd(f),
 		configListCmd(f),
@@ -326,7 +326,7 @@ func configHistoryCmd(f *cliFlags) *cobra.Command {
 	return cmd
 }
 
-func configListenCmd(f *cliFlags) *cobra.Command {
+func configListenCmd(f *cliFlags) *cobra.Command { //nolint:gocyclo // Cobra handler coordinates bounded listen state, output, and retry loop.
 	var key string
 	var maxEvents int
 	var longPoll time.Duration
@@ -356,13 +356,27 @@ func configListenCmd(f *cliFlags) *cobra.Command {
 				return err
 			}
 			events := make([]cfgov.WatchEvent, 0, maxEvents)
+			const (
+				listenBackoffStart = 2 * time.Second
+				listenBackoffMax   = 60 * time.Second
+				listenAbortAfter   = 20
+			)
+			backoff := listenBackoffStart
+			consecutiveErrors := 0
 			for len(events) < maxEvents {
 				pollCtx, cancel := context.WithTimeout(cmd.Context(), longPoll+5*time.Second)
 				event, err := backend.Watch(pollCtx, coord, revision, cfgov.WatchOptions{LongPoll: longPoll})
 				cancel()
 				if err != nil {
-					return err
+					nextBackoff, nextErrors, err := handleListenPollError(cmd.Context(), err, backoff, consecutiveErrors, listenAbortAfter)
+					backoff, consecutiveErrors = nextBackoff, nextErrors
+					if err != nil {
+						return err
+					}
+					continue
 				}
+				consecutiveErrors = 0
+				backoff = listenBackoffStart
 				if !event.Changed {
 					break
 				}
@@ -383,6 +397,41 @@ func configListenCmd(f *cliFlags) *cobra.Command {
 	cmd.Flags().DurationVar(&longPoll, "long-poll", 30*time.Second, "Long-poll duration")
 	_ = cmd.MarkFlagRequired("key")
 	return cmd
+}
+
+func handleListenPollError(ctx context.Context, err error, backoff time.Duration, consecutiveErrors, abortAfter int) (time.Duration, int, error) {
+	const (
+		listenBackoffStart = 2 * time.Second
+		listenBackoffMax   = 60 * time.Second
+	)
+	if ctx.Err() != nil {
+		return backoff, consecutiveErrors, ctx.Err()
+	}
+	if errors.Is(err, context.DeadlineExceeded) {
+		return listenBackoffStart, 0, nil
+	}
+	if apperrors.AsAppError(err).Code == apperrors.CodeAuthFailed {
+		return backoff, consecutiveErrors, err
+	}
+	consecutiveErrors++
+	_, _ = fmt.Fprintf(os.Stderr, "warning: listen poll failed (%d/%d), retrying in %s: %v\n", consecutiveErrors, abortAfter, backoff, err)
+	if consecutiveErrors >= abortAfter {
+		return backoff, consecutiveErrors, apperrors.New(apperrors.CodeNetworkError, fmt.Sprintf("listen aborted after %d consecutive failures", consecutiveErrors), err)
+	}
+	timer := time.NewTimer(backoff)
+	select {
+	case <-ctx.Done():
+		timer.Stop()
+		return backoff, consecutiveErrors, ctx.Err()
+	case <-timer.C:
+	}
+	if backoff < listenBackoffMax {
+		backoff *= 2
+		if backoff > listenBackoffMax {
+			backoff = listenBackoffMax
+		}
+	}
+	return backoff, consecutiveErrors, nil
 }
 
 func configPushCmd(f *cliFlags) *cobra.Command { //nolint:gocyclo // Cobra handler keeps config push safety, backup, dry-run, CAS, and strict-mode flow together.

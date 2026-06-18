@@ -32,7 +32,7 @@ type namespacePlan struct {
 }
 
 func newNamespaceCmd(f *cliFlags) *cobra.Command {
-	cmd := &cobra.Command{Use: "namespace", Short: "Govern Nacos namespaces"}
+	cmd := &cobra.Command{Use: "namespace", Short: "Govern Nacos namespaces", Args: requireSubcommand, RunE: runParentHelp}
 	cmd.AddCommand(namespaceListCmd(f), namespaceCreateCmd(f), namespaceUpdateCmd(f), namespaceDeleteCmd(f))
 	return cmd
 }

@@ -43,6 +43,27 @@ func TestRuleGetExposesResourceFlagOnly(t *testing.T) {
 	}
 }
 
+func TestSelectedRuleTypes(t *testing.T) {
+	t.Parallel()
+	all, err := selectedRuleTypes("")
+	if err != nil {
+		t.Fatalf("selectedRuleTypes empty error = %v", err)
+	}
+	if len(all) != 5 {
+		t.Fatalf("all rule types = %#v", all)
+	}
+	one, err := selectedRuleTypes("flow")
+	if err != nil {
+		t.Fatalf("selectedRuleTypes flow error = %v", err)
+	}
+	if len(one) != 1 || one[0] != "flow" {
+		t.Fatalf("one rule type = %#v", one)
+	}
+	if _, err := selectedRuleTypes("bogus"); err == nil {
+		t.Fatal("selectedRuleTypes bogus expected error")
+	}
+}
+
 func TestFilterRuleSetByResource(t *testing.T) {
 	t.Parallel()
 	result := ruleSetResult{

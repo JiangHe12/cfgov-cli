@@ -154,10 +154,11 @@ cfgov config reconcile --dir <dir> [--prune --prune-scope <s> --allow-production
 
 ```bash
 # 读取与校验(R0)
-cfgov rule list     --app <app> -o json
+cfgov rule list     --app <app> [--type <type>] -o json
 cfgov rule get      --app <app> --type <type> [--resource <name>] -o json
 cfgov rule export   --app <app> --dir <dir> -o json
 cfgov rule diff     --app <app> --type <type> --file <path> -o json
+cfgov rule diff     --app <app> --dir <dir> -o json
 cfgov rule validate --file <path> [--deep] [--fail-on-warnings] -o json
 cfgov rule validate --dir <dir> --deep [--fail-on-warnings] -o json
 

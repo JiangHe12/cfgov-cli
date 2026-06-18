@@ -30,7 +30,7 @@ type servicePlan struct {
 }
 
 func newServiceCmd(f *cliFlags) *cobra.Command {
-	cmd := &cobra.Command{Use: "service", Short: "Govern Nacos services"}
+	cmd := &cobra.Command{Use: "service", Short: "Govern Nacos services", Args: requireSubcommand, RunE: runParentHelp}
 	cmd.AddCommand(serviceListCmd(f), serviceGetCmd(f), serviceInstancesCmd(f), serviceRegisterCmd(f), serviceDeregisterCmd(f))
 	return cmd
 }
