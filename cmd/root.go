@@ -29,6 +29,7 @@ import (
 
 	"github.com/JiangHe12/cfgov-cli/internal/api"
 	apolloBackend "github.com/JiangHe12/cfgov-cli/internal/backend/apollo"
+	etcdBackend "github.com/JiangHe12/cfgov-cli/internal/backend/etcd"
 	nacosbackend "github.com/JiangHe12/cfgov-cli/internal/backend/nacos"
 	"github.com/JiangHe12/cfgov-cli/internal/cfgov"
 	"github.com/JiangHe12/cfgov-cli/internal/cfgovctx"
@@ -164,7 +165,7 @@ func newRootCmdWith(f *cliFlags) *cobra.Command {
 	}
 	cmd.PersistentFlags().StringVar(&f.Config, "config", "", "Override context config path")
 	cmd.PersistentFlags().StringVar(&f.Context, "context", "", "Temporarily use a named context for this command")
-	cmd.PersistentFlags().StringVar(&f.Backend, "backend", "", "Backend override: nacos | apollo")
+	cmd.PersistentFlags().StringVar(&f.Backend, "backend", "", "Backend override: nacos | apollo | etcd")
 	cmd.PersistentFlags().StringVar(&f.Server, "server", "", "Backend server URL")
 	cmd.PersistentFlags().StringVar(&f.Username, "username", "", "Backend username")
 	cmd.PersistentFlags().StringVar(&f.Password, "password", "", "Backend password")
@@ -285,15 +286,22 @@ func buildBackend(f *cliFlags) (cfgov.Backend, cfgovctx.Context, error) {
 		backendName = "nacos"
 	}
 	server := firstNonEmpty(f.Server, backendServerEnv(backendName), item.Server)
-	if err := validateServerURL(server); err != nil {
-		return nil, cfgovctx.Context{}, err
-	}
 	if backendName == "apollo" {
+		if err := validateServerURL(server); err != nil {
+			return nil, cfgovctx.Context{}, err
+		}
 		backend, err := buildApolloBackend(f, name, item, server)
+		return backend, item, err
+	}
+	if backendName == "etcd" {
+		backend, err := buildEtcdBackend(f, name, item, server)
 		return backend, item, err
 	}
 	if backendName != "nacos" {
 		return nil, cfgovctx.Context{}, apperrors.New(apperrors.CodeNotImplemented, "backend is not supported", nil)
+	}
+	if err := validateServerURL(server); err != nil {
+		return nil, cfgovctx.Context{}, err
 	}
 	username := firstNonEmpty(f.Username, os.Getenv("NACOS_USERNAME"), item.Username)
 	password := firstNonEmpty(f.Password, os.Getenv("NACOS_PASSWORD"))
@@ -311,10 +319,14 @@ func buildBackend(f *cliFlags) (cfgov.Backend, cfgovctx.Context, error) {
 }
 
 func backendServerEnv(backendName string) string {
-	if backendName == "apollo" {
+	switch backendName {
+	case "apollo":
 		return os.Getenv("APOLLO_SERVER")
+	case "etcd":
+		return firstNonEmpty(os.Getenv("ETCD_ENDPOINTS"), os.Getenv("ETCD_SERVER"))
+	default:
+		return os.Getenv("NACOS_SERVER")
 	}
-	return os.Getenv("NACOS_SERVER")
 }
 
 func buildApolloBackend(f *cliFlags, contextName string, item cfgovctx.Context, server string) (cfgov.Backend, error) {
@@ -346,6 +358,34 @@ func buildApolloBackend(f *cliFlags, contextName string, item cfgovctx.Context, 
 	return backend, nil
 }
 
+func buildEtcdBackend(f *cliFlags, contextName string, item cfgovctx.Context, server string) (cfgov.Backend, error) {
+	password := firstNonEmpty(f.Password, os.Getenv("ETCD_PASSWORD"))
+	if password == "" {
+		resolved, err := cfgovctx.ResolvePassword(commandContext(f), contextName, item)
+		if err != nil {
+			return nil, err
+		}
+		password = resolved
+	}
+	backend, err := etcdBackend.New(etcdBackend.Options{
+		Endpoints:  server,
+		KeyPrefix:  firstNonEmpty(os.Getenv("ETCD_KEY_PREFIX"), item.EtcdKeyPrefix),
+		Namespace:  firstNonEmpty(f.Namespace, os.Getenv("ETCD_NAMESPACE"), item.Namespace),
+		Username:   firstNonEmpty(f.Username, os.Getenv("ETCD_USERNAME"), item.Username),
+		Password:   password,
+		CACert:     firstNonEmpty(os.Getenv("ETCD_CACERT"), item.EtcdCACert),
+		ClientCert: firstNonEmpty(os.Getenv("ETCD_CLIENT_CERT"), item.EtcdClientCert),
+		ClientKey:  firstNonEmpty(os.Getenv("ETCD_CLIENT_KEY"), item.EtcdClientKey),
+		Timeout:    f.Timeout,
+		Trace:      f.Debug || f.Trace,
+		TraceOut:   os.Stderr,
+	})
+	if err != nil {
+		return nil, err
+	}
+	return backend, nil
+}
+
 func resolvedContext(f *cliFlags) (cfgovctx.Context, string, error) {
 	if f.Context != "" {
 		cfg, err := cfgovctx.Load()
@@ -360,10 +400,11 @@ func resolvedContext(f *cliFlags) (cfgovctx.Context, string, error) {
 	}
 	ctx, name, err := cfgovctx.Current()
 	if err != nil {
-		if f.Server == "" && os.Getenv("NACOS_SERVER") == "" {
+		backendName := firstNonEmpty(f.Backend, "nacos")
+		if f.Server == "" && backendServerEnv(backendName) == "" {
 			return cfgovctx.Context{}, "", err
 		}
-		return cfgovctx.Context{Backend: "nacos", Namespace: f.Namespace}, "direct", nil
+		return cfgovctx.Context{Backend: backendName, Namespace: f.Namespace}, "direct", nil
 	}
 	return *ctx, name, nil
 }

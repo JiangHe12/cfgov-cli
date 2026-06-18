@@ -18,6 +18,7 @@ import (
 	corectx "github.com/JiangHe12/opskit-core/ctx"
 	"github.com/JiangHe12/opskit-core/safety"
 
+	etcdBackend "github.com/JiangHe12/cfgov-cli/internal/backend/etcd"
 	"github.com/JiangHe12/cfgov-cli/internal/cfgov"
 	"github.com/JiangHe12/cfgov-cli/internal/cfgovctx"
 )
@@ -64,6 +65,7 @@ func ctxSetCmd(f *cliFlags) *cobra.Command { //nolint:gocyclo // Cobra wiring fo
 	var otelInsecure bool
 	var apolloAppID, apolloEnv, apolloCluster, apolloNamespace, apolloRuleNamespace string
 	var apolloToken, apolloSecret string
+	var etcdKeyPrefix, etcdCACert, etcdClientCert, etcdClientKey string
 	cmd := &cobra.Command{
 		Use:   "set <name>",
 		Short: "Set a backend-bound context",
@@ -72,11 +74,20 @@ func ctxSetCmd(f *cliFlags) *cobra.Command { //nolint:gocyclo // Cobra wiring fo
 			if f.Backend == "" {
 				return apperrors.New(apperrors.CodeUsageError, "--backend is required", nil)
 			}
-			if f.Backend != "nacos" && f.Backend != "apollo" {
+			if f.Backend != "nacos" && f.Backend != "apollo" && f.Backend != "etcd" {
 				return apperrors.New(apperrors.CodeNotImplemented, "backend is not supported", nil)
 			}
-			if err := validateServerURL(f.Server); err != nil {
-				return err
+			if f.Backend == "etcd" {
+				if err := etcdBackend.ValidateEndpoints(f.Server); err != nil {
+					return err
+				}
+				if err := etcdBackend.ValidateKeyPrefix(etcdKeyPrefix); err != nil {
+					return err
+				}
+			} else {
+				if err := validateServerURL(f.Server); err != nil {
+					return err
+				}
 			}
 			if err := validateRolesURL(rolesSource, rolesURL, allowInsecureRolesURL); err != nil {
 				return err
@@ -123,6 +134,10 @@ func ctxSetCmd(f *cliFlags) *cobra.Command { //nolint:gocyclo // Cobra wiring fo
 				ApolloCluster:       apolloCluster,
 				ApolloNamespace:     firstNonEmpty(apolloNamespace, f.Namespace),
 				ApolloRuleNamespace: apolloRuleNamespace,
+				EtcdKeyPrefix:       etcdKeyPrefix,
+				EtcdCACert:          etcdCACert,
+				EtcdClientCert:      etcdClientCert,
+				EtcdClientKey:       etcdClientKey,
 			}
 			var err error
 			item, err = cfgovctx.StoreCredential(cmd.Context(), args[0], credentialBackend, credential, item)
@@ -157,6 +172,10 @@ func ctxSetCmd(f *cliFlags) *cobra.Command { //nolint:gocyclo // Cobra wiring fo
 	cmd.Flags().StringVar(&apolloRuleNamespace, "apollo-rule-namespace", "", "Apollo namespace for Sentinel rules")
 	cmd.Flags().StringVar(&apolloToken, "apollo-token", "", "Apollo OpenAPI token")
 	cmd.Flags().StringVar(&apolloSecret, "apollo-secret", "", "Apollo OpenAPI secret")
+	cmd.Flags().StringVar(&etcdKeyPrefix, "etcd-key-prefix", "", "etcd key prefix prepended before namespace")
+	cmd.Flags().StringVar(&etcdCACert, "etcd-ca-cert", "", "etcd CA certificate path")
+	cmd.Flags().StringVar(&etcdClientCert, "etcd-client-cert", "", "etcd mTLS client certificate path")
+	cmd.Flags().StringVar(&etcdClientKey, "etcd-client-key", "", "etcd mTLS client private key path")
 	_ = cmd.Flags().MarkHidden("apollo-token")
 	_ = cmd.Flags().MarkHidden("apollo-secret")
 	_ = cmd.Flags().MarkHidden("vault-secret-id")
@@ -626,11 +645,20 @@ func credentialBackendForContext(item cfgovctx.Context) (credstore.Backend, erro
 }
 
 func validateImportedContext(item cfgovctx.Context) error {
-	if item.Backend != "nacos" && item.Backend != "apollo" {
+	if item.Backend != "nacos" && item.Backend != "apollo" && item.Backend != "etcd" {
 		return apperrors.New(apperrors.CodeNotImplemented, "backend is not supported", nil)
 	}
-	if err := validateServerURL(item.Server); err != nil {
-		return err
+	if item.Backend == "etcd" {
+		if err := etcdBackend.ValidateEndpoints(item.Server); err != nil {
+			return err
+		}
+		if err := etcdBackend.ValidateKeyPrefix(item.EtcdKeyPrefix); err != nil {
+			return err
+		}
+	} else {
+		if err := validateServerURL(item.Server); err != nil {
+			return err
+		}
 	}
 	if item.Backend == "apollo" && item.ApolloAppID == "" {
 		return apperrors.New(apperrors.CodeUsageError, "apollo context requires apolloAppId", nil)
@@ -693,6 +721,10 @@ func contextView(name string, item cfgovctx.Context, current, showSecrets bool) 
 		"apolloCluster":       item.ApolloCluster,
 		"apolloNamespace":     item.ApolloNamespace,
 		"apolloRuleNamespace": item.ApolloRuleNamespace,
+		"etcdKeyPrefix":       item.EtcdKeyPrefix,
+		"etcdCaCert":          item.EtcdCACert,
+		"etcdClientCert":      item.EtcdClientCert,
+		"etcdClientKey":       item.EtcdClientKey,
 	}
 }
 

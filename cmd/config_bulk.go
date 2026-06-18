@@ -17,6 +17,7 @@ import (
 
 	"github.com/JiangHe12/cfgov-cli/internal/api"
 	apolloBackend "github.com/JiangHe12/cfgov-cli/internal/backend/apollo"
+	etcdBackend "github.com/JiangHe12/cfgov-cli/internal/backend/etcd"
 	"github.com/JiangHe12/cfgov-cli/internal/backend/nacos"
 	"github.com/JiangHe12/cfgov-cli/internal/backup"
 	"github.com/JiangHe12/cfgov-cli/internal/cfgclass"
@@ -715,7 +716,7 @@ func buildBackendFromNamedContext(parent context.Context, f *cliFlags, name stri
 	if !ok {
 		return nil, apperrors.New(apperrors.CodeUsageError, "source context not found", nil)
 	}
-	if item.Backend != "" && item.Backend != "nacos" && item.Backend != "apollo" {
+	if item.Backend != "" && item.Backend != "nacos" && item.Backend != "apollo" && item.Backend != "etcd" {
 		return nil, apperrors.New(apperrors.CodeNotImplemented, "backend is not supported", nil)
 	}
 	password, err := cfgovctx.ResolvePassword(parent, name, item)
@@ -736,6 +737,21 @@ func buildBackendFromNamedContext(parent context.Context, f *cliFlags, name stri
 			Timeout:       f.Timeout,
 			Trace:         f.Debug || f.Trace,
 			TraceOut:      os.Stderr,
+		})
+	}
+	if item.Backend == "etcd" {
+		return etcdBackend.New(etcdBackend.Options{
+			Endpoints:  item.Server,
+			KeyPrefix:  item.EtcdKeyPrefix,
+			Namespace:  item.Namespace,
+			Username:   item.Username,
+			Password:   password,
+			CACert:     item.EtcdCACert,
+			ClientCert: item.EtcdClientCert,
+			ClientKey:  item.EtcdClientKey,
+			Timeout:    f.Timeout,
+			Trace:      f.Debug || f.Trace,
+			TraceOut:   os.Stderr,
 		})
 	}
 	client := api.NewClient(item.Server, item.Username, password, item.Namespace, f.Timeout)
