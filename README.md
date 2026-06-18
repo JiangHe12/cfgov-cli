@@ -159,6 +159,7 @@ cfgov rule get      --app <app> --type <type> [--resource <name>] -o json
 cfgov rule export   --app <app> --dir <dir> -o json
 cfgov rule diff     --app <app> --type <type> --file <path> -o json
 cfgov rule validate --file <path> [--deep] [--fail-on-warnings] -o json
+cfgov rule validate --dir <dir> --deep [--fail-on-warnings] -o json
 
 # Write
 cfgov rule create   --app <app> --type <type> --file <path> [--dry-run --diff] --yes      # R1
@@ -168,7 +169,7 @@ cfgov rule rollback --app <app> --backup <ref> --yes                            
 cfgov rule delete   --app <app> --type <type> --yes --ticket <t> [--allow-production-rule-delete]  # R2 / R3
 ```
 
-Every rule write passes shallow JSON/schema validation; create/update/import/rollback also run **deep** semantic checks that flags cannot bypass. Rule sets are stored as config blobs (Nacos group `SENTINEL_GROUP`, dataId `{app}-{type}-rules`; Apollo namespace `SENTINEL`, item `{app}-{type}-rules`) so they stay wire-compatible with the Sentinel runtime.
+Every rule write passes shallow JSON/schema validation; create/update/import/rollback also run **deep** semantic checks that flags cannot bypass. `rule validate --file --deep` runs checks that are meaningful for one isolated rule type; use `rule validate --dir --deep` for cross-rule checks such as `param` without matching `flow` or `flow`/`degrade` grade mismatch. Rule sets are stored as config blobs (Nacos group `SENTINEL_GROUP`, dataId `{app}-{type}-rules`; Apollo namespace `SENTINEL`, item `{app}-{type}-rules`) so they stay wire-compatible with the Sentinel runtime.
 </details>
 
 <details>

@@ -40,13 +40,17 @@ type ruleDiffResult struct {
 }
 
 type ruleValidationResult struct {
-	File   string       `json:"file"`
-	Type   rule.Type    `json:"type"`
-	Deep   bool         `json:"deep"`
-	Valid  bool         `json:"valid"`
-	Count  int          `json:"count"`
-	SHA256 string       `json:"sha256"`
-	Issues []rule.Issue `json:"issues,omitempty"`
+	File     string            `json:"file,omitempty"`
+	Dir      string            `json:"dir,omitempty"`
+	Type     rule.Type         `json:"type,omitempty"`
+	Deep     bool              `json:"deep"`
+	Valid    bool              `json:"valid"`
+	Count    int               `json:"count"`
+	Counts   map[rule.Type]int `json:"counts,omitempty"`
+	SHA256   string            `json:"sha256,omitempty"`
+	Errors   int               `json:"errors"`
+	Warnings int               `json:"warnings"`
+	Issues   []rule.Issue      `json:"issues,omitempty"`
 }
 
 func newRuleCmd(f *cliFlags) *cobra.Command {
@@ -223,14 +227,20 @@ func ruleDiffCmd(f *cliFlags) *cobra.Command {
 }
 
 func ruleValidateCmd(f *cliFlags) *cobra.Command {
-	var file string
+	var file, dir string
 	var deep bool
 	var failOnWarnings bool
 	cmd := &cobra.Command{
-		Use:   "validate --file <path>",
-		Short: "Validate a local Sentinel rule file",
+		Use:   "validate (--file <path>|--dir <dir>)",
+		Short: "Validate local Sentinel rule files",
 		Args:  cobra.NoArgs,
 		RunE: func(_ *cobra.Command, _ []string) error {
+			if (file == "") == (dir == "") {
+				return apperrors.New(apperrors.CodeUsageError, "specify exactly one of --file or --dir", nil)
+			}
+			if dir != "" {
+				return runRuleValidateDir(f, dir, deep, failOnWarnings)
+			}
 			ruleType, err := rule.InferTypeFromPath(file)
 			if err != nil {
 				return err
@@ -241,26 +251,93 @@ func ruleValidateCmd(f *cliFlags) *cobra.Command {
 			}
 			result := ruleValidationResult{File: file, Type: ruleType, Deep: deep, Valid: true, Count: local.Count, SHA256: local.SHA256}
 			if deep {
-				issues := rule.DeepCheck(map[rule.Type][]map[string]any{ruleType: local.Rules})
-				result.Issues = issues
-				result.Valid = !rule.HasError(issues)
-				if !result.Valid {
-					_ = newPrinter(f).JSONData("RuleValidation", result)
-					return apperrors.New(apperrors.CodeValidationFailed, "deep rule validation failed", nil)
-				}
-				if failOnWarnings && rule.HasWarning(issues) {
-					_ = newPrinter(f).JSONData("RuleValidation", result)
-					return apperrors.New(apperrors.CodeValidationFailed, "deep rule validation warnings found", nil)
-				}
+				issues := rule.IntraTypeDeepCheck(map[rule.Type][]map[string]any{ruleType: local.Rules})
+				result = applyRuleValidationIssues(result, issues)
 			}
-			return newPrinter(f).JSONData("RuleValidation", result)
+			return finishRuleValidation(f, result, failOnWarnings)
 		},
 	}
 	cmd.Flags().StringVar(&file, "file", "", "Local rule file")
+	cmd.Flags().StringVar(&dir, "dir", "", "Directory containing <type>.json files")
 	cmd.Flags().BoolVar(&deep, "deep", false, "Run deep semantic checks")
 	cmd.Flags().BoolVar(&failOnWarnings, "fail-on-warnings", false, "Exit non-zero when deep validation reports warnings")
-	_ = cmd.MarkFlagRequired("file")
 	return cmd
+}
+
+func runRuleValidateDir(f *cliFlags, dir string, deep bool, failOnWarnings bool) error {
+	rules, counts, total, err := readRuleValidationDirectory(dir)
+	if err != nil {
+		return err
+	}
+	result := ruleValidationResult{Dir: dir, Deep: deep, Valid: true, Count: total, Counts: counts}
+	if deep {
+		result = applyRuleValidationIssues(result, rule.DeepCheck(rules))
+	}
+	return finishRuleValidation(f, result, failOnWarnings)
+}
+
+func readRuleValidationDirectory(dir string) (map[rule.Type][]map[string]any, map[rule.Type]int, int, error) {
+	info, err := os.Stat(dir)
+	if err != nil {
+		return nil, nil, 0, apperrors.New(apperrors.CodeLocalIOError, "failed to stat rule directory", err)
+	}
+	if !info.IsDir() {
+		return nil, nil, 0, apperrors.New(apperrors.CodeUsageError, "--dir must be a directory", nil)
+	}
+	out := make(map[rule.Type][]map[string]any, len(rule.AllTypes))
+	counts := make(map[rule.Type]int, len(rule.AllTypes))
+	total := 0
+	for _, ruleType := range rule.AllTypes {
+		path := filepath.Join(dir, string(ruleType)+".json")
+		content, err := os.ReadFile(path) //nolint:gosec // Path is constrained to operator supplied validation directory.
+		if os.IsNotExist(err) {
+			continue
+		}
+		if err != nil {
+			return nil, nil, 0, apperrors.New(apperrors.CodeLocalIOError, "failed to read rule file", err)
+		}
+		items, err := rule.DecodeSet(ruleType, content)
+		if err != nil {
+			return nil, nil, 0, err
+		}
+		out[ruleType] = items
+		counts[ruleType] = len(items)
+		total += len(items)
+	}
+	return out, counts, total, nil
+}
+
+func applyRuleValidationIssues(result ruleValidationResult, issues []rule.Issue) ruleValidationResult {
+	result.Issues = issues
+	result.Errors, result.Warnings = countRuleIssues(issues)
+	result.Valid = result.Errors == 0
+	return result
+}
+
+func finishRuleValidation(f *cliFlags, result ruleValidationResult, failOnWarnings bool) error {
+	if err := newPrinter(f).JSONData("RuleValidation", result); err != nil {
+		return err
+	}
+	if result.Errors > 0 {
+		return apperrors.New(apperrors.CodeValidationFailed, "deep rule validation failed", nil)
+	}
+	if failOnWarnings && result.Warnings > 0 {
+		return apperrors.New(apperrors.CodeValidationFailed, "deep rule validation warnings found", nil)
+	}
+	return nil
+}
+
+func countRuleIssues(issues []rule.Issue) (int, int) {
+	errorsCount := 0
+	warningsCount := 0
+	for _, issue := range issues {
+		if issue.Severity == rule.SeverityError {
+			errorsCount++
+		} else {
+			warningsCount++
+		}
+	}
+	return errorsCount, warningsCount
 }
 
 func buildRuleStore(f *cliFlags) (cfgov.Backend, cfgov.RuleStore, cfgovctx.Context, error) {

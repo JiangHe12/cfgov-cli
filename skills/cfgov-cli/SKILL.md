@@ -71,6 +71,7 @@ cfgov rule get --app <app> --type <flow|degrade|system|authority|param> -o json
 cfgov rule export --app <app> --dir <dir> -o json
 cfgov rule diff --app <app> --type <type> --file <path> -o json
 cfgov rule validate --file <path> [--deep] -o json
+cfgov rule validate --dir <dir> --deep [--fail-on-warnings] -o json
 ```
 
 Write operations:
@@ -85,7 +86,7 @@ cfgov rule delete --app <app> --type <type> (--resource <resource>|--all) [--exp
 
 Risk model: `create`, `update`, `import`, and `rollback` are R1; `delete` is R2 and protected delete becomes R3 with `--allow-production-rule-delete`.
 
-Every rule write must pass shallow JSON/schema validation before authorization. Create, update, import, and rollback also run deep semantic checks; deep errors cannot be bypassed by flags. Rule overwrite/delete/rollback paths back up the existing remote rule set before writing.
+Every rule write must pass shallow JSON/schema validation before authorization. Create, update, import, and rollback also run deep semantic checks; deep errors cannot be bypassed by flags. `rule validate --file --deep` is intra-rule validation for one isolated rule type; use `rule validate --dir --deep` for cross-rule checks across flow/degrade/system/authority/param files. Rule overwrite/delete/rollback paths back up the existing remote rule set before writing.
 
 ## Namespace
 

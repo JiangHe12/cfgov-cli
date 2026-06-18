@@ -8,6 +8,8 @@ import (
 	"testing"
 
 	"github.com/JiangHe12/opskit-core/apperrors"
+
+	"github.com/JiangHe12/cfgov-cli/internal/rule"
 )
 
 func TestCapabilitiesDoNotDeclareBackupCleanRiskContract(t *testing.T) {
@@ -46,7 +48,6 @@ func TestCompletionCommandSmoke(t *testing.T) {
 }
 
 func TestRuleValidateFailOnWarnings(t *testing.T) {
-	t.Parallel()
 	dir := t.TempDir()
 	path := filepath.Join(dir, "flow.json")
 	if err := os.WriteFile(path, []byte(`[{"resource":"api","grade":1,"count":1000001}]`), 0o600); err != nil {
@@ -63,6 +64,59 @@ func TestRuleValidateFailOnWarnings(t *testing.T) {
 	}
 }
 
+func TestRuleValidateSingleFileDeepSkipsCrossTypeWarnings(t *testing.T) {
+	dir := t.TempDir()
+	paramPath := filepath.Join(dir, "param.json")
+	if err := os.WriteFile(paramPath, []byte(`[{"resource":"api","grade":1,"paramIdx":0,"count":10}]`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	degradePath := filepath.Join(dir, "degrade.json")
+	if err := os.WriteFile(degradePath, []byte(`[{"resource":"api","grade":0,"count":1,"timeWindow":10}]`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	for _, path := range []string{paramPath, degradePath} {
+		t.Run(filepath.Base(path), func(t *testing.T) {
+			f := newDefaultFlags()
+			f.Output = "json"
+			cmd := newRootCmdWith(f)
+			cmd.SetArgs([]string{"rule", "validate", "--file", path, "--deep", "--fail-on-warnings", "-o", "json"})
+			if err := cmd.Execute(); err != nil {
+				t.Fatalf("rule validate %s error = %v", path, err)
+			}
+		})
+	}
+}
+
+func TestRuleValidateDirRunsCrossTypeWarnings(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "flow.json"), []byte(`[{"resource":"api","grade":1,"count":10}]`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "degrade.json"), []byte(`[{"resource":"api","grade":0,"count":1,"timeWindow":10}]`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "param.json"), []byte(`[{"resource":"lonely","grade":1,"paramIdx":0,"count":10}]`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	rules, _, _, err := readRuleValidationDirectory(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	issues := rule.DeepCheck(rules)
+	assertCmdRuleIssue(t, issues, "PARAM_WITHOUT_FLOW", rule.SeverityWarning)
+	assertCmdRuleIssue(t, issues, "FLOW_DEGRADE_GRADE_MISMATCH", rule.SeverityWarning)
+
+	f := newDefaultFlags()
+	f.Output = "json"
+	cmd := newRootCmdWith(f)
+	cmd.SetArgs([]string{"rule", "validate", "--dir", dir, "--deep", "--fail-on-warnings", "-o", "json"})
+	if err := cmd.Execute(); apperrors.AsAppError(err).Code != apperrors.CodeValidationFailed {
+		t.Fatalf("error = %v, want validation failed", err)
+	}
+}
+
 func TestSuggestionsMinimumDistanceIsRecursive(t *testing.T) {
 	t.Parallel()
 	cmd := newRootCmdWith(newDefaultFlags())
@@ -73,4 +127,17 @@ func TestSuggestionsMinimumDistanceIsRecursive(t *testing.T) {
 	if configCmd.SuggestionsMinimumDistance != 1 {
 		t.Fatalf("config suggestion distance = %d, want 1", configCmd.SuggestionsMinimumDistance)
 	}
+}
+
+func assertCmdRuleIssue(t *testing.T, issues []rule.Issue, code string, severity rule.IssueSeverity) {
+	t.Helper()
+	for _, issue := range issues {
+		if issue.Code == code {
+			if issue.Severity != severity {
+				t.Fatalf("%s severity = %s, want %s; issues=%#v", code, issue.Severity, severity, issues)
+			}
+			return
+		}
+	}
+	t.Fatalf("missing issue %s in %#v", code, issues)
 }

@@ -4,6 +4,9 @@ All notable changes to this project are documented in this file.
 
 ## [Unreleased]
 
+### Added
+- Rule deep-validation parity with sentinel-cli: ported the 5 cross-rule deep checks (`MULTIPLE_SYSTEM_RULES`, `FLOW_REFRESOURCE_MISSING` — ERROR; `PARAM_WITHOUT_FLOW`, `AUTHORITY_MIXED_STRATEGY`, `FLOW_DEGRADE_GRADE_MISMATCH` — WARNING) alongside the existing duplicate-key and dangerous-threshold checks. New `rule validate --dir <dir>` aggregates every `<type>.json` and runs the full cross-rule check set in one pass (`--file` XOR `--dir`). Single-file `rule validate --file --deep` now runs only intra-type checks (`IntraTypeDeepCheck`), so it no longer false-positives on cross-type rules; ERROR checks still block `rule create/update/import/rollback`.
+
 ## v0.1.0
 
 ### Added

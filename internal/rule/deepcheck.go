@@ -24,7 +24,20 @@ type Issue struct {
 
 func DeepCheck(rules map[Type][]map[string]any) []Issue {
 	issues := make([]Issue, 0, 8)
+	issues = append(issues, IntraTypeDeepCheck(rules)...)
+	issues = append(issues, checkParamWithoutFlow(rules)...)
+	issues = append(issues, checkFlowDegradeMismatch(rules)...)
+	sortIssues(issues)
+	return issues
+}
+
+// IntraTypeDeepCheck runs deep checks that are meaningful for a single isolated rule type.
+func IntraTypeDeepCheck(rules map[Type][]map[string]any) []Issue {
+	issues := make([]Issue, 0, 8)
 	issues = append(issues, checkDuplicateKeys(rules)...)
+	issues = append(issues, checkMultipleSystemRules(rules)...)
+	issues = append(issues, checkDanglingRefResource(rules)...)
+	issues = append(issues, checkAuthorityMixedStrategy(rules)...)
 	issues = append(issues, checkDangerousThresholds(rules)...)
 	sortIssues(issues)
 	return issues
@@ -66,6 +79,110 @@ func checkDuplicateKeys(rules map[Type][]map[string]any) []Issue {
 				continue
 			}
 			seen[key] = item
+		}
+	}
+	return issues
+}
+
+func checkMultipleSystemRules(rules map[Type][]map[string]any) []Issue {
+	if count := len(rules[TypeSystem]); count >= 2 {
+		return []Issue{{
+			Severity: SeverityError,
+			Code:     "MULTIPLE_SYSTEM_RULES",
+			RuleType: TypeSystem,
+			Detail:   fmt.Sprintf("%d rules found", count),
+		}}
+	}
+	return nil
+}
+
+func checkDanglingRefResource(rules map[Type][]map[string]any) []Issue {
+	flowResources := make(map[string]struct{}, len(rules[TypeFlow]))
+	for _, item := range rules[TypeFlow] {
+		flowResources[valueString(item["resource"])] = struct{}{}
+	}
+	var issues []Issue
+	for _, item := range rules[TypeFlow] {
+		strategy := valueInt(item["strategy"])
+		ref := valueString(item["refResource"])
+		if (strategy == 1 || strategy == 2) && ref != "" {
+			if _, ok := flowResources[ref]; !ok {
+				issues = append(issues, Issue{
+					Severity: SeverityError,
+					Code:     "FLOW_REFRESOURCE_MISSING",
+					RuleType: TypeFlow,
+					Resource: valueString(item["resource"]),
+					LimitApp: limitApp(item),
+					Detail:   "refResource=" + ref,
+				})
+			}
+		}
+	}
+	return issues
+}
+
+func checkParamWithoutFlow(rules map[Type][]map[string]any) []Issue {
+	flowResources := make(map[string]struct{}, len(rules[TypeFlow]))
+	for _, item := range rules[TypeFlow] {
+		flowResources[valueString(item["resource"])] = struct{}{}
+	}
+	var issues []Issue
+	for _, item := range rules[TypeParam] {
+		resource := valueString(item["resource"])
+		if _, ok := flowResources[resource]; !ok {
+			issues = append(issues, Issue{
+				Severity: SeverityWarning,
+				Code:     "PARAM_WITHOUT_FLOW",
+				RuleType: TypeParam,
+				Resource: resource,
+			})
+		}
+	}
+	return issues
+}
+
+func checkAuthorityMixedStrategy(rules map[Type][]map[string]any) []Issue {
+	byResource := make(map[string]map[int]struct{})
+	for _, item := range rules[TypeAuthority] {
+		resource := valueString(item["resource"])
+		if byResource[resource] == nil {
+			byResource[resource] = make(map[int]struct{})
+		}
+		byResource[resource][valueInt(item["strategy"])] = struct{}{}
+	}
+	var issues []Issue
+	for resource, strategies := range byResource {
+		if _, hasWhite := strategies[0]; hasWhite {
+			if _, hasBlack := strategies[1]; hasBlack {
+				issues = append(issues, Issue{
+					Severity: SeverityWarning,
+					Code:     "AUTHORITY_MIXED_STRATEGY",
+					RuleType: TypeAuthority,
+					Resource: resource,
+				})
+			}
+		}
+	}
+	return issues
+}
+
+func checkFlowDegradeMismatch(rules map[Type][]map[string]any) []Issue {
+	flowGradeByResource := make(map[string]int)
+	for _, item := range rules[TypeFlow] {
+		flowGradeByResource[valueString(item["resource"])] = valueInt(item["grade"])
+	}
+	var issues []Issue
+	for _, item := range rules[TypeDegrade] {
+		resource := valueString(item["resource"])
+		flowGrade, ok := flowGradeByResource[resource]
+		if ok && flowGrade != valueInt(item["grade"]) {
+			issues = append(issues, Issue{
+				Severity: SeverityWarning,
+				Code:     "FLOW_DEGRADE_GRADE_MISMATCH",
+				RuleType: TypeDegrade,
+				Resource: resource,
+				Detail:   fmt.Sprintf("flow.grade=%d degrade.grade=%d", flowGrade, valueInt(item["grade"])),
+			})
 		}
 	}
 	return issues

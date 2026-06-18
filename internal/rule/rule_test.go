@@ -67,6 +67,160 @@ func TestDeepValidationSurfacesDangerousRule(t *testing.T) {
 	}
 }
 
+func TestDeepValidationSentinelParityChecks(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name     string
+		code     string
+		severity IssueSeverity
+		rules    map[Type][]map[string]any
+		clean    map[Type][]map[string]any
+	}{
+		{
+			name:     "multiple system rules",
+			code:     "MULTIPLE_SYSTEM_RULES",
+			severity: SeverityError,
+			rules: map[Type][]map[string]any{
+				TypeSystem: {
+					{"qps": 100},
+					{"avgRt": 20},
+				},
+			},
+			clean: map[Type][]map[string]any{
+				TypeSystem: {
+					{"qps": 100},
+				},
+			},
+		},
+		{
+			name:     "dangling refResource",
+			code:     "FLOW_REFRESOURCE_MISSING",
+			severity: SeverityError,
+			rules: map[Type][]map[string]any{
+				TypeFlow: {
+					{"resource": "api", "grade": 1, "count": 10, "strategy": 1, "refResource": "missing"},
+				},
+			},
+			clean: map[Type][]map[string]any{
+				TypeFlow: {
+					{"resource": "api", "grade": 1, "count": 10, "strategy": 1, "refResource": "base"},
+					{"resource": "base", "grade": 1, "count": 10},
+				},
+			},
+		},
+		{
+			name:     "param without flow",
+			code:     "PARAM_WITHOUT_FLOW",
+			severity: SeverityWarning,
+			rules: map[Type][]map[string]any{
+				TypeParam: {
+					{"resource": "api", "grade": 1, "paramIdx": 0, "count": 10},
+				},
+			},
+			clean: map[Type][]map[string]any{
+				TypeFlow: {
+					{"resource": "api", "grade": 1, "count": 10},
+				},
+				TypeParam: {
+					{"resource": "api", "grade": 1, "paramIdx": 0, "count": 10},
+				},
+			},
+		},
+		{
+			name:     "authority mixed strategy",
+			code:     "AUTHORITY_MIXED_STRATEGY",
+			severity: SeverityWarning,
+			rules: map[Type][]map[string]any{
+				TypeAuthority: {
+					{"resource": "api", "limitApp": "caller-a", "strategy": 0},
+					{"resource": "api", "limitApp": "caller-b", "strategy": 1},
+				},
+			},
+			clean: map[Type][]map[string]any{
+				TypeAuthority: {
+					{"resource": "api", "limitApp": "caller-a", "strategy": 0},
+					{"resource": "api", "limitApp": "caller-b", "strategy": 0},
+				},
+			},
+		},
+		{
+			name:     "flow degrade grade mismatch",
+			code:     "FLOW_DEGRADE_GRADE_MISMATCH",
+			severity: SeverityWarning,
+			rules: map[Type][]map[string]any{
+				TypeFlow: {
+					{"resource": "api", "grade": 1, "count": 10},
+				},
+				TypeDegrade: {
+					{"resource": "api", "grade": 0, "count": 1, "timeWindow": 10},
+				},
+			},
+			clean: map[Type][]map[string]any{
+				TypeFlow: {
+					{"resource": "api", "grade": 1, "count": 10},
+				},
+				TypeDegrade: {
+					{"resource": "api", "grade": 1, "count": 1, "timeWindow": 10},
+				},
+			},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name+"/trigger", func(t *testing.T) {
+			t.Parallel()
+			assertIssue(t, DeepCheck(tt.rules), tt.code, tt.severity)
+		})
+		t.Run(tt.name+"/clean", func(t *testing.T) {
+			t.Parallel()
+			assertNoIssue(t, DeepCheck(tt.clean), tt.code)
+		})
+	}
+}
+
+func TestIntraTypeDeepValidationSkipsCrossTypeWarnings(t *testing.T) {
+	t.Parallel()
+	paramRules := map[Type][]map[string]any{
+		TypeParam: {
+			{"resource": "api", "grade": 1, "paramIdx": 0, "count": 10},
+		},
+	}
+	assertIssue(t, DeepCheck(paramRules), "PARAM_WITHOUT_FLOW", SeverityWarning)
+	assertNoIssue(t, IntraTypeDeepCheck(paramRules), "PARAM_WITHOUT_FLOW")
+
+	degradeRules := map[Type][]map[string]any{
+		TypeFlow: {
+			{"resource": "api", "grade": 1, "count": 10},
+		},
+		TypeDegrade: {
+			{"resource": "api", "grade": 0, "count": 1, "timeWindow": 10},
+		},
+	}
+	assertIssue(t, DeepCheck(degradeRules), "FLOW_DEGRADE_GRADE_MISMATCH", SeverityWarning)
+	assertNoIssue(t, IntraTypeDeepCheck(map[Type][]map[string]any{TypeDegrade: degradeRules[TypeDegrade]}), "FLOW_DEGRADE_GRADE_MISMATCH")
+}
+
+func assertIssue(t *testing.T, issues []Issue, code string, severity IssueSeverity) {
+	t.Helper()
+	for _, issue := range issues {
+		if issue.Code == code {
+			if issue.Severity != severity {
+				t.Fatalf("%s severity = %s, want %s; issues=%#v", code, issue.Severity, severity, issues)
+			}
+			return
+		}
+	}
+	t.Fatalf("missing issue %s in %#v", code, issues)
+}
+
+func assertNoIssue(t *testing.T, issues []Issue, code string) {
+	t.Helper()
+	for _, issue := range issues {
+		if issue.Code == code {
+			t.Fatalf("unexpected issue %s in %#v", code, issues)
+		}
+	}
+}
+
 func TestInferTypeFromPath(t *testing.T) {
 	t.Parallel()
 	ruleType, err := InferTypeFromPath("order-service-param-rules.json")

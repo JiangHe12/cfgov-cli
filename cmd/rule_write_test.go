@@ -50,6 +50,32 @@ func TestRuleImportDeepValidationBlocksDangerousRules(t *testing.T) {
 	}
 }
 
+func TestRuleWriteDeepValidationBlocksCrossRuleErrors(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	flowPath := filepath.Join(dir, "flow.json")
+	if err := os.WriteFile(flowPath, []byte(`{"resource":"api","grade":1,"count":10,"strategy":1,"refResource":"missing"}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := readOneRuleForWrite(ruleWriteOptions{typeName: string(rule.TypeFlow), file: flowPath}); apperrors.AsAppError(err).Code != apperrors.CodeValidationFailed {
+		t.Fatalf("readOneRuleForWrite error = %v, want validation failed", err)
+	}
+
+	systemDir := filepath.Join(dir, "system-rules")
+	if err := os.MkdirAll(systemDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(systemDir, "system.json"), []byte(`[{"qps":100},{"avgRt":20}]`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := readRuleDirectory(systemDir); apperrors.AsAppError(err).Code != apperrors.CodeValidationFailed {
+		t.Fatalf("readRuleDirectory error = %v, want validation failed", err)
+	}
+	if _, err := readRollbackRules(systemDir); apperrors.AsAppError(err).Code != apperrors.CodeValidationFailed {
+		t.Fatalf("readRollbackRules error = %v, want validation failed", err)
+	}
+}
+
 func TestMandatoryRuleBackupRejectsNoBackup(t *testing.T) {
 	t.Parallel()
 	f := newDefaultFlags()

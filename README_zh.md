@@ -159,6 +159,7 @@ cfgov rule get      --app <app> --type <type> [--resource <name>] -o json
 cfgov rule export   --app <app> --dir <dir> -o json
 cfgov rule diff     --app <app> --type <type> --file <path> -o json
 cfgov rule validate --file <path> [--deep] [--fail-on-warnings] -o json
+cfgov rule validate --dir <dir> --deep [--fail-on-warnings] -o json
 
 # 写入
 cfgov rule create   --app <app> --type <type> --file <path> [--dry-run --diff] --yes      # R1
@@ -168,7 +169,7 @@ cfgov rule rollback --app <app> --backup <ref> --yes                            
 cfgov rule delete   --app <app> --type <type> --yes --ticket <t> [--allow-production-rule-delete]  # R2 / R3
 ```
 
-每个规则写入都会先过浅层 JSON/schema 校验;create/update/import/rollback 还会跑**深层**语义检查,且标志无法绕过。规则集以配置 blob 形式存储(Nacos group `SENTINEL_GROUP`、dataId `{app}-{type}-rules`;Apollo namespace `SENTINEL`、item `{app}-{type}-rules`),从而与 Sentinel 运行时保持线格式兼容。
+每个规则写入都会先过浅层 JSON/schema 校验;create/update/import/rollback 还会跑**深层**语义检查,且标志无法绕过。`rule validate --file --deep` 只跑对单个孤立规则类型有意义的检查;跨类型检查(如 param 没有对应 flow、flow/degrade grade 不一致)请用 `rule validate --dir --deep`。规则集以配置 blob 形式存储(Nacos group `SENTINEL_GROUP`、dataId `{app}-{type}-rules`;Apollo namespace `SENTINEL`、item `{app}-{type}-rules`),从而与 Sentinel 运行时保持线格式兼容。
 </details>
 
 <details>
