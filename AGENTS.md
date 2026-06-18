@@ -96,6 +96,15 @@ CGO_ENABLED=1 go test -race -count=1 ./...
 ## Release & Versioning (maintainer-owned — do not initiate)
 
 Releases are cut by the maintainer only; do not tag, publish, or edit artifacts.
+
+**Docs-before-release gate (mandatory).** A release ships only after every
+user-facing doc already matches the code's actual state — `README.md`,
+`README_zh.md`, `skills/cfgov-cli/SKILL.md`, this guide (`CLAUDE.md`/`AGENTS.md`),
+and the `package.json` description. Any new backend, noun/verb, flag, risk tier,
+or dependency / Go-version bump must be reflected first (confirm examples with
+`cfgov <cmd> --help`). Code must never ship ahead of its docs; a release carrying
+stale docs is incomplete — align the docs, then cut the release.
+
 For reference, a release bumps `package.json`, adds an exact `## vX.Y.Z`
 `CHANGELOG.md` heading, passes Build & Verify (`npm pack --dry-run` lists exactly
 `LICENSE`, `README.md`, `package.json`, `bin/cfgov-cli.js`, `scripts/install.js`),
