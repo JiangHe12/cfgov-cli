@@ -65,7 +65,7 @@ func ctxSetCmd(f *cliFlags) *cobra.Command { //nolint:gocyclo // Cobra wiring fo
 	var otelInsecure bool
 	var apolloAppID, apolloEnv, apolloCluster, apolloNamespace, apolloRuleNamespace string
 	var apolloToken, apolloSecret string
-	var etcdKeyPrefix, etcdCACert, etcdClientCert, etcdClientKey string
+	var etcdKeyPrefix, etcdRuleNamespace, etcdCACert, etcdClientCert, etcdClientKey string
 	cmd := &cobra.Command{
 		Use:   "set <name>",
 		Short: "Set a backend-bound context",
@@ -135,6 +135,7 @@ func ctxSetCmd(f *cliFlags) *cobra.Command { //nolint:gocyclo // Cobra wiring fo
 				ApolloNamespace:     firstNonEmpty(apolloNamespace, f.Namespace),
 				ApolloRuleNamespace: apolloRuleNamespace,
 				EtcdKeyPrefix:       etcdKeyPrefix,
+				EtcdRuleNamespace:   etcdRuleNamespace,
 				EtcdCACert:          etcdCACert,
 				EtcdClientCert:      etcdClientCert,
 				EtcdClientKey:       etcdClientKey,
@@ -173,6 +174,7 @@ func ctxSetCmd(f *cliFlags) *cobra.Command { //nolint:gocyclo // Cobra wiring fo
 	cmd.Flags().StringVar(&apolloToken, "apollo-token", "", "Apollo OpenAPI token")
 	cmd.Flags().StringVar(&apolloSecret, "apollo-secret", "", "Apollo OpenAPI secret")
 	cmd.Flags().StringVar(&etcdKeyPrefix, "etcd-key-prefix", "", "etcd key prefix prepended before namespace")
+	cmd.Flags().StringVar(&etcdRuleNamespace, "etcd-rule-namespace", "", "etcd namespace for Sentinel rules")
 	cmd.Flags().StringVar(&etcdCACert, "etcd-ca-cert", "", "etcd CA certificate path")
 	cmd.Flags().StringVar(&etcdClientCert, "etcd-client-cert", "", "etcd mTLS client certificate path")
 	cmd.Flags().StringVar(&etcdClientKey, "etcd-client-key", "", "etcd mTLS client private key path")
@@ -722,6 +724,7 @@ func contextView(name string, item cfgovctx.Context, current, showSecrets bool) 
 		"apolloNamespace":     item.ApolloNamespace,
 		"apolloRuleNamespace": item.ApolloRuleNamespace,
 		"etcdKeyPrefix":       item.EtcdKeyPrefix,
+		"etcdRuleNamespace":   item.EtcdRuleNamespace,
 		"etcdCaCert":          item.EtcdCACert,
 		"etcdClientCert":      item.EtcdClientCert,
 		"etcdClientKey":       item.EtcdClientKey,

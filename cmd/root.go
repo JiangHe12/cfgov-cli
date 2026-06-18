@@ -368,17 +368,18 @@ func buildEtcdBackend(f *cliFlags, contextName string, item cfgovctx.Context, se
 		password = resolved
 	}
 	backend, err := etcdBackend.New(etcdBackend.Options{
-		Endpoints:  server,
-		KeyPrefix:  firstNonEmpty(os.Getenv("ETCD_KEY_PREFIX"), item.EtcdKeyPrefix),
-		Namespace:  firstNonEmpty(f.Namespace, os.Getenv("ETCD_NAMESPACE"), item.Namespace),
-		Username:   firstNonEmpty(f.Username, os.Getenv("ETCD_USERNAME"), item.Username),
-		Password:   password,
-		CACert:     firstNonEmpty(os.Getenv("ETCD_CACERT"), item.EtcdCACert),
-		ClientCert: firstNonEmpty(os.Getenv("ETCD_CLIENT_CERT"), item.EtcdClientCert),
-		ClientKey:  firstNonEmpty(os.Getenv("ETCD_CLIENT_KEY"), item.EtcdClientKey),
-		Timeout:    f.Timeout,
-		Trace:      f.Debug || f.Trace,
-		TraceOut:   os.Stderr,
+		Endpoints:     server,
+		KeyPrefix:     firstNonEmpty(os.Getenv("ETCD_KEY_PREFIX"), item.EtcdKeyPrefix),
+		Namespace:     firstNonEmpty(f.Namespace, os.Getenv("ETCD_NAMESPACE"), item.Namespace),
+		RuleNamespace: firstNonEmpty(os.Getenv("ETCD_RULE_NAMESPACE"), item.EtcdRuleNamespace),
+		Username:      firstNonEmpty(f.Username, os.Getenv("ETCD_USERNAME"), item.Username),
+		Password:      password,
+		CACert:        firstNonEmpty(os.Getenv("ETCD_CACERT"), item.EtcdCACert),
+		ClientCert:    firstNonEmpty(os.Getenv("ETCD_CLIENT_CERT"), item.EtcdClientCert),
+		ClientKey:     firstNonEmpty(os.Getenv("ETCD_CLIENT_KEY"), item.EtcdClientKey),
+		Timeout:       f.Timeout,
+		Trace:         f.Debug || f.Trace,
+		TraceOut:      os.Stderr,
 	})
 	if err != nil {
 		return nil, err

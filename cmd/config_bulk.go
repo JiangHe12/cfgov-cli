@@ -741,17 +741,18 @@ func buildBackendFromNamedContext(parent context.Context, f *cliFlags, name stri
 	}
 	if item.Backend == "etcd" {
 		return etcdBackend.New(etcdBackend.Options{
-			Endpoints:  item.Server,
-			KeyPrefix:  item.EtcdKeyPrefix,
-			Namespace:  item.Namespace,
-			Username:   item.Username,
-			Password:   password,
-			CACert:     item.EtcdCACert,
-			ClientCert: item.EtcdClientCert,
-			ClientKey:  item.EtcdClientKey,
-			Timeout:    f.Timeout,
-			Trace:      f.Debug || f.Trace,
-			TraceOut:   os.Stderr,
+			Endpoints:     item.Server,
+			KeyPrefix:     item.EtcdKeyPrefix,
+			Namespace:     item.Namespace,
+			RuleNamespace: item.EtcdRuleNamespace,
+			Username:      item.Username,
+			Password:      password,
+			CACert:        item.EtcdCACert,
+			ClientCert:    item.EtcdClientCert,
+			ClientKey:     item.EtcdClientKey,
+			Timeout:       f.Timeout,
+			Trace:         f.Debug || f.Trace,
+			TraceOut:      os.Stderr,
 		})
 	}
 	client := api.NewClient(item.Server, item.Username, password, item.Namespace, f.Timeout)

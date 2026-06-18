@@ -107,13 +107,13 @@ func currentBackendCapabilities(f *cliFlags) cfgov.Capabilities {
 	case "etcd":
 		return cfgov.Capabilities{
 			Backend:          "etcd",
-			ResourceTypes:    []string{"config"},
+			ResourceTypes:    []string{"config", "rule"},
 			Verbs:            []string{"get", "list", "diff", "validate", "pull", "listen", "push", "delete"},
 			SupportsCAS:      true,
 			SupportsRevision: true,
 			SupportsHistory:  false,
 			SupportsWatch:    true,
-			SupportsRules:    false,
+			SupportsRules:    true,
 		}
 	default:
 		return cfgov.Capabilities{
@@ -191,7 +191,7 @@ func buildCapabilities(f *cliFlags, backend cfgov.Capabilities) capabilitiesData
 			ExitCodes:          apperrors.AllExitCodes(),
 			Kinds:              []string{"AuditPruneResult", "AuditQueryResult", "AuditVerifyResult", "BackupCleanResult", "BackupList", "Capabilities", "ChangePlan", "ChangeResult", "ConfigExport", "ConfigItem", "ConfigList", "ConfigListenEvent", "ContextImportResult", "ContextItem", "ContextList", "ContextTestResult", "DiffResult", "DoctorResult", "Error", "ExportResult", "HistoryList", "NamespaceItem", "NamespaceList", "RoleList", "RuleDiff", "RuleExport", "RuleList", "RuleSet", "RuleValidation", "ServiceInstanceList", "ServiceItem", "ServiceList", "ValidationResult", "VersionInfo"},
 			CredentialBackends: credstore.Available(),
-			Environment:        []string{"APOLLO_APP_ID", "APOLLO_CLUSTER", "APOLLO_ENV", "APOLLO_NAMESPACE", "APOLLO_RULE_NAMESPACE", "APOLLO_SECRET", "APOLLO_SERVER", "APOLLO_TOKEN", "CFGOV_CLI_AUDIT_PRIVATE_KEY", "CFGOV_CLI_CREDENTIAL_PASSPHRASE", "CFGOV_CLI_OPERATOR", "ETCD_CACERT", "ETCD_CLIENT_CERT", "ETCD_CLIENT_KEY", "ETCD_ENDPOINTS", "ETCD_KEY_PREFIX", "ETCD_NAMESPACE", "ETCD_PASSWORD", "ETCD_SERVER", "ETCD_USERNAME", "NACOS_SERVER", "NACOS_USERNAME", "NACOS_PASSWORD", "NACOS_NAMESPACE"},
+			Environment:        []string{"APOLLO_APP_ID", "APOLLO_CLUSTER", "APOLLO_ENV", "APOLLO_NAMESPACE", "APOLLO_RULE_NAMESPACE", "APOLLO_SECRET", "APOLLO_SERVER", "APOLLO_TOKEN", "CFGOV_CLI_AUDIT_PRIVATE_KEY", "CFGOV_CLI_CREDENTIAL_PASSPHRASE", "CFGOV_CLI_OPERATOR", "ETCD_CACERT", "ETCD_CLIENT_CERT", "ETCD_CLIENT_KEY", "ETCD_ENDPOINTS", "ETCD_KEY_PREFIX", "ETCD_NAMESPACE", "ETCD_PASSWORD", "ETCD_RULE_NAMESPACE", "ETCD_SERVER", "ETCD_USERNAME", "NACOS_SERVER", "NACOS_USERNAME", "NACOS_PASSWORD", "NACOS_NAMESPACE"},
 			RuleTypes:          []string{"flow", "degrade", "system", "authority", "param"},
 		},
 		Limits: capLimits{

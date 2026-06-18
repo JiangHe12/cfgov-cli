@@ -6,8 +6,13 @@
 //   - cfgov.Coordinate.Key maps to one etcd path segment under that namespace.
 //   - The full etcd key is "<keyPrefix><namespace>/<key>".
 //
-// This backend intentionally implements config storage only. Sentinel rules,
-// history, namespace, and service operations are not supported by etcd here.
+// Rule coordinate mapping:
+//   - RuleCoordinate(app, type) maps to Coordinate{Namespace: ruleNamespace,
+//     Key: "{app}-{type}-rules"}.
+//   - ruleNamespace defaults to "SENTINEL" and is intentionally separate from
+//     the config namespace default "application".
+//
+// History, namespace, and service operations are not supported by etcd here.
 package etcd
 
 import (
@@ -28,35 +33,41 @@ import (
 	clientv3 "go.etcd.io/etcd/client/v3"
 
 	"github.com/JiangHe12/cfgov-cli/internal/cfgov"
+	"github.com/JiangHe12/cfgov-cli/internal/rule"
 )
 
-const defaultNamespace = "application"
+const (
+	defaultNamespace     = "application"
+	defaultRuleNamespace = "SENTINEL"
+)
 
 type Options struct {
-	Endpoints  string
-	KeyPrefix  string
-	Namespace  string
-	Username   string
-	Password   string
-	CACert     string
-	ClientCert string
-	ClientKey  string
-	Timeout    time.Duration
-	Trace      bool
-	TraceOut   io.Writer
+	Endpoints     string
+	KeyPrefix     string
+	Namespace     string
+	RuleNamespace string
+	Username      string
+	Password      string
+	CACert        string
+	ClientCert    string
+	ClientKey     string
+	Timeout       time.Duration
+	Trace         bool
+	TraceOut      io.Writer
 
 	client etcdClient
 }
 
 type Backend struct {
-	endpoints []string
-	server    string
-	keyPrefix string
-	namespace string
-	client    etcdClient
-	close     func() error
-	trace     bool
-	traceOut  io.Writer
+	endpoints     []string
+	server        string
+	keyPrefix     string
+	namespace     string
+	ruleNamespace string
+	client        etcdClient
+	close         func() error
+	trace         bool
+	traceOut      io.Writer
 }
 
 type etcdClient interface {
@@ -67,7 +78,10 @@ type etcdClient interface {
 	Watch(ctx context.Context, key string, opts ...clientv3.OpOption) clientv3.WatchChan
 }
 
-var _ cfgov.Backend = (*Backend)(nil)
+var (
+	_ cfgov.Backend   = (*Backend)(nil)
+	_ cfgov.RuleStore = (*Backend)(nil)
+)
 
 func ValidateEndpoints(raw string) error {
 	_, err := normalizeEndpoints(raw)
@@ -90,6 +104,10 @@ func New(opts Options) (*Backend, error) {
 	}
 	namespace := firstNonEmpty(opts.Namespace, defaultNamespace)
 	if err := validatePart("namespace", namespace); err != nil {
+		return nil, err
+	}
+	ruleNamespace := firstNonEmpty(opts.RuleNamespace, defaultRuleNamespace)
+	if err := validatePart("rule namespace", ruleNamespace); err != nil {
 		return nil, err
 	}
 	timeout := opts.Timeout
@@ -121,14 +139,15 @@ func New(opts Options) (*Backend, error) {
 		closeFn = realClient.Close
 	}
 	return &Backend{
-		endpoints: endpoints,
-		server:    strings.Join(endpoints, ","),
-		keyPrefix: keyPrefix,
-		namespace: namespace,
-		client:    client,
-		close:     closeFn,
-		trace:     opts.Trace,
-		traceOut:  out,
+		endpoints:     endpoints,
+		server:        strings.Join(endpoints, ","),
+		keyPrefix:     keyPrefix,
+		namespace:     namespace,
+		ruleNamespace: ruleNamespace,
+		client:        client,
+		close:         closeFn,
+		trace:         opts.Trace,
+		traceOut:      out,
 	}, nil
 }
 
@@ -324,14 +343,32 @@ func (b *Backend) Describe() cfgov.Description {
 func (b *Backend) Capabilities() cfgov.Capabilities {
 	return cfgov.Capabilities{
 		Backend:          "etcd",
-		ResourceTypes:    []string{"config"},
+		ResourceTypes:    []string{"config", "rule"},
 		Verbs:            []string{"get", "list", "diff", "validate", "pull", "listen", "push", "delete"},
 		SupportsCAS:      true,
 		SupportsRevision: true,
 		SupportsHistory:  false,
 		SupportsWatch:    true,
-		SupportsRules:    false,
+		SupportsRules:    true,
 	}
+}
+
+func (b *Backend) RuleCoordinate(app, ruleType string) (cfgov.Coordinate, error) {
+	parsed, err := rule.ParseType(ruleType)
+	if err != nil {
+		return cfgov.Coordinate{}, err
+	}
+	dataID, err := rule.DataID(app, parsed)
+	if err != nil {
+		return cfgov.Coordinate{}, err
+	}
+	if err := validatePart("rule namespace", b.ruleNamespace); err != nil {
+		return cfgov.Coordinate{}, err
+	}
+	if err := validatePart("rule key", dataID); err != nil {
+		return cfgov.Coordinate{}, err
+	}
+	return cfgov.Coordinate{Namespace: b.ruleNamespace, Key: dataID}, nil
 }
 
 func (b *Backend) resolve(coord cfgov.Coordinate) (string, string, string, error) {

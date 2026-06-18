@@ -24,6 +24,8 @@ func TestNewValidatesEtcdOptionsFailClosed(t *testing.T) {
 		{name: "endpoint credentials", opts: Options{Endpoints: "http://user:pass@127.0.0.1:2379", Namespace: "app"}},
 		{name: "namespace slash", opts: Options{Endpoints: "127.0.0.1:2379", Namespace: "bad/ns"}},
 		{name: "namespace dotdot", opts: Options{Endpoints: "127.0.0.1:2379", Namespace: ".."}},
+		{name: "rule namespace slash", opts: Options{Endpoints: "127.0.0.1:2379", Namespace: "app", RuleNamespace: "bad/ns"}},
+		{name: "rule namespace dotdot", opts: Options{Endpoints: "127.0.0.1:2379", Namespace: "app", RuleNamespace: ".."}},
 		{name: "prefix dotdot", opts: Options{Endpoints: "127.0.0.1:2379", Namespace: "app", KeyPrefix: "cfg/../prod"}},
 		{name: "partial mtls", opts: Options{Endpoints: "127.0.0.1:2379", Namespace: "app", ClientCert: "client.crt"}},
 	}
@@ -145,22 +147,107 @@ func TestCapabilitiesAndUnsupportedHistory(t *testing.T) {
 	t.Parallel()
 	backend := newTestBackend(&fakeClient{})
 	caps := backend.Capabilities()
-	if caps.Backend != "etcd" || !caps.SupportsWatch || !caps.SupportsCAS || !caps.SupportsRevision || caps.SupportsHistory || caps.SupportsRules {
+	if caps.Backend != "etcd" || !caps.SupportsWatch || !caps.SupportsCAS || !caps.SupportsRevision || caps.SupportsHistory || !caps.SupportsRules {
 		t.Fatalf("Capabilities() = %#v", caps)
+	}
+	if len(caps.ResourceTypes) != 2 || caps.ResourceTypes[0] != "config" || caps.ResourceTypes[1] != "rule" {
+		t.Fatalf("Capabilities().ResourceTypes = %#v, want config/rule", caps.ResourceTypes)
 	}
 	if _, _, err := backend.History(context.Background(), cfgov.Coordinate{Namespace: "prod", Key: "app"}, cfgov.HistoryOptions{}); apperrors.AsAppError(err).Code != apperrors.CodeNotImplemented {
 		t.Fatalf("History() error = %v, want NOT_IMPLEMENTED", err)
 	}
 }
 
+func TestRuleCoordinateDerivesSentinelRuleKeys(t *testing.T) {
+	t.Parallel()
+	backend := newTestBackend(&fakeClient{})
+	tests := []struct {
+		ruleType string
+		key      string
+	}{
+		{ruleType: "flow", key: "demo-flow-rules"},
+		{ruleType: "degrade", key: "demo-degrade-rules"},
+		{ruleType: "system", key: "demo-system-rules"},
+		{ruleType: "authority", key: "demo-authority-rules"},
+		{ruleType: "param", key: "demo-param-rules"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.ruleType, func(t *testing.T) {
+			t.Parallel()
+			coord, err := backend.RuleCoordinate("demo", tt.ruleType)
+			if err != nil {
+				t.Fatalf("RuleCoordinate() error = %v", err)
+			}
+			if coord.Namespace != "SENTINEL" || coord.Key != tt.key {
+				t.Fatalf("RuleCoordinate() = %#v, want SENTINEL/%s", coord, tt.key)
+			}
+		})
+	}
+}
+
+func TestRuleCoordinateRuleNamespaceDefaultAndOverride(t *testing.T) {
+	t.Parallel()
+	defaultBackend, err := New(Options{Endpoints: "127.0.0.1:2379", Namespace: "prod", client: &fakeClient{}})
+	if err != nil {
+		t.Fatalf("New(default) error = %v", err)
+	}
+	defaultCoord, err := defaultBackend.RuleCoordinate("demo", "flow")
+	if err != nil {
+		t.Fatalf("RuleCoordinate(default) error = %v", err)
+	}
+	if defaultCoord.Namespace != "SENTINEL" {
+		t.Fatalf("default namespace = %q, want SENTINEL", defaultCoord.Namespace)
+	}
+	overrideBackend, err := New(Options{Endpoints: "127.0.0.1:2379", Namespace: "prod", RuleNamespace: "RULES", client: &fakeClient{}})
+	if err != nil {
+		t.Fatalf("New(override) error = %v", err)
+	}
+	overrideCoord, err := overrideBackend.RuleCoordinate("demo", "flow")
+	if err != nil {
+		t.Fatalf("RuleCoordinate(override) error = %v", err)
+	}
+	if overrideCoord.Namespace != "RULES" {
+		t.Fatalf("override namespace = %q, want RULES", overrideCoord.Namespace)
+	}
+}
+
+func TestRuleCoordinateRejectsUnsafeParts(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name        string
+		app         string
+		ruleNS      string
+		wantErrCode apperrors.Code
+	}{
+		{name: "app slash", app: "bad/app", ruleNS: "SENTINEL", wantErrCode: apperrors.CodeValidationFailed},
+		{name: "app dotdot", app: "..", ruleNS: "SENTINEL", wantErrCode: apperrors.CodeUsageError},
+		{name: "app control", app: "bad\napp", ruleNS: "SENTINEL", wantErrCode: apperrors.CodeValidationFailed},
+		{name: "rule namespace slash", app: "demo", ruleNS: "bad/ns", wantErrCode: apperrors.CodeValidationFailed},
+		{name: "rule namespace dotdot", app: "demo", ruleNS: "..", wantErrCode: apperrors.CodeValidationFailed},
+		{name: "rule namespace control", app: "demo", ruleNS: "bad\nns", wantErrCode: apperrors.CodeValidationFailed},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			backend := newTestBackend(&fakeClient{})
+			backend.ruleNamespace = tt.ruleNS
+			_, err := backend.RuleCoordinate(tt.app, "flow")
+			if got := apperrors.AsAppError(err).Code; got != tt.wantErrCode {
+				t.Fatalf("RuleCoordinate() code = %s, want %s (err=%v)", got, tt.wantErrCode, err)
+			}
+		})
+	}
+}
+
 func newTestBackend(client *fakeClient) *Backend {
 	return &Backend{
-		endpoints: []string{"http://127.0.0.1:2379"},
-		server:    "http://127.0.0.1:2379",
-		keyPrefix: "cfg/",
-		namespace: "prod",
-		client:    client,
-		traceOut:  ioDiscard{},
+		endpoints:     []string{"http://127.0.0.1:2379"},
+		server:        "http://127.0.0.1:2379",
+		keyPrefix:     "cfg/",
+		namespace:     "prod",
+		ruleNamespace: "SENTINEL",
+		client:        client,
+		traceOut:      ioDiscard{},
 	}
 }
 

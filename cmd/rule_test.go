@@ -5,6 +5,7 @@ import (
 
 	"github.com/JiangHe12/opskit-core/apperrors"
 
+	etcdBackend "github.com/JiangHe12/cfgov-cli/internal/backend/etcd"
 	"github.com/JiangHe12/cfgov-cli/internal/cfgov"
 )
 
@@ -17,6 +18,21 @@ func TestRuleStoreUnsupportedBackendFailClosed(t *testing.T) {
 	_, _, err := ensureRuleStore(backend)
 	if apperrors.AsAppError(err).Code != apperrors.CodeNotImplemented {
 		t.Fatalf("error = %v, want not implemented", err)
+	}
+}
+
+func TestRuleStoreEtcdBackendSupported(t *testing.T) {
+	t.Parallel()
+	backend, err := etcdBackend.New(etcdBackend.Options{Endpoints: "127.0.0.1:2379", Namespace: "ns"})
+	if err != nil {
+		t.Fatalf("etcd New() error = %v", err)
+	}
+	_, store, err := ensureRuleStore(backend)
+	if err != nil {
+		t.Fatalf("ensureRuleStore(etcd) error = %v", err)
+	}
+	if store == nil {
+		t.Fatal("ensureRuleStore(etcd) returned nil store")
 	}
 }
 

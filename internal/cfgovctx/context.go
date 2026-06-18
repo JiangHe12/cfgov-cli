@@ -20,6 +20,7 @@ type Context struct {
 	ApolloNamespace     string `yaml:"apolloNamespace,omitempty"`
 	ApolloRuleNamespace string `yaml:"apolloRuleNamespace,omitempty"`
 	EtcdKeyPrefix       string `yaml:"etcdKeyPrefix,omitempty"`
+	EtcdRuleNamespace   string `yaml:"etcdRuleNamespace,omitempty"`
 	EtcdCACert          string `yaml:"etcdCaCert,omitempty"`
 	EtcdClientCert      string `yaml:"etcdClientCert,omitempty"`
 	EtcdClientKey       string `yaml:"etcdClientKey,omitempty"`
