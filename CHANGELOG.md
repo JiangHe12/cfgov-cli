@@ -2,6 +2,16 @@
 
 All notable changes to this project are documented in this file.
 
+## v0.4.0
+
+### Added
+- Consul backend (Axis-A 5th backend): a `consul` adapter implementing `cfgov.Backend` over Consul KV — coordinate `<keyPrefix><namespace>/<key>` with single-segment fail-closed validation, `ModifyIndex` CAS, watch via Consul blocking query (`config listen`), ACL token via credstore and optional TLS/mTLS (no insecure-skip-verify). History is NotImplemented.
+- Consul rules + feature flags: Consul implements `cfgov.RuleStore` (rule sets at `<keyPrefix>SENTINEL/{app}-{type}-rules`, configurable via `--consul-rule-namespace`) and `cfgov.FlagStore` (`{app}-flags` under the bound namespace), so config + rules + flags all work on Consul.
+- Consul service registry: Consul implements `cfgov.ServiceRegistry` (catalog + agent + health), making `service` a two-backend concern alongside Nacos. Instance health comes from real Consul health checks; instances are agent-registered with a deterministic `{service}-{ip}-{port}` id; Nacos-only group/cluster/ephemeral knobs are preserved as Consul service metadata rather than faked. `service register` is R1, `service deregister` is R2 → R3 protected with `--allow-production-service-deregister` (unchanged, backend-agnostic).
+
+### Fixed
+- Backend key validation (`validatePart` in the etcd and Consul adapters, and the Apollo equivalent) no longer trims before its content checks: leading/trailing whitespace is now rejected so the validated segment always equals the stored key.
+
 ## v0.3.0
 
 ### Added
