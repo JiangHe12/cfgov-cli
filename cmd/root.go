@@ -171,7 +171,7 @@ func newRootCmdWith(f *cliFlags) *cobra.Command {
 	}
 	cmd.PersistentFlags().StringVar(&f.Config, "config", "", "Override context config path")
 	cmd.PersistentFlags().StringVar(&f.Context, "context", "", "Temporarily use a named context for this command")
-	cmd.PersistentFlags().StringVar(&f.Backend, "backend", "", "Backend override: nacos | apollo | etcd | k8s")
+	cmd.PersistentFlags().StringVar(&f.Backend, "backend", "", "Backend override: nacos | apollo | etcd | k8s | consul")
 	cmd.PersistentFlags().StringVar(&f.Server, "server", "", "Backend server URL")
 	cmd.PersistentFlags().StringVar(&f.Username, "username", "", "Backend username")
 	cmd.PersistentFlags().StringVar(&f.Password, "password", "", "Backend password")

@@ -1,12 +1,14 @@
 package nacos
 
 import (
+	"context"
 	"testing"
 	"time"
 
 	"github.com/JiangHe12/opskit-core/apperrors"
 
 	"github.com/JiangHe12/cfgov-cli/internal/api"
+	"github.com/JiangHe12/cfgov-cli/internal/cfgov"
 )
 
 func TestFlagCoordinate(t *testing.T) {
@@ -32,5 +34,20 @@ func TestFlagCoordinateRejectsInjectedApp(t *testing.T) {
 				t.Fatalf("error = %v, want validation failed", err)
 			}
 		})
+	}
+}
+
+func TestPublicNamespaceCoordinateMatchesDefaultTenant(t *testing.T) {
+	t.Parallel()
+	backend := New(api.NewClient("http://nacos.example", "", "", "public", time.Second), "http://nacos.example")
+	if backend.Describe().Namespace != "" {
+		t.Fatalf("Describe().Namespace = %q, want empty public tenant", backend.Describe().Namespace)
+	}
+	err := backend.requireNamespace("public")
+	if err != nil {
+		t.Fatalf("requireNamespace(public) error = %v", err)
+	}
+	if _, err := backend.List(context.Background(), cfgov.ListOptions{Namespace: "wmc_dev"}); apperrors.AsAppError(err).Code != apperrors.CodeUsageError {
+		t.Fatalf("List(wmc_dev) error = %v, want usage error", err)
 	}
 }

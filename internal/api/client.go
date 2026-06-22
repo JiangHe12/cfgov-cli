@@ -82,7 +82,7 @@ func NewClient(baseURL, username, password, namespace string, timeout ...time.Du
 		baseURL:    strings.TrimRight(baseURL, "/"),
 		username:   username,
 		password:   password,
-		namespace:  namespace,
+		namespace:  normalizeNacosNamespace(namespace),
 		httpClient: &http.Client{Timeout: clientTimeout, Transport: transport},
 		// Pre-create listenClient so long-poll operations don't race on lazy init.
 		// It reuses the transport from httpClient but omits the global Timeout so
@@ -739,6 +739,13 @@ func (c *Client) WithNamespace(namespace string) *Client {
 	c.traceMu.RUnlock()
 	next.SetTrace(trace)
 	return next
+}
+
+func normalizeNacosNamespace(namespace string) string {
+	if strings.EqualFold(strings.TrimSpace(namespace), "public") {
+		return ""
+	}
+	return namespace
 }
 
 func (c *Client) Ping(ctx context.Context) error {

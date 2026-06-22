@@ -352,10 +352,17 @@ func apiInstanceOptions(opts cfgov.InstanceOptions) api.InstanceOptions {
 
 func (b *Backend) requireNamespace(namespace string) error {
 	current := b.client.Namespace()
-	if namespace == "" || namespace == current {
+	if namespace == "" || normalizePublicNamespace(namespace) == current {
 		return nil
 	}
 	return apperrors.New(apperrors.CodeUsageError, fmt.Sprintf("backend namespace %q does not match client namespace %q", namespace, current), nil)
+}
+
+func normalizePublicNamespace(namespace string) string {
+	if strings.EqualFold(strings.TrimSpace(namespace), "public") {
+		return ""
+	}
+	return namespace
 }
 
 func (b *Backend) checkCAS(ctx context.Context, coord cfgov.Coordinate, expected string) error {
