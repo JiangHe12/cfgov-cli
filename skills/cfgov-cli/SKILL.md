@@ -1,12 +1,12 @@
 ---
 name: cfgov-cli
-description: Governed configuration and Sentinel rule operations across Nacos, Apollo, etcd, and Kubernetes with R0-R3 authorization, backup-before-write, redaction, and fingerprint-only audit.
+description: Governed configuration, Sentinel rule, and feature-flag operations across Nacos, Apollo, etcd, and Kubernetes with R0-R3 authorization, backup-before-write, redaction, and fingerprint-only audit.
 allowed-tools: Bash(cfgov:*), Bash(cfgov-cli:*)
 ---
 
 # cfgov-cli
 
-Use `cfgov` for governed configuration operations across Nacos, Apollo, etcd, and Kubernetes. It wraps reads, writes, backups, audit, and R0-R3 authorization for config blobs and Sentinel rule sets.
+Use `cfgov` for governed configuration operations across Nacos, Apollo, etcd, and Kubernetes. It wraps reads, writes, backups, audit, and R0-R3 authorization for config blobs, Sentinel rule sets, and feature-flag sets.
 
 ## Hard Rules For AI Agents
 
@@ -33,7 +33,7 @@ cfgov ctx role set <name> --target-operator <operator> --role reader|writer|admi
 cfgov ctx role list <name> -o json
 ```
 
-`--backend` can temporarily override the current context for one command. Nacos supports config, rule, namespace, service, config history, and config listen. Apollo supports config and rule storage; namespace/service management, history, and listen are not supported and fail closed. etcd supports config and rule storage plus native watch (`config listen`); history, namespace, and service are not supported. Kubernetes (ConfigMap/Secret) supports config and rule storage — config keys are `<kind>/<name>/<dataKey>` where `<kind>` is `configmap` or `secret`, rule sets use ConfigMap keys `configmap/{app}-{type}-rules/rules.json` in the context `--namespace`, and namespace/service, history, and watch are not supported and fail closed. Always check `cfgov capabilities -o json` for the bound backend.
+`--backend` can temporarily override the current context for one command. Nacos supports config, rule, feature flag, namespace, service, config history, and config listen. Apollo supports config, rule, and feature-flag storage; namespace/service management, history, and listen are not supported and fail closed. etcd supports config, rule, and feature-flag storage plus native watch (`config listen`); history, namespace, and service are not supported. Kubernetes (ConfigMap/Secret) supports config, rule, and feature-flag storage — config keys are `<kind>/<name>/<dataKey>` where `<kind>` is `configmap` or `secret`, rule sets use ConfigMap keys `configmap/{app}-{type}-rules/rules.json` in the context `--namespace`, and namespace/service, history, and watch are not supported and fail closed. Always check `cfgov capabilities -o json` for the bound backend.
 
 Credentials are stored through cfgov context credential handling. Hidden token/secret flags exist for setup paths; do not print secrets.
 
@@ -98,6 +98,32 @@ cfgov rule delete --app <app> --type <type> (--resource <resource>|--all) [--exp
 Risk model: `create`, `update`, `import`, and `rollback` are R1; `delete` is R2 and protected delete becomes R3 with `--allow-production-rule-delete`.
 
 Every rule write must pass shallow JSON/schema validation before authorization. Create, update, import, and rollback also run deep semantic checks; deep errors cannot be bypassed by flags. `rule validate --file --deep` is intra-rule validation for one isolated rule type; use `rule validate --dir --deep` for cross-rule checks across flow/degrade/system/authority/param files. Rule overwrite/delete/rollback paths back up the existing remote rule set before writing.
+
+## Feature Flags
+
+Feature flags are a cfgov-native typed policy stored as one JSON-array config blob per app, on every backend: Nacos group `FEATURE_FLAG_GROUP` dataId `{app}-flags`; Apollo and etcd use key `{app}-flags` under the bound namespace; Kubernetes uses ConfigMap `{app}-flags` data key `flags.json` in the context namespace. A flag has `key`, `enabled`, optional `description`/`defaultVariant`, `variants` (`{name,value}`), and percentage-rollout `rules` (`{variant,rolloutPercent,segment}`).
+
+R0 read and validation:
+
+```bash
+cfgov flag list --app <app> -o json
+cfgov flag get --app <app> [--key <key>] -o json
+cfgov flag export --app <app> --dir <dir> -o json
+cfgov flag diff --app <app> (--file <path>|--dir <dir>) -o json
+cfgov flag validate (--file <path>|--dir <dir>) [--deep] [--fail-on-warnings] -o json
+```
+
+Write operations:
+
+```bash
+cfgov flag create --app <app> --file <path> [--force] [--expected-revision <rev>] --dry-run --diff -o json
+cfgov flag update --app <app> --file <path> [--expected-revision <rev>] --dry-run --diff -o json
+cfgov flag import --app <app> (--file <path>|--dir <dir>) --dry-run --plan -o json
+cfgov flag rollback --app <app> --backup <ref> --dry-run --diff -o json
+cfgov flag delete --app <app> (--key <key>|--all) [--expected-revision <rev>] --dry-run --diff -o json
+```
+
+Risk model: `create`, `update`, `import`, and `rollback` are R1; `delete` is R2 and protected delete becomes R3 with `--allow-production-flag-delete`. Create, update, import, and rollback run deep semantic checks (duplicate key, `rolloutPercent` out of 0-100, `defaultVariant`/rule `variant` must exist) that flags cannot bypass; `delete` requires `--key` or `--all`. Overwrite/delete/rollback paths back up the existing remote flag set first.
 
 ## Namespace
 

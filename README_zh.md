@@ -2,9 +2,9 @@
 
 # cfgov-cli
 
-**面向人类与 AI 智能体的「带治理」配置 & Sentinel 规则操作命令行。**
+**面向人类与 AI 智能体的「带治理」配置、Sentinel 规则 & 特性开关操作命令行。**
 
-一个安全的命令行,统一管理 **Nacos**、**Apollo**、**etcd** 与 **Kubernetes** 上的应用配置和流控规则——读取、对比、修改、备份、回滚、审计,再也不会手滑改挂生产。
+一个安全的命令行,统一管理 **Nacos**、**Apollo**、**etcd** 与 **Kubernetes** 上的应用配置、流控规则与特性开关——读取、对比、修改、备份、回滚、审计,再也不会手滑改挂生产。
 
 [![npm version](https://img.shields.io/npm/v/cfgov-cli.svg)](https://www.npmjs.com/package/cfgov-cli)
 [![CI](https://github.com/JiangHe12/cfgov-cli/actions/workflows/ci.yml/badge.svg)](https://github.com/JiangHe12/cfgov-cli/actions/workflows/ci.yml)
@@ -37,9 +37,10 @@
 
 | | |
 |---|---|
-| 🗄️ **四后端** | **Nacos**(配置、Sentinel 规则、命名空间、服务、历史、实时监听)、**Apollo**(配置 + 规则)、**etcd**(配置 + 规则、原生 watch)与 **Kubernetes**(ConfigMap/Secret 配置 + 规则)。可按上下文绑定,也可按命令临时覆盖。 |
+| 🗄️ **四后端** | **Nacos**(配置、Sentinel 规则、特性开关、命名空间、服务、历史、实时监听)、**Apollo**(配置 + 规则 + 开关)、**etcd**(配置 + 规则 + 开关、原生 watch)与 **Kubernetes**(ConfigMap/Secret 配置 + 规则 + 开关)。可按上下文绑定,也可按命令临时覆盖。 |
 | ⚙️ **完整配置生命周期** | get · list · diff · validate · pull · history · listen · push · delete · export · import · promote · rollback · reconcile |
 | 🚦 **Sentinel 规则** | flow · degrade · system · authority · param——读取、校验(浅 **+** 深)、创建、更新、导入、回滚、删除。与 Sentinel 运行时**线格式兼容**。 |
+| 🏁 **特性开关** | 类型化的特性开关集,**四后端通吃**——读取、校验(浅 **+** 深)、创建、更新、导入、回滚、删除。与规则同样的 schema-over-backend 模型。 |
 | 🏷️ **Nacos 命名空间 & 服务** | 命名空间 list / create / update / delete;服务实例 list / register / deregister。 |
 | 🔐 **R0–R3 治理** | 每个操作都做风险分级;受保护上下文整体升一档;AI 调用者永远无法自我授权。 |
 | 💾 **备份与回滚** | 写前自动备份;可从本地备份、备份 id 或 Nacos 历史恢复。 |
@@ -107,8 +108,8 @@ cfgov audit query --since 1h -o json
 | 档位 | 涵盖范围 | 你必须提供 |
 |:---:|---|---|
 | **R0** | 读取与本地查看(`get`、`list`、`diff`、`validate`、`doctor` …) | 无——但仍会被审计 |
-| **R1** | 普通写入(`config push`、`rule create/update`、`service register`、`namespace create`) | `--yes`(或交互式确认) |
-| **R2** | 破坏性 / 升级操作(`config delete`、`rule delete`、`service deregister`、`namespace delete`、`reconcile`) | `--yes` **加** 非空的 `--ticket` |
+| **R1** | 普通写入(`config push`、`rule create/update`、`flag create/update`、`service register`、`namespace create`) | `--yes`(或交互式确认) |
+| **R2** | 破坏性 / 升级操作(`config delete`、`rule delete`、`flag delete`、`service deregister`、`namespace delete`、`reconcile`) | `--yes` **加** 非空的 `--ticket` |
 | **R3** | 受保护的破坏性操作 | 以上**再加**该命令专属的 `--allow-*` 标志 |
 
 **受保护上下文会把每个操作整体升一档。** 例如 `config delete` 通常是 R2,但在 `--protected` 上下文里会变成 R3,并额外要求 `--allow-production-config-delete`。
@@ -171,6 +172,28 @@ cfgov rule delete   --app <app> --type <type> --yes --ticket <t> [--allow-produc
 ```
 
 每个规则写入都会先过浅层 JSON/schema 校验;create/update/import/rollback 还会跑**深层**语义检查,且标志无法绕过。`rule validate --file --deep` 只跑对单个孤立规则类型有意义的检查;跨类型检查(如 param 没有对应 flow、flow/degrade grade 不一致)请用 `rule validate --dir --deep`。规则集以配置 blob 形式存储(Nacos group `SENTINEL_GROUP`、dataId `{app}-{type}-rules`;Apollo namespace `SENTINEL`、item `{app}-{type}-rules`;etcd key `<keyPrefix>SENTINEL/{app}-{type}-rules`;Kubernetes ConfigMap `{app}-{type}-rules`、数据键 `rules.json`),从而与 Sentinel 运行时保持线格式兼容。其中 Kubernetes 采用的是 ConfigMap / file-datasource 约定,而非基于 CRD 的 datasource。
+</details>
+
+<details>
+<summary><b>flag</b> — 特性开关(cfgov 原生类型化策略,四后端通吃)</summary>
+
+```bash
+# 读取与校验(R0)
+cfgov flag list     --app <app> -o json
+cfgov flag get      --app <app> [--key <key>] -o json
+cfgov flag export   --app <app> --dir <dir> -o json
+cfgov flag diff     --app <app> (--file <path>|--dir <dir>) -o json
+cfgov flag validate (--file <path>|--dir <dir>) [--deep] [--fail-on-warnings] -o json
+
+# 写入
+cfgov flag create   --app <app> --file <path> [--force] [--dry-run --diff] --yes      # R1
+cfgov flag update   --app <app> --file <path> --yes                                   # R1
+cfgov flag import   --app <app> (--file <path>|--dir <dir>) --dry-run --plan --yes     # R1
+cfgov flag rollback --app <app> --backup <ref> --yes                                  # R1
+cfgov flag delete   --app <app> (--key <key>|--all) --yes --ticket <t> [--allow-production-flag-delete]  # R2 / R3
+```
+
+一个特性开关集就是一组类型化开关的 JSON 数组(`key`、`enabled`、`defaultVariant`、`variants`、按百分比灰度的 `rules`),以单个配置 blob 形式按 app 存储:key 为 `{app}-flags`(Nacos group `FEATURE_FLAG_GROUP`;Apollo/etcd 落在绑定的命名空间下;Kubernetes ConfigMap `{app}-flags`、数据键 `flags.json`)。create/update/import/rollback 会跑**深层**语义检查且无法被标志绕过——重复 key、`rolloutPercent` 越界 0–100、variant 完整性(`defaultVariant` 与每条规则的 `variant` 必须存在)。`delete` 需指定具体 `--key` 或 `--all`。特性开关是 cfgov 原生策略(无外部运行时约定),因此直接复用各后端绑定的命名空间。
 </details>
 
 <details>

@@ -7,8 +7,9 @@ The workspace `../CLAUDE.md` (opskit family guide) and the global
 
 ## Project Summary
 
-cfgov-cli is the governed config-and-rule operations CLI for AI agents: one entry
-point for application configuration and Sentinel flow-control rules across
+cfgov-cli is the governed config, rule, and feature-flag operations CLI for AI
+agents: one entry point for application configuration, Sentinel flow-control
+rules, and feature flags across
 **Nacos**, **Apollo**, **etcd**, and **Kubernetes**. It provides backend-bound contexts, a fail-closed
 config-write risk classifier (`cfgclass`), R0-R3 authorization with
 protected-context escalation, backup-before-write + rollback, tamper-evident
@@ -55,6 +56,9 @@ CGO_ENABLED=1 go test -race -count=1 ./...
 - Rule writes pass shallow validation; create/update/import/rollback also run
   deep semantic checks that no flag may bypass. Rules are schema-over-backend — a
   rule set is one config blob via the existing Backend; do not add a Backend method.
+- Feature flags are a second schema-over-backend typed policy with the same
+  deep-check-gated writes (create/update/import/rollback); `FlagStore` is a
+  separate optional interface, not a new Backend method.
 - Destructive writes back up current remote content first and abort if backup
   fails; protected contexts require an explicit `--backup`/`--no-backup`.
 - AI agents never auto-fill `--ticket`, `--allow-*`, or a high-risk `--yes`.
@@ -75,8 +79,8 @@ CGO_ENABLED=1 go test -race -count=1 ./...
 - Reuse opskit-core for contexts, credentials, safety, audit, printing,
   redaction, telemetry, errors, and lockfile — never reimplement them.
 - New backends implement `cfgov.Backend`; optional capabilities use the separate
-  `RuleStore` / `NamespaceManager` / `ServiceRegistry` interfaces, type-asserted
-  and capability-gated.
+  `RuleStore` / `FlagStore` / `NamespaceManager` / `ServiceRegistry` interfaces,
+  type-asserted and capability-gated.
 - Add focused table-driven and adversarial tests for security-sensitive changes;
   do not weaken production behavior for tests.
 - Keep `.gitattributes` (`eol=lf`) so the Windows lint job does not fail gofmt on
@@ -89,6 +93,7 @@ CGO_ENABLED=1 go test -race -count=1 ./...
 - `internal/cfgov` - Backend abstraction + coordinate/key handling
 - `internal/cfgclass` - fail-closed config-write classifier
 - `internal/rule` - Sentinel rule schemas + shallow/deep validation
+- `internal/flag` - feature-flag schema + shallow/deep validation
 - `internal/backup` · `internal/cfgovctx` · `internal/api` - backup store, contexts, HTTP
 - `skills/cfgov-cli/` - embedded AI Skill (keep in sync with the real flags)
 - `bin/` · `scripts/` · `.github/workflows/` - npm shim, installer, CI/release

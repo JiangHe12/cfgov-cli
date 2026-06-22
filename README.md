@@ -2,9 +2,9 @@
 
 # cfgov-cli
 
-**Governed configuration & Sentinel-rule operations for humans _and_ AI agents.**
+**Governed configuration, Sentinel-rule & feature-flag operations for humans _and_ AI agents.**
 
-One safe command line for **Nacos**, **Apollo**, **etcd**, and **Kubernetes** — read, diff, change, back up, roll back, and audit your app config and flow-control rules without ever fat-fingering production.
+One safe command line for **Nacos**, **Apollo**, **etcd**, and **Kubernetes** — read, diff, change, back up, roll back, and audit your app config, flow-control rules, and feature flags without ever fat-fingering production.
 
 [![npm version](https://img.shields.io/npm/v/cfgov-cli.svg)](https://www.npmjs.com/package/cfgov-cli)
 [![CI](https://github.com/JiangHe12/cfgov-cli/actions/workflows/ci.yml/badge.svg)](https://github.com/JiangHe12/cfgov-cli/actions/workflows/ci.yml)
@@ -37,9 +37,10 @@ If you used to run `nacos-cli` or `sentinel-cli`, **cfgov-cli replaces both** �
 
 | | |
 |---|---|
-| 🗄️ **Four backends** | **Nacos** (config, Sentinel rules, namespaces, services, history, live-watch), **Apollo** (config + rules), **etcd** (config + rules, native watch), and **Kubernetes** (ConfigMap/Secret config + rules). Pick per context or override per command. |
+| 🗄️ **Four backends** | **Nacos** (config, Sentinel rules, feature flags, namespaces, services, history, live-watch), **Apollo** (config + rules + flags), **etcd** (config + rules + flags, native watch), and **Kubernetes** (ConfigMap/Secret config + rules + flags). Pick per context or override per command. |
 | ⚙️ **Full config lifecycle** | get · list · diff · validate · pull · history · listen · push · delete · export · import · promote · rollback · reconcile |
 | 🚦 **Sentinel rules** | flow · degrade · system · authority · param — read, validate (shallow **and** deep), create, update, import, roll back, delete. Wire-compatible with the Sentinel runtime. |
+| 🏁 **Feature flags** | Typed feature-flag sets on **all four backends** — read, validate (shallow **and** deep), create, update, import, roll back, delete. Same schema-over-backend model as rules. |
 | 🏷️ **Nacos namespaces & services** | list / create / update / delete namespaces; list / register / deregister service instances. |
 | 🔐 **R0–R3 governance** | every operation is risk-classified; protected contexts escalate one tier; AI callers can never self-authorize. |
 | 💾 **Backup & rollback** | automatic backup-before-write; restore from a local backup, a backup id, or Nacos history. |
@@ -107,8 +108,8 @@ Every command is sorted into one of four **risk tiers**. The higher the tier, th
 | Tier | What it covers | What you must provide |
 |:---:|---|---|
 | **R0** | Reads & local inspection (`get`, `list`, `diff`, `validate`, `doctor`, …) | Nothing — but it's still audited |
-| **R1** | Ordinary writes (`config push`, `rule create/update`, `service register`, `namespace create`) | `--yes` (or an interactive confirmation) |
-| **R2** | Destructive / elevated (`config delete`, `rule delete`, `service deregister`, `namespace delete`, `reconcile`) | `--yes` **and** a non-empty `--ticket` |
+| **R1** | Ordinary writes (`config push`, `rule create/update`, `flag create/update`, `service register`, `namespace create`) | `--yes` (or an interactive confirmation) |
+| **R2** | Destructive / elevated (`config delete`, `rule delete`, `flag delete`, `service deregister`, `namespace delete`, `reconcile`) | `--yes` **and** a non-empty `--ticket` |
 | **R3** | Protected destructive operations | The above **plus** the exact `--allow-*` flag for that command |
 
 **Protected contexts raise every operation by one tier.** For example, `config delete` is normally R2, but in a `--protected` context it becomes R3 and additionally requires `--allow-production-config-delete`.
@@ -171,6 +172,28 @@ cfgov rule delete   --app <app> --type <type> --yes --ticket <t> [--allow-produc
 ```
 
 Every rule write passes shallow JSON/schema validation; create/update/import/rollback also run **deep** semantic checks that flags cannot bypass. `rule validate --file --deep` runs checks that are meaningful for one isolated rule type; use `rule validate --dir --deep` for cross-rule checks such as `param` without matching `flow` or `flow`/`degrade` grade mismatch. Rule sets are stored as config blobs (Nacos group `SENTINEL_GROUP`, dataId `{app}-{type}-rules`; Apollo namespace `SENTINEL`, item `{app}-{type}-rules`; etcd key `<keyPrefix>SENTINEL/{app}-{type}-rules`; Kubernetes ConfigMap `{app}-{type}-rules`, data key `rules.json`) so they stay wire-compatible with the Sentinel runtime. The Kubernetes layout is a ConfigMap / file-datasource convention, not a CRD datasource.
+</details>
+
+<details>
+<summary><b>flag</b> — feature flags (cfgov-native typed policy, all four backends)</summary>
+
+```bash
+# Read & validate (R0)
+cfgov flag list     --app <app> -o json
+cfgov flag get      --app <app> [--key <key>] -o json
+cfgov flag export   --app <app> --dir <dir> -o json
+cfgov flag diff     --app <app> (--file <path>|--dir <dir>) -o json
+cfgov flag validate (--file <path>|--dir <dir>) [--deep] [--fail-on-warnings] -o json
+
+# Write
+cfgov flag create   --app <app> --file <path> [--force] [--dry-run --diff] --yes      # R1
+cfgov flag update   --app <app> --file <path> --yes                                   # R1
+cfgov flag import   --app <app> (--file <path>|--dir <dir>) --dry-run --plan --yes     # R1
+cfgov flag rollback --app <app> --backup <ref> --yes                                  # R1
+cfgov flag delete   --app <app> (--key <key>|--all) --yes --ticket <t> [--allow-production-flag-delete]  # R2 / R3
+```
+
+A feature flag set is one JSON array of typed flags (`key`, `enabled`, `defaultVariant`, `variants`, percentage-rollout `rules`) stored as a single config blob per app: key `{app}-flags` (Nacos group `FEATURE_FLAG_GROUP`; Apollo/etcd under the bound namespace; Kubernetes ConfigMap `{app}-flags`, data key `flags.json`). create/update/import/rollback run **deep** semantic checks that flags cannot bypass — duplicate key, `rolloutPercent` out of 0–100, and variant integrity (`defaultVariant` / each rule `variant` must exist). `delete` needs either a specific `--key` or `--all`. Feature flags are cfgov-native (no external runtime convention), so they simply reuse each backend's bound namespace.
 </details>
 
 <details>
