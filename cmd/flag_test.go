@@ -66,14 +66,14 @@ func TestNacosCapabilitiesSupportFlags(t *testing.T) {
 	}
 }
 
-func TestFallbackBackendsDoNotSupportFlags(t *testing.T) {
+func TestFallbackBackendsSupportFlags(t *testing.T) {
 	t.Parallel()
 	for _, name := range []string{"apollo", "etcd", "k8s"} {
 		t.Run(name, func(t *testing.T) {
 			t.Parallel()
 			caps := currentBackendCapabilities(&cliFlags{Backend: name})
-			if caps.SupportsFlags || containsString(caps.ResourceTypes, "flag") {
-				t.Fatalf("%s capabilities = %#v, want no flag support", name, caps)
+			if !caps.SupportsFlags || !containsString(caps.ResourceTypes, "flag") {
+				t.Fatalf("%s capabilities = %#v, want flag support", name, caps)
 			}
 		})
 	}

@@ -3,6 +3,7 @@ package etcd
 import (
 	"context"
 	"errors"
+	"strings"
 	"testing"
 	"time"
 
@@ -147,11 +148,11 @@ func TestCapabilitiesAndUnsupportedHistory(t *testing.T) {
 	t.Parallel()
 	backend := newTestBackend(&fakeClient{})
 	caps := backend.Capabilities()
-	if caps.Backend != "etcd" || !caps.SupportsWatch || !caps.SupportsCAS || !caps.SupportsRevision || caps.SupportsHistory || !caps.SupportsRules {
+	if caps.Backend != "etcd" || !caps.SupportsWatch || !caps.SupportsCAS || !caps.SupportsRevision || caps.SupportsHistory || !caps.SupportsRules || !caps.SupportsFlags {
 		t.Fatalf("Capabilities() = %#v", caps)
 	}
-	if len(caps.ResourceTypes) != 2 || caps.ResourceTypes[0] != "config" || caps.ResourceTypes[1] != "rule" {
-		t.Fatalf("Capabilities().ResourceTypes = %#v, want config/rule", caps.ResourceTypes)
+	if !hasString(caps.ResourceTypes, "flag") {
+		t.Fatalf("Capabilities().ResourceTypes = %#v, want flag", caps.ResourceTypes)
 	}
 	if _, _, err := backend.History(context.Background(), cfgov.Coordinate{Namespace: "prod", Key: "app"}, cfgov.HistoryOptions{}); apperrors.AsAppError(err).Code != apperrors.CodeNotImplemented {
 		t.Fatalf("History() error = %v, want NOT_IMPLEMENTED", err)
@@ -237,6 +238,64 @@ func TestRuleCoordinateRejectsUnsafeParts(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestFlagCoordinateUsesConfigNamespace(t *testing.T) {
+	t.Parallel()
+	backend := newTestBackend(&fakeClient{})
+	tests := map[string]string{
+		"demo":          "demo-flags",
+		"order-service": "order-service-flags",
+		"app1":          "app1-flags",
+		"a.b":           "a.b-flags",
+		"blue-green-1":  "blue-green-1-flags",
+	}
+	for app, wantKey := range tests {
+		t.Run(app, func(t *testing.T) {
+			t.Parallel()
+			coord, err := backend.FlagCoordinate(app)
+			if err != nil {
+				t.Fatalf("FlagCoordinate() error = %v", err)
+			}
+			if coord.Namespace != "prod" || coord.Key != wantKey {
+				t.Fatalf("coord = %#v, want prod/%s", coord, wantKey)
+			}
+			_, _, fullKey, err := backend.resolve(coord)
+			if err != nil {
+				t.Fatalf("resolve(flag coord) error = %v", err)
+			}
+			if fullKey != "cfg/prod/"+wantKey {
+				t.Fatalf("full key = %q, want cfg/prod/%s", fullKey, wantKey)
+			}
+		})
+	}
+}
+
+func TestFlagCoordinateRejectsUnsafeAppBeforeRPC(t *testing.T) {
+	t.Parallel()
+	tests := []string{"../x", "a/b", "..", "", "bad\x00app", `bad\app`}
+	for _, app := range tests {
+		t.Run(strings.ReplaceAll(app, "\x00", "\\x00"), func(t *testing.T) {
+			t.Parallel()
+			fake := &fakeClient{}
+			backend := newTestBackend(fake)
+			if _, err := backend.FlagCoordinate(app); err == nil {
+				t.Fatalf("FlagCoordinate(%q) error = nil, want fail-closed", app)
+			}
+			if fake.calls != 0 {
+				t.Fatalf("FlagCoordinate(%q) RPC calls = %d, want 0", app, fake.calls)
+			}
+		})
+	}
+}
+
+func hasString(items []string, value string) bool {
+	for _, item := range items {
+		if item == value {
+			return true
+		}
+	}
+	return false
 }
 
 func newTestBackend(client *fakeClient) *Backend {

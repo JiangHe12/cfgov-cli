@@ -98,38 +98,38 @@ func currentBackendCapabilities(f *cliFlags) cfgov.Capabilities {
 	case "apollo":
 		return cfgov.Capabilities{
 			Backend:          "apollo",
-			ResourceTypes:    []string{"config", "rule"},
+			ResourceTypes:    []string{"config", "rule", "flag"},
 			Verbs:            []string{"get", "list", "diff", "validate", "pull", "push", "delete"},
 			SupportsCAS:      true,
 			SupportsRevision: true,
 			SupportsHistory:  false,
 			SupportsWatch:    false,
 			SupportsRules:    true,
-			SupportsFlags:    false,
+			SupportsFlags:    true,
 		}
 	case "etcd":
 		return cfgov.Capabilities{
 			Backend:          "etcd",
-			ResourceTypes:    []string{"config", "rule"},
+			ResourceTypes:    []string{"config", "rule", "flag"},
 			Verbs:            []string{"get", "list", "diff", "validate", "pull", "listen", "push", "delete"},
 			SupportsCAS:      true,
 			SupportsRevision: true,
 			SupportsHistory:  false,
 			SupportsWatch:    true,
 			SupportsRules:    true,
-			SupportsFlags:    false,
+			SupportsFlags:    true,
 		}
 	case "k8s":
 		return cfgov.Capabilities{
 			Backend:          "k8s",
-			ResourceTypes:    []string{"config", "rule"},
+			ResourceTypes:    []string{"config", "rule", "flag"},
 			Verbs:            []string{"get", "list", "diff", "validate", "pull", "push", "delete"},
 			SupportsCAS:      true,
 			SupportsRevision: true,
 			SupportsHistory:  false,
 			SupportsWatch:    false,
 			SupportsRules:    true,
-			SupportsFlags:    false,
+			SupportsFlags:    true,
 		}
 	default:
 		return cfgov.Capabilities{

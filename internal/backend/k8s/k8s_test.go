@@ -296,6 +296,66 @@ func TestRuleCoordinatePutGetRoundTrip(t *testing.T) {
 	}
 }
 
+func TestFlagCoordinateDerivesConfigMapFlagKeys(t *testing.T) {
+	t.Parallel()
+	backend := newTestBackend()
+	tests := map[string]string{
+		"demo":          "configmap/demo-flags/flags.json",
+		"order-service": "configmap/order-service-flags/flags.json",
+		"app1":          "configmap/app1-flags/flags.json",
+		"a.b":           "configmap/a.b-flags/flags.json",
+		"blue-green-1":  "configmap/blue-green-1-flags/flags.json",
+	}
+	for app, wantKey := range tests {
+		t.Run(app, func(t *testing.T) {
+			t.Parallel()
+			coord, err := backend.FlagCoordinate(app)
+			if err != nil {
+				t.Fatalf("FlagCoordinate() error = %v", err)
+			}
+			if coord.Namespace != "default" || coord.Key != wantKey {
+				t.Fatalf("coord = %#v, want default/%s", coord, wantKey)
+			}
+		})
+	}
+}
+
+func TestFlagCoordinateRejectsInvalidAppBeforeAPI(t *testing.T) {
+	t.Parallel()
+	tests := []string{"../x", "a/b", "..", "", "bad\x00app", `bad\app`}
+	for _, app := range tests {
+		t.Run(strings.ReplaceAll(app, "\x00", "\\x00"), func(t *testing.T) {
+			t.Parallel()
+			backend := newTestBackend()
+			_, err := backend.FlagCoordinate(app)
+			if err == nil {
+				t.Fatalf("FlagCoordinate(%q) error = nil, want fail-closed", app)
+			}
+			client := backend.client.(*fake.Clientset)
+			if actions := client.Actions(); len(actions) != 0 {
+				t.Fatalf("FlagCoordinate(%q) made API calls: %#v", app, actions)
+			}
+		})
+	}
+}
+
+func TestCapabilitiesSupportFlags(t *testing.T) {
+	t.Parallel()
+	caps := newTestBackend().Capabilities()
+	if !caps.SupportsFlags || !hasString(caps.ResourceTypes, "flag") {
+		t.Fatalf("capabilities = %#v, want flag support", caps)
+	}
+}
+
+func hasString(items []string, value string) bool {
+	for _, item := range items {
+		if item == value {
+			return true
+		}
+	}
+	return false
+}
+
 func newTestBackend() *Backend {
 	return newTestBackendWithObjects()
 }

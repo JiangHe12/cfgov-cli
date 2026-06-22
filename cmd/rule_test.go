@@ -60,8 +60,8 @@ func TestK8sCapabilitiesSupportRules(t *testing.T) {
 	if caps.Backend != "k8s" || !caps.SupportsRules {
 		t.Fatalf("k8s capabilities = %#v, want SupportsRules=true", caps)
 	}
-	if len(caps.ResourceTypes) != 2 || caps.ResourceTypes[0] != "config" || caps.ResourceTypes[1] != "rule" {
-		t.Fatalf("k8s resourceTypes = %#v, want config/rule", caps.ResourceTypes)
+	if !containsString(caps.ResourceTypes, "config") || !containsString(caps.ResourceTypes, "rule") || !containsString(caps.ResourceTypes, "flag") {
+		t.Fatalf("k8s resourceTypes = %#v, want config/rule/flag", caps.ResourceTypes)
 	}
 }
 

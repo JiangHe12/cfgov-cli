@@ -92,8 +92,11 @@ func TestCapabilitiesAndUnsupportedMethods(t *testing.T) {
 		t.Fatalf("New() error = %v", err)
 	}
 	caps := backend.Capabilities()
-	if caps.Backend != "apollo" || caps.SupportsHistory || caps.SupportsWatch || !caps.SupportsRules {
+	if caps.Backend != "apollo" || caps.SupportsHistory || caps.SupportsWatch || !caps.SupportsRules || !caps.SupportsFlags {
 		t.Fatalf("capabilities = %#v", caps)
+	}
+	if !hasString(caps.ResourceTypes, "flag") {
+		t.Fatalf("resourceTypes = %#v, want flag", caps.ResourceTypes)
 	}
 	if _, _, err := backend.History(context.Background(), cfgov.Coordinate{}, cfgov.HistoryOptions{}); apperrors.AsAppError(err).Code != apperrors.CodeNotImplemented {
 		t.Fatalf("history error = %v, want not implemented", err)
@@ -143,4 +146,56 @@ func TestRuleCoordinateRejectsInjectedApp(t *testing.T) {
 	if apperrors.AsAppError(err).Code != apperrors.CodeValidationFailed {
 		t.Fatalf("error = %v, want validation failed", err)
 	}
+}
+
+func TestFlagCoordinateUsesConfigNamespace(t *testing.T) {
+	t.Parallel()
+	backend, err := New(Options{Server: "http://apollo.example", AppID: "cfgov", Namespace: "application"})
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+	tests := map[string]string{
+		"demo":          "demo-flags",
+		"order-service": "order-service-flags",
+		"app1":          "app1-flags",
+		"a.b":           "a.b-flags",
+		"blue-green-1":  "blue-green-1-flags",
+	}
+	for app, wantKey := range tests {
+		t.Run(app, func(t *testing.T) {
+			t.Parallel()
+			coord, err := backend.FlagCoordinate(app)
+			if err != nil {
+				t.Fatalf("FlagCoordinate() error = %v", err)
+			}
+			if coord.Namespace != "application" || coord.Key != wantKey {
+				t.Fatalf("coord = %#v, want application/%s", coord, wantKey)
+			}
+		})
+	}
+}
+
+func TestFlagCoordinateRejectsInjectedApp(t *testing.T) {
+	t.Parallel()
+	backend, err := New(Options{Server: "http://apollo.example", AppID: "cfgov"})
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+	for _, app := range []string{"../x", "a/b", "..", "", "bad\x00app", `bad\app`} {
+		t.Run(strings.ReplaceAll(app, "\x00", "\\x00"), func(t *testing.T) {
+			t.Parallel()
+			if _, err := backend.FlagCoordinate(app); err == nil {
+				t.Fatalf("FlagCoordinate(%q) error = nil, want fail-closed", app)
+			}
+		})
+	}
+}
+
+func hasString(items []string, value string) bool {
+	for _, item := range items {
+		if item == value {
+			return true
+		}
+	}
+	return false
 }

@@ -33,6 +33,7 @@ import (
 	clientv3 "go.etcd.io/etcd/client/v3"
 
 	"github.com/JiangHe12/cfgov-cli/internal/cfgov"
+	"github.com/JiangHe12/cfgov-cli/internal/flag"
 	"github.com/JiangHe12/cfgov-cli/internal/rule"
 )
 
@@ -81,6 +82,7 @@ type etcdClient interface {
 var (
 	_ cfgov.Backend   = (*Backend)(nil)
 	_ cfgov.RuleStore = (*Backend)(nil)
+	_ cfgov.FlagStore = (*Backend)(nil)
 )
 
 func ValidateEndpoints(raw string) error {
@@ -343,13 +345,14 @@ func (b *Backend) Describe() cfgov.Description {
 func (b *Backend) Capabilities() cfgov.Capabilities {
 	return cfgov.Capabilities{
 		Backend:          "etcd",
-		ResourceTypes:    []string{"config", "rule"},
+		ResourceTypes:    []string{"config", "rule", "flag"},
 		Verbs:            []string{"get", "list", "diff", "validate", "pull", "listen", "push", "delete"},
 		SupportsCAS:      true,
 		SupportsRevision: true,
 		SupportsHistory:  false,
 		SupportsWatch:    true,
 		SupportsRules:    true,
+		SupportsFlags:    true,
 	}
 }
 
@@ -369,6 +372,18 @@ func (b *Backend) RuleCoordinate(app, ruleType string) (cfgov.Coordinate, error)
 		return cfgov.Coordinate{}, err
 	}
 	return cfgov.Coordinate{Namespace: b.ruleNamespace, Key: dataID}, nil
+}
+
+func (b *Backend) FlagCoordinate(app string) (cfgov.Coordinate, error) {
+	dataID, err := flag.DataID(app)
+	if err != nil {
+		return cfgov.Coordinate{}, err
+	}
+	coord := cfgov.Coordinate{Namespace: b.namespace, Key: dataID}
+	if _, _, _, err := b.resolve(coord); err != nil {
+		return cfgov.Coordinate{}, err
+	}
+	return coord, nil
 }
 
 func (b *Backend) resolve(coord cfgov.Coordinate) (string, string, string, error) {
