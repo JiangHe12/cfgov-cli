@@ -2,6 +2,12 @@
 
 All notable changes to this project are documented in this file.
 
+## v0.5.1
+
+### Fixed
+- Nacos `public` namespace is now reachable by its name. Config, rule, flag and service operations bound to `--namespace public` previously queried a nonexistent tenant `public` and silently returned nothing (only an empty namespace reached the public tenant `""`). The api client now normalizes the reserved name `public` to the empty public tenant, so `--namespace public` works as users expect; non-public namespaces are unchanged.
+- The `--backend` flag usage now lists `consul` alongside nacos, apollo, etcd and k8s.
+
 ## v0.5.0
 
 ### Added
