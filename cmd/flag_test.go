@@ -79,7 +79,7 @@ func TestFallbackBackendsDoNotSupportFlags(t *testing.T) {
 	}
 }
 
-func TestFlagCommandsExposeReadOnlyVerbsAndFlags(t *testing.T) {
+func TestFlagCommandsExposeVerbsAndFlags(t *testing.T) {
 	t.Parallel()
 	root := newRootCmdWith(newDefaultFlags())
 	flagCmd, _, err := root.Find([]string{"flag"})
@@ -103,8 +103,15 @@ func TestFlagCommandsExposeReadOnlyVerbsAndFlags(t *testing.T) {
 		}
 	}
 	for _, verb := range []string{"create", "update", "delete", "import", "rollback"} {
-		if cmd, _, err := flagCmd.Find([]string{verb}); err == nil && cmd.Name() == verb {
-			t.Fatalf("flag %s must not exist in read-only path", verb)
+		cmd, _, err := flagCmd.Find([]string{verb})
+		if err != nil {
+			t.Fatalf("flag %s missing: %v", verb, err)
+		}
+		if cmd.Flags().Lookup("expected-revision") == nil {
+			t.Fatalf("flag %s missing --expected-revision", verb)
+		}
+		if verb != "rollback" && cmd.Flags().Lookup("app") == nil {
+			t.Fatalf("flag %s missing --app", verb)
 		}
 	}
 }

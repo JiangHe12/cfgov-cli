@@ -44,6 +44,7 @@ const (
 	allowProductionNamespaceDel = safety.AllowFlag("allow-production-namespace-delete")
 	allowProductionServiceDereg = safety.AllowFlag("allow-production-service-deregister")
 	allowProductionRuleDelete   = safety.AllowFlag("allow-production-rule-delete")
+	allowProductionFlagDelete   = safety.AllowFlag("allow-production-flag-delete")
 	auditStatusSkipped          = "skipped"
 )
 
@@ -79,6 +80,7 @@ type cliFlags struct {
 	AllowNSDel     bool
 	AllowSvcDereg  bool
 	AllowRuleDel   bool
+	AllowFlagDel   bool
 	Concurrency    int
 	K8sKubeconfig  string
 	K8sContext     string
@@ -199,6 +201,7 @@ func newRootCmdWith(f *cliFlags) *cobra.Command {
 	cmd.PersistentFlags().BoolVar(&f.AllowNSDel, "allow-production-namespace-delete", false, "Allow protected namespace delete")
 	cmd.PersistentFlags().BoolVar(&f.AllowSvcDereg, "allow-production-service-deregister", false, "Allow protected service deregister")
 	cmd.PersistentFlags().BoolVar(&f.AllowRuleDel, "allow-production-rule-delete", false, "Allow protected Sentinel rule delete")
+	cmd.PersistentFlags().BoolVar(&f.AllowFlagDel, "allow-production-flag-delete", false, "Allow protected feature flag delete")
 	cmd.PersistentFlags().IntVar(&f.Concurrency, "concurrency", 1, "Maximum concurrent batch operations")
 	cmd.PersistentFlags().StringVar(&f.K8sKubeconfig, "k8s-kubeconfig", "", "Kubernetes kubeconfig path")
 	cmd.PersistentFlags().StringVar(&f.K8sContext, "k8s-context", "", "Kubernetes kubeconfig context")
@@ -457,6 +460,7 @@ func authorize(f *cliFlags, base safety.Risk, meta cfgovctx.Context, required sa
 			allowProductionNamespaceDel: f.AllowNSDel,
 			allowProductionServiceDereg: f.AllowSvcDereg,
 			allowProductionRuleDelete:   f.AllowRuleDel,
+			allowProductionFlagDelete:   f.AllowFlagDel,
 		},
 		Roles:    meta.Roles,
 		Operator: currentOperator(f),

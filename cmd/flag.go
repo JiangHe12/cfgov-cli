@@ -54,6 +54,11 @@ func newFlagCmd(f *cliFlags) *cobra.Command {
 		flagExportCmd(f),
 		flagDiffCmd(f),
 		flagValidateCmd(f),
+		flagCreateCmd(f),
+		flagUpdateCmd(f),
+		flagDeleteCmd(f),
+		flagImportCmd(f),
+		flagRollbackCmd(f),
 	)
 	return cmd
 }
@@ -199,16 +204,13 @@ func flagValidateCmd(f *cliFlags) *cobra.Command {
 		RunE: func(_ *cobra.Command, _ []string) error {
 			local, err := readLocalFlagInput(file, dir)
 			if err != nil {
-				appendFlagAudit(f, cfgovctx.Context{}, "validate", "local", audit.StatusFailed, "", err)
 				return err
 			}
 			result := flagValidationResult{File: file, Dir: dir, Deep: deep, Valid: true, Count: local.Count, SHA256: local.SHA256}
 			if deep {
 				result = applyFlagValidationIssues(result, flag.DeepCheck(local.Flags))
 			}
-			err = finishFlagValidation(f, result, failOnWarnings)
-			appendFlagAudit(f, cfgovctx.Context{}, "validate", "local", auditStatus(err), flagValidationAudit(result), err)
-			return err
+			return finishFlagValidation(f, result, failOnWarnings)
 		},
 	}
 	cmd.Flags().StringVar(&file, "file", "", "Local feature flag file")
@@ -329,13 +331,6 @@ func flagSetAudit(result flagSetResult) string {
 		return ""
 	}
 	return "app=" + result.App + " sha256=" + result.SHA256 + " count=" + intString(result.Count)
-}
-
-func flagValidationAudit(result flagValidationResult) string {
-	if result.SHA256 == "" {
-		return ""
-	}
-	return "sha256=" + result.SHA256 + " count=" + intString(result.Count) + " errors=" + intString(result.Errors) + " warnings=" + intString(result.Warnings)
 }
 
 func filterFlagSetByKey(result flagSetResult, key string) flagSetResult {
