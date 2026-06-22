@@ -1,0 +1,89 @@
+name: Integration
+
+# Real-backend integration tests (//go:build integration), run against live
+# etcd, Consul and Nacos containers started on the runner. Kept SEPARATE from
+# the PR/push CI and the release pipeline so a slow Nacos boot or a transient
+# backend flake never blocks everyday commits or a release. Runs nightly and
+# on manual dispatch only.
+
+on:
+  schedule:
+    - cron: '0 3 * * *'   # daily 03:00 UTC
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+
+jobs:
+  integration:
+    name: real-backend integration (etcd + consul + nacos)
+    timeout-minutes: 20
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Set up Go
+        uses: actions/setup-go@v6
+        with:
+          go-version: 'stable'
+          cache: true
+
+      - name: Start backends
+        shell: bash
+        run: |
+          docker run -d --name cfgov-it-etcd -p 2379:2379 \
+            quay.io/coreos/etcd:v3.5.16 /usr/local/bin/etcd \
+            --name s1 --data-dir /etcd-data \
+            --listen-client-urls http://0.0.0.0:2379 \
+            --advertise-client-urls http://0.0.0.0:2379
+          docker run -d --name cfgov-it-consul -p 8500:8500 \
+            hashicorp/consul:1.19 agent -dev -client=0.0.0.0
+          docker run -d --name cfgov-it-nacos -p 8848:8848 -p 9848:9848 \
+            -e MODE=standalone -e NACOS_AUTH_ENABLE=false \
+            nacos/nacos-server:v2.3.2
+
+      - name: Wait for readiness
+        shell: bash
+        run: |
+          ok=0
+          for i in $(seq 1 30); do
+            if curl -s http://127.0.0.1:2379/health | grep -q '"health":"true"'; then ok=1; break; fi
+            sleep 2
+          done
+          [ "$ok" = 1 ] || { echo "etcd not ready"; docker logs cfgov-it-etcd; exit 1; }
+          echo "etcd ready"
+
+          ok=0
+          for i in $(seq 1 30); do
+            if curl -s http://127.0.0.1:8500/v1/status/leader | grep -q ':8300'; then ok=1; break; fi
+            sleep 2
+          done
+          [ "$ok" = 1 ] || { echo "consul not ready"; docker logs cfgov-it-consul; exit 1; }
+          echo "consul ready"
+
+          ok=0
+          for i in $(seq 1 60); do
+            code=$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:8848/nacos/v1/console/health/readiness)
+            if [ "$code" = "200" ]; then ok=1; break; fi
+            sleep 2
+          done
+          [ "$ok" = 1 ] || { echo "nacos not ready"; docker logs --tail 30 cfgov-it-nacos; exit 1; }
+          echo "nacos ready"
+
+      - name: Run integration tests
+        shell: bash
+        env:
+          CFGOV_IT_ETCD_ENDPOINTS: 127.0.0.1:2379
+          CFGOV_IT_CONSUL_ADDR: 127.0.0.1:8500
+          CFGOV_IT_NACOS_ADDR: http://127.0.0.1:8848
+        run: |
+          go test -tags=integration -count=1 -v \
+            ./internal/backend/etcd/ \
+            ./internal/backend/consul/ \
+            ./internal/backend/nacos/
+
+      - name: Tear down backends
+        if: always()
+        shell: bash
+        run: docker rm -f cfgov-it-etcd cfgov-it-consul cfgov-it-nacos || true
