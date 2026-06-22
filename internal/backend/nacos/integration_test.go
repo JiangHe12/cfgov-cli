@@ -3,6 +3,7 @@
 package nacos
 
 import (
+	"bytes"
 	"context"
 	"os"
 	"strconv"
@@ -12,6 +13,7 @@ import (
 
 	"github.com/JiangHe12/cfgov-cli/internal/api"
 	"github.com/JiangHe12/cfgov-cli/internal/cfgov"
+	"github.com/JiangHe12/opskit-core/apperrors"
 )
 
 func TestIntegrationNacosConfigGroupDataIDAndRules(t *testing.T) {
@@ -39,37 +41,75 @@ func TestIntegrationNacosConfigGroupDataIDAndRules(t *testing.T) {
 	if first.Revision == "" {
 		t.Fatalf("Put(config) revision empty")
 	}
-	got, err := backend.Get(ctx, configCoord)
-	if err != nil {
-		t.Fatalf("Get(config) error = %v", err)
-	}
-	if string(got.Content) != "name: demo\n" {
-		t.Fatalf("Get(config) content = %q, want original bytes", got.Content)
-	}
+	awaitNacosContent(t, ctx, backend, configCoord, []byte("name: demo\n"), "config")
 	if err := backend.Delete(ctx, cfgov.DeleteRequest{Coordinate: configCoord}); err != nil {
 		t.Fatalf("Delete(config) error = %v", err)
 	}
-	if _, err := backend.Get(ctx, configCoord); err == nil {
-		t.Fatalf("Get(deleted config) error = nil, want not found")
-	}
+	awaitNacosNotFound(t, ctx, backend, configCoord, "deleted config")
 
 	payload := []byte(`[{"resource":"GET:/demo","count":1}]`)
 	if _, err := backend.Put(ctx, cfgov.PutRequest{Coordinate: ruleCoord, Content: payload, ContentType: "json"}); err != nil {
 		t.Fatalf("Put(rule) error = %v", err)
 	}
-	ruleBlob, err := backend.Get(ctx, ruleCoord)
-	if err != nil {
-		t.Fatalf("Get(rule) error = %v", err)
-	}
-	if string(ruleBlob.Content) != string(payload) {
-		t.Fatalf("Get(rule) content = %q, want %q", ruleBlob.Content, payload)
-	}
+	awaitNacosContent(t, ctx, backend, ruleCoord, payload, "rule")
 	key, err := cfgov.ParseNacosKey(ruleCoord.Key)
 	if err != nil {
 		t.Fatalf("ParseNacosKey(rule) error = %v", err)
 	}
 	if key.Group != "SENTINEL_GROUP" {
 		t.Fatalf("rule group = %q, want SENTINEL_GROUP", key.Group)
+	}
+}
+
+func awaitNacosContent(t *testing.T, ctx context.Context, backend *Backend, coord cfgov.Coordinate, want []byte, label string) {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	var lastContent []byte
+	var lastErr error
+	for {
+		got, err := backend.Get(ctx, coord)
+		if err == nil {
+			lastErr = nil
+			lastContent = got.Content
+			if bytes.Equal(got.Content, want) {
+				return
+			}
+		} else {
+			lastErr = err
+		}
+		if time.Now().After(deadline) {
+			if lastErr != nil {
+				t.Fatalf("Get(%s) error = %v, want content %q", label, lastErr, want)
+			}
+			t.Fatalf("Get(%s) content = %q, want %q", label, lastContent, want)
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+}
+
+func awaitNacosNotFound(t *testing.T, ctx context.Context, backend *Backend, coord cfgov.Coordinate, label string) {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	var lastContent []byte
+	var lastErr error
+	for {
+		got, err := backend.Get(ctx, coord)
+		if err != nil {
+			lastErr = err
+			if apperrors.AsAppError(err).Code == apperrors.CodeResourceNotFound {
+				return
+			}
+		} else {
+			lastErr = nil
+			lastContent = got.Content
+		}
+		if time.Now().After(deadline) {
+			if lastErr != nil {
+				t.Fatalf("Get(%s) error = %v, want not found", label, lastErr)
+			}
+			t.Fatalf("Get(%s) content = %q, want not found", label, lastContent)
+		}
+		time.Sleep(100 * time.Millisecond)
 	}
 }
 
