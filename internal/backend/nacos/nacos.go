@@ -12,6 +12,7 @@ import (
 
 	"github.com/JiangHe12/cfgov-cli/internal/api"
 	"github.com/JiangHe12/cfgov-cli/internal/cfgov"
+	"github.com/JiangHe12/cfgov-cli/internal/flag"
 	"github.com/JiangHe12/cfgov-cli/internal/rule"
 )
 
@@ -29,6 +30,7 @@ var (
 	_ cfgov.NamespaceManager = (*Backend)(nil)
 	_ cfgov.ServiceRegistry  = (*Backend)(nil)
 	_ cfgov.RuleStore        = (*Backend)(nil)
+	_ cfgov.FlagStore        = (*Backend)(nil)
 )
 
 func (b *Backend) ValidateKey(key string) error {
@@ -219,13 +221,14 @@ func (b *Backend) Describe() cfgov.Description {
 func (b *Backend) Capabilities() cfgov.Capabilities {
 	return cfgov.Capabilities{
 		Backend:          "nacos",
-		ResourceTypes:    []string{"config", "namespace", "service", "rule"},
+		ResourceTypes:    []string{"config", "namespace", "service", "rule", "flag"},
 		Verbs:            []string{"get", "list", "diff", "validate", "pull", "history", "listen", "push", "delete"},
 		SupportsCAS:      true,
 		SupportsRevision: true,
 		SupportsHistory:  true,
 		SupportsWatch:    true,
 		SupportsRules:    true,
+		SupportsFlags:    true,
 	}
 }
 
@@ -235,6 +238,17 @@ func (b *Backend) RuleCoordinate(app, ruleType string) (cfgov.Coordinate, error)
 		return cfgov.Coordinate{}, err
 	}
 	key, err := rule.NacosKey(app, parsed)
+	if err != nil {
+		return cfgov.Coordinate{}, err
+	}
+	if _, err := cfgov.ParseNacosKey(key); err != nil {
+		return cfgov.Coordinate{}, err
+	}
+	return cfgov.Coordinate{Namespace: b.client.Namespace(), Key: key}, nil
+}
+
+func (b *Backend) FlagCoordinate(app string) (cfgov.Coordinate, error) {
+	key, err := flag.NacosKey(app)
 	if err != nil {
 		return cfgov.Coordinate{}, err
 	}

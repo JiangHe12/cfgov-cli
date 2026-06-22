@@ -30,6 +30,7 @@ type capBackend struct {
 	SupportsHistory bool     `json:"supportsHistory"`
 	SupportsWatch   bool     `json:"supportsWatch"`
 	SupportsRules   bool     `json:"supportsRules"`
+	SupportsFlags   bool     `json:"supportsFlags"`
 	SupportsCAS     bool     `json:"supportsCas"`
 	Verbs           []string `json:"verbs"`
 }
@@ -104,6 +105,7 @@ func currentBackendCapabilities(f *cliFlags) cfgov.Capabilities {
 			SupportsHistory:  false,
 			SupportsWatch:    false,
 			SupportsRules:    true,
+			SupportsFlags:    false,
 		}
 	case "etcd":
 		return cfgov.Capabilities{
@@ -115,6 +117,7 @@ func currentBackendCapabilities(f *cliFlags) cfgov.Capabilities {
 			SupportsHistory:  false,
 			SupportsWatch:    true,
 			SupportsRules:    true,
+			SupportsFlags:    false,
 		}
 	case "k8s":
 		return cfgov.Capabilities{
@@ -126,17 +129,19 @@ func currentBackendCapabilities(f *cliFlags) cfgov.Capabilities {
 			SupportsHistory:  false,
 			SupportsWatch:    false,
 			SupportsRules:    true,
+			SupportsFlags:    false,
 		}
 	default:
 		return cfgov.Capabilities{
 			Backend:          "nacos",
-			ResourceTypes:    []string{"config", "namespace", "service", "rule"},
+			ResourceTypes:    []string{"config", "namespace", "service", "rule", "flag"},
 			Verbs:            []string{"get", "list", "diff", "validate", "pull", "history", "listen", "push", "delete"},
 			SupportsCAS:      true,
 			SupportsRevision: true,
 			SupportsHistory:  true,
 			SupportsWatch:    true,
 			SupportsRules:    true,
+			SupportsFlags:    true,
 		}
 	}
 }
@@ -151,6 +156,7 @@ func buildCapabilities(f *cliFlags, backend cfgov.Capabilities) capabilitiesData
 			SupportsHistory: backend.SupportsHistory,
 			SupportsWatch:   backend.SupportsWatch,
 			SupportsRules:   backend.SupportsRules,
+			SupportsFlags:   backend.SupportsFlags,
 			SupportsCAS:     backend.SupportsCAS,
 			Verbs:           backend.Verbs,
 		},
@@ -194,6 +200,11 @@ func buildCapabilities(f *cliFlags, backend cfgov.Capabilities) capabilitiesData
 				{Noun: "rule", Verb: "rollback", Risk: "R1"},
 				{Noun: "rule", Verb: "delete", Risk: "R2"},
 				{Noun: "rule", Verb: "delete(protected ctx)", Risk: "R3", AllowFlag: "allow-production-rule-delete"},
+				{Noun: "flag", Verb: "list", Risk: "R0"},
+				{Noun: "flag", Verb: "get", Risk: "R0"},
+				{Noun: "flag", Verb: "export", Risk: "R0"},
+				{Noun: "flag", Verb: "diff", Risk: "R0"},
+				{Noun: "flag", Verb: "validate", Risk: "R0"},
 				{Noun: "backup", Verb: "list", Risk: "R0"},
 			},
 			ContextAPIVersions: []string{"cfgov-cli.io/context/v1"},
@@ -201,7 +212,7 @@ func buildCapabilities(f *cliFlags, backend cfgov.Capabilities) capabilitiesData
 			OutputFormats:      []string{"table", "json", "plain"},
 			ErrorCodes:         errorCodeStrings(),
 			ExitCodes:          apperrors.AllExitCodes(),
-			Kinds:              []string{"AuditPruneResult", "AuditQueryResult", "AuditVerifyResult", "BackupCleanResult", "BackupList", "Capabilities", "ChangePlan", "ChangeResult", "ConfigExport", "ConfigItem", "ConfigList", "ConfigListenEvent", "ContextImportResult", "ContextItem", "ContextList", "ContextTestResult", "DiffResult", "DoctorResult", "Error", "ExportResult", "HistoryList", "NamespaceItem", "NamespaceList", "RoleList", "RuleDiff", "RuleExport", "RuleList", "RuleSet", "RuleValidation", "ServiceInstanceList", "ServiceItem", "ServiceList", "ValidationResult", "VersionInfo"},
+			Kinds:              []string{"AuditPruneResult", "AuditQueryResult", "AuditVerifyResult", "BackupCleanResult", "BackupList", "Capabilities", "ChangePlan", "ChangeResult", "ConfigExport", "ConfigItem", "ConfigList", "ConfigListenEvent", "ContextImportResult", "ContextItem", "ContextList", "ContextTestResult", "DiffResult", "DoctorResult", "Error", "ExportResult", "FlagDiff", "FlagExport", "FlagList", "FlagSet", "FlagValidation", "HistoryList", "NamespaceItem", "NamespaceList", "RoleList", "RuleDiff", "RuleExport", "RuleList", "RuleSet", "RuleValidation", "ServiceInstanceList", "ServiceItem", "ServiceList", "ValidationResult", "VersionInfo"},
 			CredentialBackends: credstore.Available(),
 			Environment:        []string{"APOLLO_APP_ID", "APOLLO_CLUSTER", "APOLLO_ENV", "APOLLO_NAMESPACE", "APOLLO_RULE_NAMESPACE", "APOLLO_SECRET", "APOLLO_SERVER", "APOLLO_TOKEN", "CFGOV_CLI_AUDIT_PRIVATE_KEY", "CFGOV_CLI_CREDENTIAL_PASSPHRASE", "CFGOV_CLI_OPERATOR", "ETCD_CACERT", "ETCD_CLIENT_CERT", "ETCD_CLIENT_KEY", "ETCD_ENDPOINTS", "ETCD_KEY_PREFIX", "ETCD_NAMESPACE", "ETCD_PASSWORD", "ETCD_RULE_NAMESPACE", "ETCD_SERVER", "ETCD_USERNAME", "KUBECONFIG", "NACOS_NAMESPACE", "NACOS_PASSWORD", "NACOS_SERVER", "NACOS_USERNAME"},
 			RuleTypes:          []string{"flow", "degrade", "system", "authority", "param"},

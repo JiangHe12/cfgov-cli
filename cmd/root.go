@@ -206,7 +206,7 @@ func newRootCmdWith(f *cliFlags) *cobra.Command {
 	cmd.PersistentFlags().StringVar(&f.OTLPMetrics, "otel-metrics-endpoint", "", "OTLP metrics endpoint")
 	cmd.PersistentFlags().BoolVar(&f.OTLPInsec, "otel-insecure", false, "Disable TLS for OTLP exporter")
 
-	cmd.AddCommand(newContextCmd(f), newConfigCmd(f), newNamespaceCmd(f), newServiceCmd(f), newRuleCmd(f), newBackupCmd(f), newCapabilitiesCmd(f), newAuditCmd(f), newDoctorCmd(f), newCompletionCmd(f), newVersionCmd(f), newInstallCmd(f))
+	cmd.AddCommand(newContextCmd(f), newConfigCmd(f), newNamespaceCmd(f), newServiceCmd(f), newRuleCmd(f), newFlagCmd(f), newBackupCmd(f), newCapabilitiesCmd(f), newAuditCmd(f), newDoctorCmd(f), newCompletionCmd(f), newVersionCmd(f), newInstallCmd(f))
 	setSuggestionsRecursive(cmd, 1)
 	return cmd
 }

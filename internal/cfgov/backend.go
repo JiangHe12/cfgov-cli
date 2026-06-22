@@ -85,6 +85,7 @@ type Capabilities struct {
 	SupportsHistory  bool     `json:"supportsHistory"`
 	SupportsWatch    bool     `json:"supportsWatch"`
 	SupportsRules    bool     `json:"supportsRules"`
+	SupportsFlags    bool     `json:"supportsFlags"`
 }
 
 type Backend interface {
@@ -103,4 +104,8 @@ type Backend interface {
 
 type RuleStore interface {
 	RuleCoordinate(app, ruleType string) (Coordinate, error)
+}
+
+type FlagStore interface {
+	FlagCoordinate(app string) (Coordinate, error)
 }
