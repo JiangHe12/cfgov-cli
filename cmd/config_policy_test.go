@@ -86,7 +86,7 @@ func TestBuildBackendUnsupportedBackendFailsClosed(t *testing.T) {
 	cfgovctx.SetConfigPath(filepath.Join(t.TempDir(), "config.yaml"))
 	f := newDefaultFlags()
 	f.Server = "http://127.0.0.1:8848"
-	f.Backend = "consul"
+	f.Backend = "unsupported"
 	_, _, err := buildBackend(f)
 	if apperrors.AsAppError(err).Code != apperrors.CodeNotImplemented {
 		t.Fatalf("error = %v, want not implemented", err)

@@ -18,6 +18,7 @@ import (
 	corectx "github.com/JiangHe12/opskit-core/ctx"
 	"github.com/JiangHe12/opskit-core/safety"
 
+	consulBackend "github.com/JiangHe12/cfgov-cli/internal/backend/consul"
 	etcdBackend "github.com/JiangHe12/cfgov-cli/internal/backend/etcd"
 	"github.com/JiangHe12/cfgov-cli/internal/cfgov"
 	"github.com/JiangHe12/cfgov-cli/internal/cfgovctx"
@@ -66,6 +67,7 @@ func ctxSetCmd(f *cliFlags) *cobra.Command { //nolint:gocyclo // Cobra wiring fo
 	var apolloAppID, apolloEnv, apolloCluster, apolloNamespace, apolloRuleNamespace string
 	var apolloToken, apolloSecret string
 	var etcdKeyPrefix, etcdRuleNamespace, etcdCACert, etcdClientCert, etcdClientKey string
+	var consulKeyPrefix, consulCACert, consulClientCert, consulClientKey string
 	cmd := &cobra.Command{
 		Use:   "set <name>",
 		Short: "Set a backend-bound context",
@@ -74,17 +76,26 @@ func ctxSetCmd(f *cliFlags) *cobra.Command { //nolint:gocyclo // Cobra wiring fo
 			if f.Backend == "" {
 				return apperrors.New(apperrors.CodeUsageError, "--backend is required", nil)
 			}
-			if f.Backend != "nacos" && f.Backend != "apollo" && f.Backend != "etcd" && f.Backend != "k8s" {
+			if f.Backend != "nacos" && f.Backend != "apollo" && f.Backend != "etcd" && f.Backend != "consul" && f.Backend != "k8s" {
 				return apperrors.New(apperrors.CodeNotImplemented, "backend is not supported", nil)
 			}
-			if f.Backend == "etcd" {
+			switch f.Backend {
+			case "etcd":
 				if err := etcdBackend.ValidateEndpoints(f.Server); err != nil {
 					return err
 				}
 				if err := etcdBackend.ValidateKeyPrefix(etcdKeyPrefix); err != nil {
 					return err
 				}
-			} else if f.Backend != "k8s" {
+			case "consul":
+				if err := consulBackend.ValidateServer(f.Server); err != nil {
+					return err
+				}
+				if err := consulBackend.ValidateKeyPrefix(consulKeyPrefix); err != nil {
+					return err
+				}
+			case "k8s":
+			default:
 				if err := validateServerURL(f.Server); err != nil {
 					return err
 				}
@@ -139,6 +150,10 @@ func ctxSetCmd(f *cliFlags) *cobra.Command { //nolint:gocyclo // Cobra wiring fo
 				EtcdCACert:          etcdCACert,
 				EtcdClientCert:      etcdClientCert,
 				EtcdClientKey:       etcdClientKey,
+				ConsulKeyPrefix:     consulKeyPrefix,
+				ConsulCACert:        consulCACert,
+				ConsulClientCert:    consulClientCert,
+				ConsulClientKey:     consulClientKey,
 				K8sKubeconfig:       f.K8sKubeconfig,
 				K8sContext:          f.K8sContext,
 			}
@@ -180,6 +195,10 @@ func ctxSetCmd(f *cliFlags) *cobra.Command { //nolint:gocyclo // Cobra wiring fo
 	cmd.Flags().StringVar(&etcdCACert, "etcd-ca-cert", "", "etcd CA certificate path")
 	cmd.Flags().StringVar(&etcdClientCert, "etcd-client-cert", "", "etcd mTLS client certificate path")
 	cmd.Flags().StringVar(&etcdClientKey, "etcd-client-key", "", "etcd mTLS client private key path")
+	cmd.Flags().StringVar(&consulKeyPrefix, "consul-key-prefix", "", "Consul KV key prefix prepended before namespace")
+	cmd.Flags().StringVar(&consulCACert, "consul-ca-cert", "", "Consul CA certificate path")
+	cmd.Flags().StringVar(&consulClientCert, "consul-client-cert", "", "Consul mTLS client certificate path")
+	cmd.Flags().StringVar(&consulClientKey, "consul-client-key", "", "Consul mTLS client private key path")
 	_ = cmd.Flags().MarkHidden("apollo-token")
 	_ = cmd.Flags().MarkHidden("apollo-secret")
 	_ = cmd.Flags().MarkHidden("vault-secret-id")
@@ -648,18 +667,27 @@ func credentialBackendForContext(item cfgovctx.Context) (credstore.Backend, erro
 	return credstore.New(item.CredentialBackend)
 }
 
-func validateImportedContext(item cfgovctx.Context) error {
-	if item.Backend != "nacos" && item.Backend != "apollo" && item.Backend != "etcd" && item.Backend != "k8s" {
+func validateImportedContext(item cfgovctx.Context) error { //nolint:gocyclo // Backend-specific context validation is intentionally centralized.
+	if item.Backend != "nacos" && item.Backend != "apollo" && item.Backend != "etcd" && item.Backend != "consul" && item.Backend != "k8s" {
 		return apperrors.New(apperrors.CodeNotImplemented, "backend is not supported", nil)
 	}
-	if item.Backend == "etcd" {
+	switch item.Backend {
+	case "etcd":
 		if err := etcdBackend.ValidateEndpoints(item.Server); err != nil {
 			return err
 		}
 		if err := etcdBackend.ValidateKeyPrefix(item.EtcdKeyPrefix); err != nil {
 			return err
 		}
-	} else if item.Backend != "k8s" {
+	case "consul":
+		if err := consulBackend.ValidateServer(item.Server); err != nil {
+			return err
+		}
+		if err := consulBackend.ValidateKeyPrefix(item.ConsulKeyPrefix); err != nil {
+			return err
+		}
+	case "k8s":
+	default:
 		if err := validateServerURL(item.Server); err != nil {
 			return err
 		}
@@ -730,6 +758,10 @@ func contextView(name string, item cfgovctx.Context, current, showSecrets bool) 
 		"etcdCaCert":          item.EtcdCACert,
 		"etcdClientCert":      item.EtcdClientCert,
 		"etcdClientKey":       item.EtcdClientKey,
+		"consulKeyPrefix":     item.ConsulKeyPrefix,
+		"consulCaCert":        item.ConsulCACert,
+		"consulClientCert":    item.ConsulClientCert,
+		"consulClientKey":     item.ConsulClientKey,
 		"k8sKubeconfig":       item.K8sKubeconfig,
 		"k8sContext":          item.K8sContext,
 	}

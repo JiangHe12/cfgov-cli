@@ -29,6 +29,7 @@ import (
 
 	"github.com/JiangHe12/cfgov-cli/internal/api"
 	apolloBackend "github.com/JiangHe12/cfgov-cli/internal/backend/apollo"
+	consulBackend "github.com/JiangHe12/cfgov-cli/internal/backend/consul"
 	etcdBackend "github.com/JiangHe12/cfgov-cli/internal/backend/etcd"
 	k8sBackend "github.com/JiangHe12/cfgov-cli/internal/backend/k8s"
 	nacosbackend "github.com/JiangHe12/cfgov-cli/internal/backend/nacos"
@@ -305,6 +306,10 @@ func buildBackend(f *cliFlags) (cfgov.Backend, cfgovctx.Context, error) {
 		backend, err := buildEtcdBackend(f, name, item, server)
 		return backend, item, err
 	}
+	if backendName == "consul" {
+		backend, err := buildConsulBackend(f, name, item, server)
+		return backend, item, err
+	}
 	if backendName == "k8s" {
 		backend, err := buildK8sBackend(f, item)
 		return backend, item, err
@@ -336,6 +341,8 @@ func backendServerEnv(backendName string) string {
 		return os.Getenv("APOLLO_SERVER")
 	case "etcd":
 		return firstNonEmpty(os.Getenv("ETCD_ENDPOINTS"), os.Getenv("ETCD_SERVER"))
+	case "consul":
+		return os.Getenv("CONSUL_SERVER")
 	case "k8s":
 		return ""
 	default:
@@ -414,6 +421,29 @@ func buildEtcdBackend(f *cliFlags, contextName string, item cfgovctx.Context, se
 		return nil, err
 	}
 	return backend, nil
+}
+
+func buildConsulBackend(f *cliFlags, contextName string, item cfgovctx.Context, server string) (cfgov.Backend, error) {
+	token := firstNonEmpty(f.Password, os.Getenv("CONSUL_TOKEN"))
+	if token == "" {
+		resolved, err := cfgovctx.ResolvePassword(commandContext(f), contextName, item)
+		if err != nil {
+			return nil, err
+		}
+		token = resolved
+	}
+	return consulBackend.New(consulBackend.Options{
+		Server:     server,
+		KeyPrefix:  firstNonEmpty(os.Getenv("CONSUL_KEY_PREFIX"), item.ConsulKeyPrefix),
+		Namespace:  firstNonEmpty(f.Namespace, os.Getenv("CONSUL_NAMESPACE"), item.Namespace),
+		Token:      token,
+		CACert:     firstNonEmpty(os.Getenv("CONSUL_CACERT"), item.ConsulCACert),
+		ClientCert: firstNonEmpty(os.Getenv("CONSUL_CLIENT_CERT"), item.ConsulClientCert),
+		ClientKey:  firstNonEmpty(os.Getenv("CONSUL_CLIENT_KEY"), item.ConsulClientKey),
+		Timeout:    f.Timeout,
+		Trace:      f.Debug || f.Trace,
+		TraceOut:   os.Stderr,
+	})
 }
 
 func resolvedContext(f *cliFlags) (cfgovctx.Context, string, error) {

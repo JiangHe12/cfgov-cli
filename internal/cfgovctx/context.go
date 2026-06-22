@@ -24,6 +24,10 @@ type Context struct {
 	EtcdCACert          string `yaml:"etcdCaCert,omitempty"`
 	EtcdClientCert      string `yaml:"etcdClientCert,omitempty"`
 	EtcdClientKey       string `yaml:"etcdClientKey,omitempty"`
+	ConsulKeyPrefix     string `yaml:"consulKeyPrefix,omitempty"`
+	ConsulCACert        string `yaml:"consulCaCert,omitempty"`
+	ConsulClientCert    string `yaml:"consulClientCert,omitempty"`
+	ConsulClientKey     string `yaml:"consulClientKey,omitempty"`
 	K8sKubeconfig       string `yaml:"k8sKubeconfig,omitempty"`
 	K8sContext          string `yaml:"k8sContext,omitempty"`
 }

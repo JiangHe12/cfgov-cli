@@ -17,6 +17,7 @@ import (
 
 	"github.com/JiangHe12/cfgov-cli/internal/api"
 	apolloBackend "github.com/JiangHe12/cfgov-cli/internal/backend/apollo"
+	consulBackend "github.com/JiangHe12/cfgov-cli/internal/backend/consul"
 	etcdBackend "github.com/JiangHe12/cfgov-cli/internal/backend/etcd"
 	k8sBackend "github.com/JiangHe12/cfgov-cli/internal/backend/k8s"
 	"github.com/JiangHe12/cfgov-cli/internal/backend/nacos"
@@ -708,7 +709,7 @@ func rollbackContentFromBackupID(backupID string) ([]byte, error) {
 	return nil, apperrors.New(apperrors.CodeResourceNotFound, "backup-id not found", nil)
 }
 
-func buildBackendFromNamedContext(parent context.Context, f *cliFlags, name string) (cfgov.Backend, error) {
+func buildBackendFromNamedContext(parent context.Context, f *cliFlags, name string) (cfgov.Backend, error) { //nolint:gocyclo // Backend construction branches are kept explicit and local.
 	cfg, err := cfgovctx.Load()
 	if err != nil {
 		return nil, err
@@ -717,7 +718,7 @@ func buildBackendFromNamedContext(parent context.Context, f *cliFlags, name stri
 	if !ok {
 		return nil, apperrors.New(apperrors.CodeUsageError, "source context not found", nil)
 	}
-	if item.Backend != "" && item.Backend != "nacos" && item.Backend != "apollo" && item.Backend != "etcd" && item.Backend != "k8s" {
+	if item.Backend != "" && item.Backend != "nacos" && item.Backend != "apollo" && item.Backend != "etcd" && item.Backend != "consul" && item.Backend != "k8s" {
 		return nil, apperrors.New(apperrors.CodeNotImplemented, "backend is not supported", nil)
 	}
 	password, err := cfgovctx.ResolvePassword(parent, name, item)
@@ -754,6 +755,20 @@ func buildBackendFromNamedContext(parent context.Context, f *cliFlags, name stri
 			Timeout:       f.Timeout,
 			Trace:         f.Debug || f.Trace,
 			TraceOut:      os.Stderr,
+		})
+	}
+	if item.Backend == "consul" {
+		return consulBackend.New(consulBackend.Options{
+			Server:     item.Server,
+			KeyPrefix:  item.ConsulKeyPrefix,
+			Namespace:  item.Namespace,
+			Token:      password,
+			CACert:     item.ConsulCACert,
+			ClientCert: item.ConsulClientCert,
+			ClientKey:  item.ConsulClientKey,
+			Timeout:    f.Timeout,
+			Trace:      f.Debug || f.Trace,
+			TraceOut:   os.Stderr,
 		})
 	}
 	if item.Backend == "k8s" {
