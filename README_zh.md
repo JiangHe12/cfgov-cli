@@ -4,7 +4,7 @@
 
 **面向人类与 AI 智能体的「带治理」配置、Sentinel 规则 & 特性开关操作命令行。**
 
-一个安全的命令行,统一管理 **Nacos**、**Apollo**、**etcd** 与 **Kubernetes** 上的应用配置、流控规则与特性开关——读取、对比、修改、备份、回滚、审计,再也不会手滑改挂生产。
+一个安全的命令行,统一管理 **Nacos**、**Apollo**、**etcd**、**Kubernetes** 与 **Consul** 上的应用配置、流控规则与特性开关——读取、对比、修改、备份、回滚、审计,再也不会手滑改挂生产。
 
 [![npm version](https://img.shields.io/npm/v/cfgov-cli.svg)](https://www.npmjs.com/package/cfgov-cli)
 [![CI](https://github.com/JiangHe12/cfgov-cli/actions/workflows/ci.yml/badge.svg)](https://github.com/JiangHe12/cfgov-cli/actions/workflows/ci.yml)
@@ -19,7 +19,7 @@
 
 ## 🧭 这是什么?(先看这里)
 
-应用的行为往往不只在代码里,还活在 **Nacos / Apollo / etcd / Kubernetes**(ConfigMap/Secret)这类配置中心或键值存储中:数据库地址、功能开关、超时时间,以及 **Sentinel** 的流控 / 熔断规则。手动改(或让脚本去改)这些东西很可怕:一条 `delete` 写错就能搞挂生产,而且通常没有预览、没有备份、也没人知道是谁改了什么。
+应用的行为往往不只在代码里,还活在 **Nacos / Apollo / etcd / Kubernetes**(ConfigMap/Secret)**/ Consul** 这类配置中心或键值存储中:数据库地址、功能开关、超时时间,以及 **Sentinel** 的流控 / 熔断规则。手动改(或让脚本去改)这些东西很可怕:一条 `delete` 写错就能搞挂生产,而且通常没有预览、没有备份、也没人知道是谁改了什么。
 
 **cfgov-cli 给每一个这样的操作都套上了护栏。** 把它想成一个谨慎的助手:
 
@@ -29,7 +29,7 @@
 - 📜 **所有操作记入防篡改审计日志**——只记指纹,绝不记你的明文密钥。
 - 🤖 **可以放心交给 AI 智能体**——智能体能自由读取、预览,但**无法**伪造危险操作所需的人类审批。
 
-如果你以前用 `nacos-cli` 或 `sentinel-cli`,**cfgov-cli 同时取代了这两者**——能力一致,一个带治理的工具,四后端。
+如果你以前用 `nacos-cli` 或 `sentinel-cli`,**cfgov-cli 同时取代了这两者**——能力一致,一个带治理的工具,五后端。
 
 ---
 
@@ -37,11 +37,11 @@
 
 | | |
 |---|---|
-| 🗄️ **四后端** | **Nacos**(配置、Sentinel 规则、特性开关、命名空间、服务、历史、实时监听)、**Apollo**(配置 + 规则 + 开关)、**etcd**(配置 + 规则 + 开关、原生 watch)与 **Kubernetes**(ConfigMap/Secret 配置 + 规则 + 开关)。可按上下文绑定,也可按命令临时覆盖。 |
+| 🗄️ **五后端** | **Nacos**(配置、Sentinel 规则、特性开关、命名空间、服务、历史、实时监听)、**Apollo**(配置 + 规则 + 开关)、**etcd**(配置 + 规则 + 开关、原生 watch)、**Kubernetes**(ConfigMap/Secret 配置 + 规则 + 开关)与 **Consul**(配置 + 规则 + 开关 + 服务、阻塞查询 watch)。可按上下文绑定,也可按命令临时覆盖。 |
 | ⚙️ **完整配置生命周期** | get · list · diff · validate · pull · history · listen · push · delete · export · import · promote · rollback · reconcile |
 | 🚦 **Sentinel 规则** | flow · degrade · system · authority · param——读取、校验(浅 **+** 深)、创建、更新、导入、回滚、删除。与 Sentinel 运行时**线格式兼容**。 |
-| 🏁 **特性开关** | 类型化的特性开关集,**四后端通吃**——读取、校验(浅 **+** 深)、创建、更新、导入、回滚、删除。与规则同样的 schema-over-backend 模型。 |
-| 🏷️ **Nacos 命名空间 & 服务** | 命名空间 list / create / update / delete;服务实例 list / register / deregister。 |
+| 🏁 **特性开关** | 类型化的特性开关集,**五后端通吃**——读取、校验(浅 **+** 深)、创建、更新、导入、回滚、删除。与规则同样的 schema-over-backend 模型。 |
+| 🏷️ **命名空间 & 服务** | 命名空间(Nacos):list / create / update / delete。服务(**Nacos + Consul**):list / get / instances / register / deregister。 |
 | 🔐 **R0–R3 治理** | 每个操作都做风险分级;受保护上下文整体升一档;AI 调用者永远无法自我授权。 |
 | 💾 **备份与回滚** | 写前自动备份;可从本地备份、备份 id 或 Nacos 历史恢复。 |
 | 📜 **防篡改审计** | 哈希链记录每次操作(sha256 指纹 + 计数,**不含明文配置**);`audit verify` 可检测篡改。 |
@@ -171,11 +171,11 @@ cfgov rule rollback --app <app> --backup <ref> --yes                            
 cfgov rule delete   --app <app> --type <type> --yes --ticket <t> [--allow-production-rule-delete]  # R2 / R3
 ```
 
-每个规则写入都会先过浅层 JSON/schema 校验;create/update/import/rollback 还会跑**深层**语义检查,且标志无法绕过。`rule validate --file --deep` 只跑对单个孤立规则类型有意义的检查;跨类型检查(如 param 没有对应 flow、flow/degrade grade 不一致)请用 `rule validate --dir --deep`。规则集以配置 blob 形式存储(Nacos group `SENTINEL_GROUP`、dataId `{app}-{type}-rules`;Apollo namespace `SENTINEL`、item `{app}-{type}-rules`;etcd key `<keyPrefix>SENTINEL/{app}-{type}-rules`;Kubernetes ConfigMap `{app}-{type}-rules`、数据键 `rules.json`),从而与 Sentinel 运行时保持线格式兼容。其中 Kubernetes 采用的是 ConfigMap / file-datasource 约定,而非基于 CRD 的 datasource。
+每个规则写入都会先过浅层 JSON/schema 校验;create/update/import/rollback 还会跑**深层**语义检查,且标志无法绕过。`rule validate --file --deep` 只跑对单个孤立规则类型有意义的检查;跨类型检查(如 param 没有对应 flow、flow/degrade grade 不一致)请用 `rule validate --dir --deep`。规则集以配置 blob 形式存储(Nacos group `SENTINEL_GROUP`、dataId `{app}-{type}-rules`;Apollo namespace `SENTINEL`、item `{app}-{type}-rules`;etcd key `<keyPrefix>SENTINEL/{app}-{type}-rules`;Consul key `<keyPrefix>SENTINEL/{app}-{type}-rules`;Kubernetes ConfigMap `{app}-{type}-rules`、数据键 `rules.json`),从而与 Sentinel 运行时保持线格式兼容。其中 Kubernetes 采用的是 ConfigMap / file-datasource 约定,而非基于 CRD 的 datasource。
 </details>
 
 <details>
-<summary><b>flag</b> — 特性开关(cfgov 原生类型化策略,四后端通吃)</summary>
+<summary><b>flag</b> — 特性开关(cfgov 原生类型化策略,五后端通吃)</summary>
 
 ```bash
 # 读取与校验(R0)
@@ -193,11 +193,11 @@ cfgov flag rollback --app <app> --backup <ref> --yes                            
 cfgov flag delete   --app <app> (--key <key>|--all) --yes --ticket <t> [--allow-production-flag-delete]  # R2 / R3
 ```
 
-一个特性开关集就是一组类型化开关的 JSON 数组(`key`、`enabled`、`defaultVariant`、`variants`、按百分比灰度的 `rules`),以单个配置 blob 形式按 app 存储:key 为 `{app}-flags`(Nacos group `FEATURE_FLAG_GROUP`;Apollo/etcd 落在绑定的命名空间下;Kubernetes ConfigMap `{app}-flags`、数据键 `flags.json`)。create/update/import/rollback 会跑**深层**语义检查且无法被标志绕过——重复 key、`rolloutPercent` 越界 0–100、variant 完整性(`defaultVariant` 与每条规则的 `variant` 必须存在)。`delete` 需指定具体 `--key` 或 `--all`。特性开关是 cfgov 原生策略(无外部运行时约定),因此直接复用各后端绑定的命名空间。
+一个特性开关集就是一组类型化开关的 JSON 数组(`key`、`enabled`、`defaultVariant`、`variants`、按百分比灰度的 `rules`),以单个配置 blob 形式按 app 存储:key 为 `{app}-flags`(Nacos group `FEATURE_FLAG_GROUP`;Apollo/etcd/Consul 落在绑定的命名空间下;Kubernetes ConfigMap `{app}-flags`、数据键 `flags.json`)。create/update/import/rollback 会跑**深层**语义检查且无法被标志绕过——重复 key、`rolloutPercent` 越界 0–100、variant 完整性(`defaultVariant` 与每条规则的 `variant` 必须存在)。`delete` 需指定具体 `--key` 或 `--all`。特性开关是 cfgov 原生策略(无外部运行时约定),因此直接复用各后端绑定的命名空间。
 </details>
 
 <details>
-<summary><b>namespace</b> 与 <b>service</b> — 仅 Nacos(Apollo、etcd 与 Kubernetes 均 fail-closed 返回 NotImplemented)</summary>
+<summary><b>namespace</b>(仅 Nacos)与 <b>service</b>(Nacos + Consul)</summary>
 
 ```bash
 cfgov namespace list   -o json                                                           # R0
@@ -211,6 +211,8 @@ cfgov service register  --service <name> --ip <ip> --port <port> [--ephemeral|--
 cfgov service deregister --service <name> --ip <ip> --port <port> --yes --ticket <t> \
                          [--allow-production-service-deregister]                          # R2 / R3
 ```
+
+`namespace` 仅 Nacos;`service` 支持 **Nacos 与 Consul**,Apollo、etcd、Kubernetes 均 fail-closed 返回 NotImplemented。Consul 实例为 agent 注册、用确定性 id `{service}-{ip}-{port}`,健康状态来自真实 Consul checks;Nacos 专属的 `--ephemeral`/`group`/`cluster` 会保留为 Consul 服务 metadata,而非伪造。
 </details>
 
 <details>
@@ -234,6 +236,9 @@ cfgov ctx set <name> --backend etcd   --server <host:port,host:port> [--etcd-key
                      [--etcd-rule-namespace SENTINEL] [--namespace <ns>] \
                      [--etcd-ca-cert <f>] [--etcd-client-cert <f>] [--etcd-client-key <f>]
 cfgov ctx set <name> --backend k8s    [--k8s-kubeconfig <path>] [--k8s-context <c>] --namespace <k8s-ns>
+cfgov ctx set <name> --backend consul --server <host:port> [--consul-key-prefix <p>] \
+                     [--consul-rule-namespace SENTINEL] [--namespace <ns>] \
+                     [--consul-ca-cert <f>] [--consul-client-cert <f>] [--consul-client-key <f>]
 cfgov ctx use|list|current|delete|export|import|test
 cfgov ctx role set|unset|list <context>
 

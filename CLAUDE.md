@@ -10,7 +10,7 @@ The workspace `../CLAUDE.md` (opskit family guide) and the global
 cfgov-cli is the governed config, rule, and feature-flag operations CLI for AI
 agents: one entry point for application configuration, Sentinel flow-control
 rules, and feature flags across
-**Nacos**, **Apollo**, **etcd**, and **Kubernetes**. It provides backend-bound contexts, a fail-closed
+**Nacos**, **Apollo**, **etcd**, **Kubernetes**, and **Consul**. It provides backend-bound contexts, a fail-closed
 config-write risk classifier (`cfgclass`), R0-R3 authorization with
 protected-context escalation, backup-before-write + rollback, tamper-evident
 fingerprint-only audit, and redaction. It is built on the shared `opskit-core`
@@ -67,10 +67,12 @@ CGO_ENABLED=1 go test -race -count=1 ./...
   or rule bodies, tickets, or reasons. Redaction applies before caller output and
   before audit persistence.
 - Backend-specific addressing (Nacos group/dataId; Apollo app/env/cluster/item;
-  etcd key-prefix/namespace segments; K8s `configmap|secret/<name>/<dataKey>`)
-  stays inside the adapter. Unsupported capabilities fail closed (e.g. Apollo
+  etcd key-prefix/namespace segments; K8s `configmap|secret/<name>/<dataKey>`;
+  Consul key-prefix/namespace segments + catalog/agent services) stays inside the
+  adapter. Unsupported capabilities fail closed (e.g. Apollo
   namespace/service/history/listen, etcd namespace/service/history, K8s
-  namespace/service/history/watch → NotImplemented), never silently degrade.
+  namespace/service/history/watch, Consul namespace/history → NotImplemented),
+  never silently degrade. `service` is supported on Nacos and Consul only.
 
 ## Code Conventions
 
@@ -89,7 +91,7 @@ CGO_ENABLED=1 go test -race -count=1 ./...
 ## Repository Layout
 
 - `cmd/` - Cobra commands and `-o json` output contracts
-- `internal/backend/{nacos,apollo,etcd,k8s}` - backend adapters
+- `internal/backend/{nacos,apollo,etcd,k8s,consul}` - backend adapters
 - `internal/cfgov` - Backend abstraction + coordinate/key handling
 - `internal/cfgclass` - fail-closed config-write classifier
 - `internal/rule` - Sentinel rule schemas + shallow/deep validation
