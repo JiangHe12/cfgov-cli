@@ -2,6 +2,12 @@
 
 All notable changes to this project are documented in this file.
 
+## v0.5.0
+
+### Added
+- Kubernetes config watch: the `k8s` adapter now implements `Watch` (`config listen`) via the client-go watch API, with the same bounded single-shot long-poll contract as etcd/Consul — a change reports `Changed=true` with the object's new `resourceVersion`, a timeout/closed/bookmark reports `Changed=false` with the unchanged revision and no error, and a watch error is surfaced. Watch is object-granular (a per-object `FieldSelector`); the coordinate is fail-closed validated before any API call and Secret values never appear in the watch event or trace. `SupportsWatch` is now `true` for Kubernetes.
+- Real-backend integration tests (`//go:build integration`, env-gated, skipped by default) for the etcd, Consul, Nacos and Kubernetes adapters, plus a nightly (and manually dispatchable) `Integration` workflow that starts live etcd/Consul/Nacos containers and a Kind cluster and runs them. Kept separate from the push/PR CI and the release pipeline so backend flakiness never blocks commits or releases.
+
 ## v0.4.0
 
 ### Added
