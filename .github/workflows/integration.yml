@@ -46,6 +46,11 @@ jobs:
       - name: Wait for readiness
         shell: bash
         run: |
+          # GitHub's bash runs with `set -e`; a not-yet-ready backend makes the
+          # first curl exit non-zero and would abort before the retry loop can
+          # poll. Disable errexit — each loop self-manages via its ok flag and
+          # an explicit `exit 1` when the deadline passes.
+          set +e
           ok=0
           for i in $(seq 1 30); do
             if curl -s http://127.0.0.1:2379/health | grep -q '"health":"true"'; then ok=1; break; fi
