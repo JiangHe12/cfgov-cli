@@ -7,12 +7,15 @@ import (
 	"encoding/json"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/JiangHe12/opskit-core/apperrors"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
+	apiwatch "k8s.io/apimachinery/pkg/watch"
 	"k8s.io/client-go/kubernetes/fake"
+	k8stesting "k8s.io/client-go/testing"
 
 	"github.com/JiangHe12/cfgov-cli/internal/cfgov"
 	"github.com/JiangHe12/cfgov-cli/internal/rule"
@@ -223,6 +226,85 @@ func TestTraceDoesNotPrintDataValues(t *testing.T) {
 	}
 	if !strings.Contains(trace, "value=<redacted:") {
 		t.Fatalf("trace did not include redacted value marker: %s", trace)
+	}
+}
+
+func TestWatchConfigMapModifiedReturnsChangedRevision(t *testing.T) {
+	t.Parallel()
+	watcher := apiwatch.NewFake()
+	client := fake.NewSimpleClientset()
+	client.PrependWatchReactor("configmaps", func(action k8stesting.Action) (bool, apiwatch.Interface, error) {
+		watchAction := action.(k8stesting.WatchAction)
+		opts := watchAction.GetWatchRestrictions().Labels
+		_ = opts
+		return true, watcher, nil
+	})
+	backend, err := New(Options{Namespace: "default", client: client})
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+	done := make(chan struct{})
+	go func() {
+		<-done
+		watcher.Modify(&corev1.ConfigMap{
+			ObjectMeta: metav1.ObjectMeta{Name: "app", Namespace: "default", ResourceVersion: "22"},
+			Data:       map[string]string{"application.yaml": "new"},
+		})
+	}()
+	close(done)
+	event, err := backend.Watch(context.Background(), cfgov.Coordinate{Namespace: "default", Key: "configmap/app/application.yaml"}, "21", cfgov.WatchOptions{LongPoll: time.Second})
+	if err != nil {
+		t.Fatalf("Watch() error = %v", err)
+	}
+	if !event.Changed || event.Revision != "22" || event.Coordinate.Key != "configmap/app/application.yaml" {
+		t.Fatalf("Watch() = %#v, want changed revision 22", event)
+	}
+	if len(client.Actions()) != 1 || client.Actions()[0].GetVerb() != "watch" {
+		t.Fatalf("actions = %#v, want one watch action", client.Actions())
+	}
+	watchAction := client.Actions()[0].(k8stesting.WatchAction)
+	restrictions := watchAction.GetWatchRestrictions()
+	if restrictions.Fields.String() != "metadata.name=app" {
+		t.Fatalf("field selector = %q, want metadata.name=app", restrictions.Fields.String())
+	}
+	if watchAction.GetResource().Resource != "configmaps" {
+		t.Fatalf("resource = %s, want configmaps", watchAction.GetResource().Resource)
+	}
+}
+
+func TestWatchSecretTimeoutReturnsUnchanged(t *testing.T) {
+	t.Parallel()
+	watcher := apiwatch.NewFake()
+	client := fake.NewSimpleClientset()
+	client.PrependWatchReactor("secrets", func(action k8stesting.Action) (bool, apiwatch.Interface, error) {
+		return true, watcher, nil
+	})
+	backend, err := New(Options{Namespace: "default", client: client})
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+	event, err := backend.Watch(context.Background(), cfgov.Coordinate{Namespace: "default", Key: "secret/app/password"}, "5", cfgov.WatchOptions{LongPoll: time.Millisecond})
+	if err != nil {
+		t.Fatalf("Watch() error = %v", err)
+	}
+	if event.Changed || event.Revision != "5" || event.Coordinate.Key != "secret/app/password" {
+		t.Fatalf("Watch() = %#v, want unchanged revision 5", event)
+	}
+	if len(client.Actions()) != 1 || client.Actions()[0].GetVerb() != "watch" {
+		t.Fatalf("actions = %#v, want one watch action", client.Actions())
+	}
+}
+
+func TestWatchRejectsInvalidKeyBeforeAPI(t *testing.T) {
+	t.Parallel()
+	backend := newTestBackend()
+	_, err := backend.Watch(context.Background(), cfgov.Coordinate{Namespace: "default", Key: "bad/app/key"}, "", cfgov.WatchOptions{LongPoll: time.Millisecond})
+	if err == nil {
+		t.Fatal("Watch() error = nil, want fail-closed validation error")
+	}
+	client := backend.client.(*fake.Clientset)
+	if actions := client.Actions(); len(actions) != 0 {
+		t.Fatalf("Watch() made API calls before validation: %#v", actions)
 	}
 }
 

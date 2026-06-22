@@ -9,7 +9,7 @@
 //   - RuleCoordinate(app, type) maps to Coordinate{Namespace: backend namespace,
 //     Key: "configmap/{app}-{type}-rules/rules.json"}.
 //
-// History and watch are not supported here.
+// History is not supported here.
 package k8s
 
 import (
@@ -26,6 +26,7 @@ import (
 	k8serrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/util/validation"
+	apiwatch "k8s.io/apimachinery/pkg/watch"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/rest"
 	"k8s.io/client-go/tools/clientcmd"
@@ -207,8 +208,60 @@ func (b *Backend) History(context.Context, cfgov.Coordinate, cfgov.HistoryOption
 	return nil, 0, apperrors.New(apperrors.CodeNotImplemented, "k8s backend does not support config history", nil)
 }
 
-func (b *Backend) Watch(context.Context, cfgov.Coordinate, string, cfgov.WatchOptions) (cfgov.WatchEvent, error) {
-	return cfgov.WatchEvent{}, apperrors.New(apperrors.CodeNotImplemented, "k8s backend does not support config watch", nil)
+func (b *Backend) Watch(ctx context.Context, coord cfgov.Coordinate, revision string, opts cfgov.WatchOptions) (cfgov.WatchEvent, error) {
+	resolved, err := b.resolve(coord)
+	if err != nil {
+		return cfgov.WatchEvent{}, err
+	}
+	watchCtx := ctx
+	cancel := func() {}
+	if opts.LongPoll > 0 {
+		watchCtx, cancel = context.WithTimeout(ctx, opts.LongPoll)
+	}
+	defer cancel()
+	// Kubernetes watches are object-granular: any data key change on the
+	// ConfigMap/Secret can trigger this watch, even when coord targets one key.
+	listOpts := metav1.ListOptions{
+		FieldSelector:   "metadata.name=" + resolved.Name,
+		ResourceVersion: revision,
+	}
+	b.tracef("[trace] >>> k8s watch %s\n", redactRef(resolved, 0))
+	var watcher apiwatch.Interface
+	switch resolved.Kind {
+	case kindConfigMap:
+		watcher, err = b.client.CoreV1().ConfigMaps(resolved.Namespace).Watch(watchCtx, listOpts)
+	case kindSecret:
+		watcher, err = b.client.CoreV1().Secrets(resolved.Namespace).Watch(watchCtx, listOpts)
+	default:
+		return cfgov.WatchEvent{}, apperrors.New(apperrors.CodeValidationFailed, "unsupported Kubernetes config kind", nil)
+	}
+	if err != nil {
+		return cfgov.WatchEvent{}, backendErr("k8s watch failed", err)
+	}
+	defer watcher.Stop()
+	result := watcher.ResultChan()
+	select {
+	case event, ok := <-result:
+		if !ok {
+			return cfgov.WatchEvent{Coordinate: resolved.coord(), Revision: revision, Changed: false}, nil
+		}
+		nextRevision := objectRevision(event.Object)
+		if nextRevision == "" {
+			nextRevision = revision
+		}
+		switch event.Type {
+		case apiwatch.Added, apiwatch.Modified, apiwatch.Deleted:
+			return cfgov.WatchEvent{Coordinate: resolved.coord(), Revision: nextRevision, Changed: true}, nil
+		case apiwatch.Error:
+			return cfgov.WatchEvent{}, apperrors.New(apperrors.CodeBackendError, "k8s watch failed", nil)
+		case apiwatch.Bookmark:
+			return cfgov.WatchEvent{Coordinate: resolved.coord(), Revision: revision, Changed: false}, nil
+		default:
+			return cfgov.WatchEvent{Coordinate: resolved.coord(), Revision: revision, Changed: false}, nil
+		}
+	case <-watchCtx.Done():
+		return cfgov.WatchEvent{Coordinate: resolved.coord(), Revision: revision, Changed: false}, nil
+	}
 }
 
 func (b *Backend) CurrentRevision(ctx context.Context, coord cfgov.Coordinate) (string, error) {
@@ -239,7 +292,7 @@ func (b *Backend) Capabilities() cfgov.Capabilities {
 		SupportsCAS:      true,
 		SupportsRevision: true,
 		SupportsHistory:  false,
-		SupportsWatch:    false,
+		SupportsWatch:    true,
 		SupportsRules:    true,
 		SupportsFlags:    true,
 	}
@@ -534,6 +587,17 @@ func checkRevision(current, expected string) error {
 		return apperrors.New(apperrors.CodeConflict, "config revision changed", nil)
 	}
 	return nil
+}
+
+func objectRevision(obj any) string {
+	switch item := obj.(type) {
+	case *corev1.ConfigMap:
+		return item.ResourceVersion
+	case *corev1.Secret:
+		return item.ResourceVersion
+	default:
+		return ""
+	}
 }
 
 func backendErr(message string, err error) error {

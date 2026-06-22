@@ -103,7 +103,7 @@ func currentBackendCapabilities(f *cliFlags) cfgov.Capabilities {
 			SupportsCAS:      true,
 			SupportsRevision: true,
 			SupportsHistory:  false,
-			SupportsWatch:    false,
+			SupportsWatch:    true,
 			SupportsRules:    true,
 			SupportsFlags:    true,
 		}
@@ -139,7 +139,7 @@ func currentBackendCapabilities(f *cliFlags) cfgov.Capabilities {
 			SupportsCAS:      true,
 			SupportsRevision: true,
 			SupportsHistory:  false,
-			SupportsWatch:    false,
+			SupportsWatch:    true,
 			SupportsRules:    true,
 			SupportsFlags:    true,
 		}
