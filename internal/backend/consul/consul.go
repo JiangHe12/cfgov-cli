@@ -6,6 +6,12 @@
 //   - cfgov.Coordinate.Namespace maps to one opaque path segment under keyPrefix.
 //   - cfgov.Coordinate.Key maps to one opaque path segment under that namespace.
 //   - The full Consul KV key is "<keyPrefix><namespace>/<key>".
+//
+// Rule coordinate mapping:
+//   - RuleCoordinate(app, type) maps to Coordinate{Namespace: ruleNamespace,
+//     Key: "{app}-{type}-rules"}.
+//   - ruleNamespace defaults to "SENTINEL" and is intentionally separate from
+//     the config namespace default "application".
 package consul
 
 import (
@@ -23,45 +29,57 @@ import (
 	capi "github.com/hashicorp/consul/api"
 
 	"github.com/JiangHe12/cfgov-cli/internal/cfgov"
+	"github.com/JiangHe12/cfgov-cli/internal/flag"
+	"github.com/JiangHe12/cfgov-cli/internal/rule"
 )
 
-const defaultNamespace = "application"
+const (
+	defaultNamespace     = "application"
+	defaultRuleNamespace = "SENTINEL"
+)
 
 type Options struct {
-	Server     string
-	KeyPrefix  string
-	Namespace  string
-	Token      string
-	CACert     string
-	ClientCert string
-	ClientKey  string
-	Timeout    time.Duration
-	Trace      bool
-	TraceOut   io.Writer
+	Server        string
+	KeyPrefix     string
+	Namespace     string
+	RuleNamespace string
+	Token         string
+	CACert        string
+	ClientCert    string
+	ClientKey     string
+	Timeout       time.Duration
+	Trace         bool
+	TraceOut      io.Writer
 
 	kv kvClient
 }
 
 type Backend struct {
-	server    string
-	keyPrefix string
-	namespace string
-	token     string
-	kv        kvClient
-	trace     bool
-	traceOut  io.Writer
+	server        string
+	keyPrefix     string
+	namespace     string
+	ruleNamespace string
+	token         string
+	kv            kvClient
+	trace         bool
+	traceOut      io.Writer
 }
 
 type kvClient interface {
 	Get(key string, q *capi.QueryOptions) (*capi.KVPair, *capi.QueryMeta, error)
 	List(prefix string, q *capi.QueryOptions) (capi.KVPairs, *capi.QueryMeta, error)
+	Keys(prefix, separator string, q *capi.QueryOptions) ([]string, *capi.QueryMeta, error)
 	Put(p *capi.KVPair, q *capi.WriteOptions) (*capi.WriteMeta, error)
 	CAS(p *capi.KVPair, q *capi.WriteOptions) (bool, *capi.WriteMeta, error)
 	Delete(key string, w *capi.WriteOptions) (*capi.WriteMeta, error)
 	DeleteCAS(p *capi.KVPair, q *capi.WriteOptions) (bool, *capi.WriteMeta, error)
 }
 
-var _ cfgov.Backend = (*Backend)(nil)
+var (
+	_ cfgov.Backend   = (*Backend)(nil)
+	_ cfgov.RuleStore = (*Backend)(nil)
+	_ cfgov.FlagStore = (*Backend)(nil)
+)
 
 func ValidateServer(raw string) error {
 	_, _, err := normalizeServer(raw)
@@ -86,6 +104,10 @@ func New(opts Options) (*Backend, error) {
 	if err := validatePart("namespace", namespace); err != nil {
 		return nil, err
 	}
+	ruleNamespace := firstNonEmpty(opts.RuleNamespace, defaultRuleNamespace)
+	if err := validatePart("rule namespace", ruleNamespace); err != nil {
+		return nil, err
+	}
 	out := opts.TraceOut
 	if out == nil {
 		out = os.Stderr
@@ -99,13 +121,14 @@ func New(opts Options) (*Backend, error) {
 		kv = client.KV()
 	}
 	return &Backend{
-		server:    server,
-		keyPrefix: keyPrefix,
-		namespace: namespace,
-		token:     opts.Token,
-		kv:        kv,
-		trace:     opts.Trace,
-		traceOut:  out,
+		server:        server,
+		keyPrefix:     keyPrefix,
+		namespace:     namespace,
+		ruleNamespace: ruleNamespace,
+		token:         opts.Token,
+		kv:            kv,
+		trace:         opts.Trace,
+		traceOut:      out,
 	}, nil
 }
 
@@ -300,7 +323,7 @@ func (b *Backend) CurrentRevision(ctx context.Context, coord cfgov.Coordinate) (
 }
 
 func (b *Backend) Ping(ctx context.Context) error {
-	_, _, err := b.kv.List(b.keyPrefix, b.queryOptions(ctx))
+	_, _, err := b.kv.Keys(b.keyPrefix, "/", b.queryOptions(ctx))
 	if err != nil {
 		return backendErr("consul ping failed", err)
 	}
@@ -314,15 +337,49 @@ func (b *Backend) Describe() cfgov.Description {
 func (b *Backend) Capabilities() cfgov.Capabilities {
 	return cfgov.Capabilities{
 		Backend:          "consul",
-		ResourceTypes:    []string{"config"},
+		ResourceTypes:    []string{"config", "rule", "flag"},
 		Verbs:            []string{"get", "list", "diff", "validate", "pull", "listen", "push", "delete"},
 		SupportsCAS:      true,
 		SupportsRevision: true,
 		SupportsHistory:  false,
 		SupportsWatch:    true,
-		SupportsRules:    false,
-		SupportsFlags:    false,
+		SupportsRules:    true,
+		SupportsFlags:    true,
 	}
+}
+
+func (b *Backend) RuleCoordinate(app, ruleType string) (cfgov.Coordinate, error) {
+	if app != strings.TrimSpace(app) {
+		return cfgov.Coordinate{}, apperrors.New(apperrors.CodeValidationFailed, "app contains leading or trailing whitespace", nil)
+	}
+	parsed, err := rule.ParseType(ruleType)
+	if err != nil {
+		return cfgov.Coordinate{}, err
+	}
+	dataID, err := rule.DataID(app, parsed)
+	if err != nil {
+		return cfgov.Coordinate{}, err
+	}
+	coord := cfgov.Coordinate{Namespace: b.ruleNamespace, Key: dataID}
+	if _, _, _, err := b.resolve(coord); err != nil {
+		return cfgov.Coordinate{}, err
+	}
+	return coord, nil
+}
+
+func (b *Backend) FlagCoordinate(app string) (cfgov.Coordinate, error) {
+	if app != strings.TrimSpace(app) {
+		return cfgov.Coordinate{}, apperrors.New(apperrors.CodeValidationFailed, "app contains leading or trailing whitespace", nil)
+	}
+	dataID, err := flag.DataID(app)
+	if err != nil {
+		return cfgov.Coordinate{}, err
+	}
+	coord := cfgov.Coordinate{Namespace: b.namespace, Key: dataID}
+	if _, _, _, err := b.resolve(coord); err != nil {
+		return cfgov.Coordinate{}, err
+	}
+	return coord, nil
 }
 
 func (b *Backend) resolve(coord cfgov.Coordinate) (string, string, string, error) {
@@ -417,9 +474,11 @@ func normalizeKeyPrefix(raw string) (string, error) {
 }
 
 func validatePart(name, value string) error {
-	value = strings.TrimSpace(value)
 	if value == "" {
 		return apperrors.New(apperrors.CodeUsageError, name+" is required", nil)
+	}
+	if value != strings.TrimSpace(value) {
+		return apperrors.New(apperrors.CodeValidationFailed, name+" contains leading or trailing whitespace", nil)
 	}
 	if strings.ContainsAny(value, "\x00\r\n\t") {
 		return apperrors.New(apperrors.CodeValidationFailed, name+" contains invalid control characters", nil)

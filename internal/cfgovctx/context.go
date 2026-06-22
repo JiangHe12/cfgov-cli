@@ -25,6 +25,7 @@ type Context struct {
 	EtcdClientCert      string `yaml:"etcdClientCert,omitempty"`
 	EtcdClientKey       string `yaml:"etcdClientKey,omitempty"`
 	ConsulKeyPrefix     string `yaml:"consulKeyPrefix,omitempty"`
+	ConsulRuleNamespace string `yaml:"consulRuleNamespace,omitempty"`
 	ConsulCACert        string `yaml:"consulCaCert,omitempty"`
 	ConsulClientCert    string `yaml:"consulClientCert,omitempty"`
 	ConsulClientKey     string `yaml:"consulClientKey,omitempty"`

@@ -759,16 +759,17 @@ func buildBackendFromNamedContext(parent context.Context, f *cliFlags, name stri
 	}
 	if item.Backend == "consul" {
 		return consulBackend.New(consulBackend.Options{
-			Server:     item.Server,
-			KeyPrefix:  item.ConsulKeyPrefix,
-			Namespace:  item.Namespace,
-			Token:      password,
-			CACert:     item.ConsulCACert,
-			ClientCert: item.ConsulClientCert,
-			ClientKey:  item.ConsulClientKey,
-			Timeout:    f.Timeout,
-			Trace:      f.Debug || f.Trace,
-			TraceOut:   os.Stderr,
+			Server:        item.Server,
+			KeyPrefix:     item.ConsulKeyPrefix,
+			Namespace:     item.Namespace,
+			RuleNamespace: item.ConsulRuleNamespace,
+			Token:         password,
+			CACert:        item.ConsulCACert,
+			ClientCert:    item.ConsulClientCert,
+			ClientKey:     item.ConsulClientKey,
+			Timeout:       f.Timeout,
+			Trace:         f.Debug || f.Trace,
+			TraceOut:      os.Stderr,
 		})
 	}
 	if item.Backend == "k8s" {

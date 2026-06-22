@@ -357,6 +357,9 @@ func (b *Backend) Capabilities() cfgov.Capabilities {
 }
 
 func (b *Backend) RuleCoordinate(app, ruleType string) (cfgov.Coordinate, error) {
+	if app != strings.TrimSpace(app) {
+		return cfgov.Coordinate{}, apperrors.New(apperrors.CodeValidationFailed, "app contains leading or trailing whitespace", nil)
+	}
 	parsed, err := rule.ParseType(ruleType)
 	if err != nil {
 		return cfgov.Coordinate{}, err
@@ -375,6 +378,9 @@ func (b *Backend) RuleCoordinate(app, ruleType string) (cfgov.Coordinate, error)
 }
 
 func (b *Backend) FlagCoordinate(app string) (cfgov.Coordinate, error) {
+	if app != strings.TrimSpace(app) {
+		return cfgov.Coordinate{}, apperrors.New(apperrors.CodeValidationFailed, "app contains leading or trailing whitespace", nil)
+	}
 	dataID, err := flag.DataID(app)
 	if err != nil {
 		return cfgov.Coordinate{}, err
@@ -505,9 +511,11 @@ func normalizeKeyPrefix(raw string) (string, error) {
 }
 
 func validatePart(name, value string) error {
-	value = strings.TrimSpace(value)
 	if value == "" {
 		return apperrors.New(apperrors.CodeUsageError, name+" is required", nil)
+	}
+	if value != strings.TrimSpace(value) {
+		return apperrors.New(apperrors.CodeValidationFailed, name+" contains leading or trailing whitespace", nil)
 	}
 	if strings.ContainsAny(value, "\x00\r\n\t") {
 		return apperrors.New(apperrors.CodeValidationFailed, name+" contains invalid control characters", nil)

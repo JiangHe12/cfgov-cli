@@ -504,9 +504,11 @@ func (b *Backend) tracef(format string, args ...any) {
 }
 
 func validatePart(name, value string, allowURL bool) error {
-	value = strings.TrimSpace(value)
 	if value == "" {
 		return apperrors.New(apperrors.CodeUsageError, name+" is required", nil)
+	}
+	if value != strings.TrimSpace(value) {
+		return apperrors.New(apperrors.CodeValidationFailed, name+" contains leading or trailing whitespace", nil)
 	}
 	if strings.ContainsAny(value, "\x00\r\n\t") {
 		return apperrors.New(apperrors.CodeValidationFailed, name+" contains invalid control characters", nil)

@@ -67,7 +67,7 @@ func ctxSetCmd(f *cliFlags) *cobra.Command { //nolint:gocyclo // Cobra wiring fo
 	var apolloAppID, apolloEnv, apolloCluster, apolloNamespace, apolloRuleNamespace string
 	var apolloToken, apolloSecret string
 	var etcdKeyPrefix, etcdRuleNamespace, etcdCACert, etcdClientCert, etcdClientKey string
-	var consulKeyPrefix, consulCACert, consulClientCert, consulClientKey string
+	var consulKeyPrefix, consulRuleNamespace, consulCACert, consulClientCert, consulClientKey string
 	cmd := &cobra.Command{
 		Use:   "set <name>",
 		Short: "Set a backend-bound context",
@@ -151,6 +151,7 @@ func ctxSetCmd(f *cliFlags) *cobra.Command { //nolint:gocyclo // Cobra wiring fo
 				EtcdClientCert:      etcdClientCert,
 				EtcdClientKey:       etcdClientKey,
 				ConsulKeyPrefix:     consulKeyPrefix,
+				ConsulRuleNamespace: consulRuleNamespace,
 				ConsulCACert:        consulCACert,
 				ConsulClientCert:    consulClientCert,
 				ConsulClientKey:     consulClientKey,
@@ -196,6 +197,7 @@ func ctxSetCmd(f *cliFlags) *cobra.Command { //nolint:gocyclo // Cobra wiring fo
 	cmd.Flags().StringVar(&etcdClientCert, "etcd-client-cert", "", "etcd mTLS client certificate path")
 	cmd.Flags().StringVar(&etcdClientKey, "etcd-client-key", "", "etcd mTLS client private key path")
 	cmd.Flags().StringVar(&consulKeyPrefix, "consul-key-prefix", "", "Consul KV key prefix prepended before namespace")
+	cmd.Flags().StringVar(&consulRuleNamespace, "consul-rule-namespace", "", "Consul KV namespace for Sentinel rules")
 	cmd.Flags().StringVar(&consulCACert, "consul-ca-cert", "", "Consul CA certificate path")
 	cmd.Flags().StringVar(&consulClientCert, "consul-client-cert", "", "Consul mTLS client certificate path")
 	cmd.Flags().StringVar(&consulClientKey, "consul-client-key", "", "Consul mTLS client private key path")
@@ -759,6 +761,7 @@ func contextView(name string, item cfgovctx.Context, current, showSecrets bool) 
 		"etcdClientCert":      item.EtcdClientCert,
 		"etcdClientKey":       item.EtcdClientKey,
 		"consulKeyPrefix":     item.ConsulKeyPrefix,
+		"consulRuleNamespace": item.ConsulRuleNamespace,
 		"consulCaCert":        item.ConsulCACert,
 		"consulClientCert":    item.ConsulClientCert,
 		"consulClientKey":     item.ConsulClientKey,

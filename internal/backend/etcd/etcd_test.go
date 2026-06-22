@@ -25,6 +25,8 @@ func TestNewValidatesEtcdOptionsFailClosed(t *testing.T) {
 		{name: "endpoint credentials", opts: Options{Endpoints: "http://user:pass@127.0.0.1:2379", Namespace: "app"}},
 		{name: "namespace slash", opts: Options{Endpoints: "127.0.0.1:2379", Namespace: "bad/ns"}},
 		{name: "namespace dotdot", opts: Options{Endpoints: "127.0.0.1:2379", Namespace: ".."}},
+		{name: "namespace leading space", opts: Options{Endpoints: "127.0.0.1:2379", Namespace: " app"}},
+		{name: "namespace trailing control", opts: Options{Endpoints: "127.0.0.1:2379", Namespace: "app\n"}},
 		{name: "rule namespace slash", opts: Options{Endpoints: "127.0.0.1:2379", Namespace: "app", RuleNamespace: "bad/ns"}},
 		{name: "rule namespace dotdot", opts: Options{Endpoints: "127.0.0.1:2379", Namespace: "app", RuleNamespace: ".."}},
 		{name: "prefix dotdot", opts: Options{Endpoints: "127.0.0.1:2379", Namespace: "app", KeyPrefix: "cfg/../prod"}},
@@ -223,9 +225,11 @@ func TestRuleCoordinateRejectsUnsafeParts(t *testing.T) {
 		{name: "app slash", app: "bad/app", ruleNS: "SENTINEL", wantErrCode: apperrors.CodeValidationFailed},
 		{name: "app dotdot", app: "..", ruleNS: "SENTINEL", wantErrCode: apperrors.CodeUsageError},
 		{name: "app control", app: "bad\napp", ruleNS: "SENTINEL", wantErrCode: apperrors.CodeValidationFailed},
+		{name: "app leading space", app: " demo", ruleNS: "SENTINEL", wantErrCode: apperrors.CodeValidationFailed},
 		{name: "rule namespace slash", app: "demo", ruleNS: "bad/ns", wantErrCode: apperrors.CodeValidationFailed},
 		{name: "rule namespace dotdot", app: "demo", ruleNS: "..", wantErrCode: apperrors.CodeValidationFailed},
 		{name: "rule namespace control", app: "demo", ruleNS: "bad\nns", wantErrCode: apperrors.CodeValidationFailed},
+		{name: "rule namespace leading space", app: "demo", ruleNS: " SENTINEL", wantErrCode: apperrors.CodeValidationFailed},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -273,7 +277,7 @@ func TestFlagCoordinateUsesConfigNamespace(t *testing.T) {
 
 func TestFlagCoordinateRejectsUnsafeAppBeforeRPC(t *testing.T) {
 	t.Parallel()
-	tests := []string{"../x", "a/b", "..", "", "bad\x00app", `bad\app`}
+	tests := []string{"../x", "a/b", "..", "", "bad\x00app", `bad\app`, " app"}
 	for _, app := range tests {
 		t.Run(strings.ReplaceAll(app, "\x00", "\\x00"), func(t *testing.T) {
 			t.Parallel()

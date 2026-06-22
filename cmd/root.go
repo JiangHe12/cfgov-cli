@@ -433,16 +433,17 @@ func buildConsulBackend(f *cliFlags, contextName string, item cfgovctx.Context, 
 		token = resolved
 	}
 	return consulBackend.New(consulBackend.Options{
-		Server:     server,
-		KeyPrefix:  firstNonEmpty(os.Getenv("CONSUL_KEY_PREFIX"), item.ConsulKeyPrefix),
-		Namespace:  firstNonEmpty(f.Namespace, os.Getenv("CONSUL_NAMESPACE"), item.Namespace),
-		Token:      token,
-		CACert:     firstNonEmpty(os.Getenv("CONSUL_CACERT"), item.ConsulCACert),
-		ClientCert: firstNonEmpty(os.Getenv("CONSUL_CLIENT_CERT"), item.ConsulClientCert),
-		ClientKey:  firstNonEmpty(os.Getenv("CONSUL_CLIENT_KEY"), item.ConsulClientKey),
-		Timeout:    f.Timeout,
-		Trace:      f.Debug || f.Trace,
-		TraceOut:   os.Stderr,
+		Server:        server,
+		KeyPrefix:     firstNonEmpty(os.Getenv("CONSUL_KEY_PREFIX"), item.ConsulKeyPrefix),
+		Namespace:     firstNonEmpty(f.Namespace, os.Getenv("CONSUL_NAMESPACE"), item.Namespace),
+		RuleNamespace: firstNonEmpty(os.Getenv("CONSUL_RULE_NAMESPACE"), item.ConsulRuleNamespace),
+		Token:         token,
+		CACert:        firstNonEmpty(os.Getenv("CONSUL_CACERT"), item.ConsulCACert),
+		ClientCert:    firstNonEmpty(os.Getenv("CONSUL_CLIENT_CERT"), item.ConsulClientCert),
+		ClientKey:     firstNonEmpty(os.Getenv("CONSUL_CLIENT_KEY"), item.ConsulClientKey),
+		Timeout:       f.Timeout,
+		Trace:         f.Debug || f.Trace,
+		TraceOut:      os.Stderr,
 	})
 }
 
