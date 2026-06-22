@@ -40,6 +40,7 @@ go vet -tags=integration ./...          # integration-tagged files are skipped o
 CGO_ENABLED=1 go test -race -count=1 ./...
 ```
 
+- Real-backend integration tests (`//go:build integration`, env-gated on `CFGOV_IT_*`, skipped by default) cover etcd/Consul/Nacos (docker) and K8s (Kind); they run in the nightly `integration.yml` workflow, not on push/PR.
 - README / SKILL.md command examples are NOT covered by CI: run the real binary
   and confirm every cited flag exists (`cfgov <cmd> --help`) before shipping docs.
 - A new `t.Parallel()` test must not mutate a process global (config path, env,
