@@ -1,7 +1,8 @@
 name: Integration
 
 # Real-backend integration tests (//go:build integration), run against live
-# etcd, Consul and Nacos containers started on the runner. Kept SEPARATE from
+# etcd, Consul and Nacos containers plus a Kind (real kube-apiserver) cluster
+# started on the runner. Kept SEPARATE from
 # the PR/push CI and the release pipeline so a slow Nacos boot or a transient
 # backend flake never blocks everyday commits or a release. Runs nightly and
 # on manual dispatch only.
@@ -16,7 +17,7 @@ permissions:
 
 jobs:
   integration:
-    name: real-backend integration (etcd + consul + nacos)
+    name: real-backend integration (etcd + consul + nacos + k8s)
     timeout-minutes: 20
     runs-on: ubuntu-latest
     steps:
@@ -76,6 +77,11 @@ jobs:
           [ "$ok" = 1 ] || { echo "nacos not ready"; docker logs --tail 30 cfgov-it-nacos; exit 1; }
           echo "nacos ready"
 
+      - name: Create Kind cluster
+        uses: helm/kind-action@v1
+        with:
+          cluster_name: cfgov-it
+
       - name: Run integration tests
         shell: bash
         env:
@@ -83,10 +89,13 @@ jobs:
           CFGOV_IT_CONSUL_ADDR: 127.0.0.1:8500
           CFGOV_IT_NACOS_ADDR: http://127.0.0.1:8848
         run: |
+          kind export kubeconfig --name cfgov-it --kubeconfig "$HOME/kind.kubeconfig"
+          export CFGOV_IT_K8S_KUBECONFIG="$HOME/kind.kubeconfig"
           go test -tags=integration -count=1 -v \
             ./internal/backend/etcd/ \
             ./internal/backend/consul/ \
-            ./internal/backend/nacos/
+            ./internal/backend/nacos/ \
+            ./internal/backend/k8s/
 
       - name: Tear down backends
         if: always()
