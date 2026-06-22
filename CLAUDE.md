@@ -71,7 +71,7 @@ CGO_ENABLED=1 go test -race -count=1 ./...
   Consul key-prefix/namespace segments + catalog/agent services) stays inside the
   adapter. Unsupported capabilities fail closed (e.g. Apollo
   namespace/service/history/listen, etcd namespace/service/history, K8s
-  namespace/service/history/watch, Consul namespace/history → NotImplemented),
+  namespace/service/history, Consul namespace/history → NotImplemented),
   never silently degrade. `service` is supported on Nacos and Consul only.
 
 ## Code Conventions

@@ -37,7 +37,7 @@
 
 | | |
 |---|---|
-| 🗄️ **五后端** | **Nacos**(配置、Sentinel 规则、特性开关、命名空间、服务、历史、实时监听)、**Apollo**(配置 + 规则 + 开关)、**etcd**(配置 + 规则 + 开关、原生 watch)、**Kubernetes**(ConfigMap/Secret 配置 + 规则 + 开关)与 **Consul**(配置 + 规则 + 开关 + 服务、阻塞查询 watch)。可按上下文绑定,也可按命令临时覆盖。 |
+| 🗄️ **五后端** | **Nacos**(配置、Sentinel 规则、特性开关、命名空间、服务、历史、实时监听)、**Apollo**(配置 + 规则 + 开关)、**etcd**(配置 + 规则 + 开关、原生 watch)、**Kubernetes**(ConfigMap/Secret 配置 + 规则 + 开关、对象级 watch)与 **Consul**(配置 + 规则 + 开关 + 服务、阻塞查询 watch)。可按上下文绑定,也可按命令临时覆盖。 |
 | ⚙️ **完整配置生命周期** | get · list · diff · validate · pull · history · listen · push · delete · export · import · promote · rollback · reconcile |
 | 🚦 **Sentinel 规则** | flow · degrade · system · authority · param——读取、校验(浅 **+** 深)、创建、更新、导入、回滚、删除。与 Sentinel 运行时**线格式兼容**。 |
 | 🏁 **特性开关** | 类型化的特性开关集,**五后端通吃**——读取、校验(浅 **+** 深)、创建、更新、导入、回滚、删除。与规则同样的 schema-over-backend 模型。 |

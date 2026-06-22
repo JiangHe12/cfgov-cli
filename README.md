@@ -37,7 +37,7 @@ If you used to run `nacos-cli` or `sentinel-cli`, **cfgov-cli replaces both** �
 
 | | |
 |---|---|
-| 🗄️ **Five backends** | **Nacos** (config, Sentinel rules, feature flags, namespaces, services, history, live-watch), **Apollo** (config + rules + flags), **etcd** (config + rules + flags, native watch), **Kubernetes** (ConfigMap/Secret config + rules + flags), and **Consul** (config + rules + flags + services, watch via blocking query). Pick per context or override per command. |
+| 🗄️ **Five backends** | **Nacos** (config, Sentinel rules, feature flags, namespaces, services, history, live-watch), **Apollo** (config + rules + flags), **etcd** (config + rules + flags, native watch), **Kubernetes** (ConfigMap/Secret config + rules + flags, object-granular watch), and **Consul** (config + rules + flags + services, watch via blocking query). Pick per context or override per command. |
 | ⚙️ **Full config lifecycle** | get · list · diff · validate · pull · history · listen · push · delete · export · import · promote · rollback · reconcile |
 | 🚦 **Sentinel rules** | flow · degrade · system · authority · param — read, validate (shallow **and** deep), create, update, import, roll back, delete. Wire-compatible with the Sentinel runtime. |
 | 🏁 **Feature flags** | Typed feature-flag sets on **all five backends** — read, validate (shallow **and** deep), create, update, import, roll back, delete. Same schema-over-backend model as rules. |
