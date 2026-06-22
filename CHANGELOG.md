@@ -2,6 +2,13 @@
 
 All notable changes to this project are documented in this file.
 
+## v0.3.0
+
+### Added
+- Feature flags: a new `flag` noun introducing feature flags as a second cfgov-native schema-over-backend typed policy alongside Sentinel rules. A flag set is one JSON-array config blob per app (`key`, `enabled`, `defaultVariant`, `variants`, percentage-rollout `rules`).
+- `flag list/get/export/diff/validate` (R0 reads + shallow/deep validation) and `flag create/update/import/rollback` (R1) / `flag delete` (R2 → R3 protected + new `--allow-production-flag-delete`). Deep semantic checks (duplicate key, `rolloutPercent` out of 0–100, `defaultVariant`/rule `variant` integrity, enabled-without-variants warning) gate every non-delete write and cannot be bypassed by `--force` or `import`.
+- Feature flags ride all four backends via the new optional `cfgov.FlagStore` interface (`Capabilities.SupportsFlags`): Nacos (group `FEATURE_FLAG_GROUP`, dataId `{app}-flags`), Apollo and etcd (key `{app}-flags` under the bound namespace), and Kubernetes (ConfigMap `{app}-flags`, data key `flags.json`). Each `FlagCoordinate` is fail-closed before any backend call. Flags reuse the shared governance kernel (backup-before-write, CAS, fingerprint-only audit, R0–R3 + protected escalation); the flag audit path uses the shared audit writer, so flag events carry ticket/reason and are queryable via `audit query --ticket`.
+
 ## v0.2.0
 
 ### Added
