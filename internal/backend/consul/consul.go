@@ -18,6 +18,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"net"
 	"net/url"
 	"os"
 	"sort"
@@ -51,7 +52,10 @@ type Options struct {
 	Trace         bool
 	TraceOut      io.Writer
 
-	kv kvClient
+	kv      kvClient
+	catalog catalogClient
+	health  healthClient
+	agent   agentClient
 }
 
 type Backend struct {
@@ -61,6 +65,9 @@ type Backend struct {
 	ruleNamespace string
 	token         string
 	kv            kvClient
+	catalog       catalogClient
+	health        healthClient
+	agent         agentClient
 	trace         bool
 	traceOut      io.Writer
 }
@@ -75,10 +82,25 @@ type kvClient interface {
 	DeleteCAS(p *capi.KVPair, q *capi.WriteOptions) (bool, *capi.WriteMeta, error)
 }
 
+type catalogClient interface {
+	Services(q *capi.QueryOptions) (map[string][]string, *capi.QueryMeta, error)
+	Service(service, tag string, q *capi.QueryOptions) ([]*capi.CatalogService, *capi.QueryMeta, error)
+}
+
+type healthClient interface {
+	Service(service, tag string, passingOnly bool, q *capi.QueryOptions) ([]*capi.ServiceEntry, *capi.QueryMeta, error)
+}
+
+type agentClient interface {
+	ServiceRegisterOpts(service *capi.AgentServiceRegistration, opts capi.ServiceRegisterOpts) error
+	ServiceDeregisterOpts(serviceID string, q *capi.QueryOptions) error
+}
+
 var (
-	_ cfgov.Backend   = (*Backend)(nil)
-	_ cfgov.RuleStore = (*Backend)(nil)
-	_ cfgov.FlagStore = (*Backend)(nil)
+	_ cfgov.Backend         = (*Backend)(nil)
+	_ cfgov.RuleStore       = (*Backend)(nil)
+	_ cfgov.FlagStore       = (*Backend)(nil)
+	_ cfgov.ServiceRegistry = (*Backend)(nil)
 )
 
 func ValidateServer(raw string) error {
@@ -113,12 +135,18 @@ func New(opts Options) (*Backend, error) {
 		out = os.Stderr
 	}
 	kv := opts.kv
+	catalog := opts.catalog
+	health := opts.health
+	agent := opts.agent
 	if kv == nil {
 		client, err := capi.NewClient(apiConfig)
 		if err != nil {
 			return nil, apperrors.New(apperrors.CodeBackendUnreachable, "failed to create Consul client", err)
 		}
 		kv = client.KV()
+		catalog = client.Catalog()
+		health = client.Health()
+		agent = client.Agent()
 	}
 	return &Backend{
 		server:        server,
@@ -127,6 +155,9 @@ func New(opts Options) (*Backend, error) {
 		ruleNamespace: ruleNamespace,
 		token:         opts.Token,
 		kv:            kv,
+		catalog:       catalog,
+		health:        health,
+		agent:         agent,
 		trace:         opts.Trace,
 		traceOut:      out,
 	}, nil
@@ -337,7 +368,7 @@ func (b *Backend) Describe() cfgov.Description {
 func (b *Backend) Capabilities() cfgov.Capabilities {
 	return cfgov.Capabilities{
 		Backend:          "consul",
-		ResourceTypes:    []string{"config", "rule", "flag"},
+		ResourceTypes:    []string{"config", "rule", "flag", "service"},
 		Verbs:            []string{"get", "list", "diff", "validate", "pull", "listen", "push", "delete"},
 		SupportsCAS:      true,
 		SupportsRevision: true,
@@ -380,6 +411,132 @@ func (b *Backend) FlagCoordinate(app string) (cfgov.Coordinate, error) {
 		return cfgov.Coordinate{}, err
 	}
 	return coord, nil
+}
+
+func (b *Backend) ListServices(ctx context.Context, page, pageSize int) (cfgov.ServiceList, error) {
+	if b.catalog == nil {
+		return cfgov.ServiceList{}, apperrors.New(apperrors.CodeBackendUnreachable, "consul catalog client not configured", nil)
+	}
+	services, _, err := b.catalog.Services(b.queryOptions(ctx))
+	if err != nil {
+		return cfgov.ServiceList{}, backendErr("consul list services failed", err)
+	}
+	names := make([]string, 0, len(services))
+	for name := range services {
+		if err := validateServiceName(name); err != nil {
+			continue
+		}
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	return cfgov.ServiceList{Count: len(names), Names: paginateNames(names, page, pageSize)}, nil
+}
+
+func (b *Backend) GetService(ctx context.Context, name string) (map[string]any, error) {
+	if err := validateServiceName(name); err != nil {
+		return nil, err
+	}
+	instances, err := b.catalogService(ctx, name)
+	if err != nil {
+		return nil, err
+	}
+	if len(instances) == 0 {
+		return nil, apperrors.New(apperrors.CodeResourceNotFound, "consul service not found", nil)
+	}
+	tags := map[string]struct{}{}
+	for _, item := range instances {
+		for _, tag := range item.ServiceTags {
+			tags[tag] = struct{}{}
+		}
+	}
+	outTags := make([]string, 0, len(tags))
+	for tag := range tags {
+		outTags = append(outTags, tag)
+	}
+	sort.Strings(outTags)
+	return map[string]any{
+		"name":      name,
+		"instances": len(instances),
+		"tags":      outTags,
+	}, nil
+}
+
+func (b *Backend) ListInstances(ctx context.Context, name, group string) ([]cfgov.ServiceInstance, error) {
+	if err := validateServiceName(name); err != nil {
+		return nil, err
+	}
+	if group != "" {
+		if err := validatePart("group", group); err != nil {
+			return nil, err
+		}
+	}
+	instances, err := b.healthService(ctx, name)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]cfgov.ServiceInstance, 0, len(instances))
+	for _, item := range instances {
+		if item == nil || item.Service == nil {
+			continue
+		}
+		if group != "" && item.Service.Meta["group"] != group {
+			continue
+		}
+		out = append(out, serviceInstanceFromHealth(item))
+	}
+	return out, nil
+}
+
+func (b *Backend) RegisterInstance(ctx context.Context, service, ip string, port int, opts cfgov.InstanceOptions) error {
+	if err := validateServiceMutation(service, ip, port, opts); err != nil {
+		return err
+	}
+	if b.agent == nil {
+		return apperrors.New(apperrors.CodeBackendUnreachable, "consul agent client not configured", nil)
+	}
+	req := &capi.AgentServiceRegistration{
+		ID:      consulServiceID(service, ip, port),
+		Name:    service,
+		Address: ip,
+		Port:    port,
+		Meta:    consulServiceMeta(opts),
+	}
+	if opts.Weight > 0 {
+		req.Weights = &capi.AgentWeights{Passing: int(opts.Weight), Warning: int(opts.Weight)}
+	}
+	return backendErr("consul register service failed", b.agent.ServiceRegisterOpts(req, capi.ServiceRegisterOpts{Token: b.token}.WithContext(ctx)))
+}
+
+func (b *Backend) DeregisterInstance(ctx context.Context, service, ip string, port int, opts cfgov.InstanceOptions) error {
+	if err := validateServiceMutation(service, ip, port, opts); err != nil {
+		return err
+	}
+	if b.agent == nil {
+		return apperrors.New(apperrors.CodeBackendUnreachable, "consul agent client not configured", nil)
+	}
+	return backendErr("consul deregister service failed", b.agent.ServiceDeregisterOpts(consulServiceID(service, ip, port), b.queryOptions(ctx)))
+}
+
+func (b *Backend) catalogService(ctx context.Context, name string) ([]*capi.CatalogService, error) {
+	if b.catalog == nil {
+		return nil, apperrors.New(apperrors.CodeBackendUnreachable, "consul catalog client not configured", nil)
+	}
+	items, _, err := b.catalog.Service(name, "", b.queryOptions(ctx))
+	if err != nil {
+		return nil, backendErr("consul get service failed", err)
+	}
+	return items, nil
+}
+
+func (b *Backend) healthService(ctx context.Context, name string) ([]*capi.ServiceEntry, error) {
+	if b.health == nil {
+		return nil, apperrors.New(apperrors.CodeBackendUnreachable, "consul health client not configured", nil)
+	}
+	items, _, err := b.health.Service(name, "", false, b.queryOptions(ctx))
+	if err != nil {
+		return nil, backendErr("consul list service instances failed", err)
+	}
+	return items, nil
 }
 
 func (b *Backend) resolve(coord cfgov.Coordinate) (string, string, string, error) {
@@ -487,6 +644,112 @@ func validatePart(name, value string) error {
 		return apperrors.New(apperrors.CodeValidationFailed, name+" contains invalid path characters", nil)
 	}
 	return nil
+}
+
+func validateServiceName(name string) error {
+	return validatePart("service", name)
+}
+
+func validateServiceMutation(service, ip string, port int, opts cfgov.InstanceOptions) error {
+	if err := validateServiceName(service); err != nil {
+		return err
+	}
+	if net.ParseIP(ip) == nil || ip != strings.TrimSpace(ip) || strings.ContainsAny(ip, "\x00\r\n\t") {
+		return apperrors.New(apperrors.CodeUsageError, "invalid instance IP", nil)
+	}
+	if port <= 0 || port > 65535 {
+		return apperrors.New(apperrors.CodeUsageError, "port must be between 1 and 65535", nil)
+	}
+	if opts.GroupName != "" {
+		if err := validatePart("group", opts.GroupName); err != nil {
+			return err
+		}
+	}
+	if opts.Cluster != "" {
+		if err := validatePart("cluster", opts.Cluster); err != nil {
+			return err
+		}
+	}
+	for key, value := range opts.Metadata {
+		if err := validatePart("metadata key", key); err != nil {
+			return err
+		}
+		if strings.ContainsAny(value, "\x00\r\n\t") {
+			return apperrors.New(apperrors.CodeValidationFailed, "metadata value contains invalid control characters", nil)
+		}
+	}
+	if opts.Weight < 0 {
+		return apperrors.New(apperrors.CodeUsageError, "weight must be non-negative", nil)
+	}
+	return nil
+}
+
+func consulServiceID(service, ip string, port int) string {
+	return service + "-" + ip + "-" + strconv.Itoa(port)
+}
+
+func consulServiceMeta(opts cfgov.InstanceOptions) map[string]string {
+	if len(opts.Metadata) == 0 && opts.GroupName == "" && opts.Cluster == "" && opts.Ephemeral == nil {
+		return nil
+	}
+	meta := make(map[string]string, len(opts.Metadata)+3)
+	for key, value := range opts.Metadata {
+		meta[key] = value
+	}
+	// Consul has no Nacos group/cluster/ephemeral equivalents. Preserve these
+	// user-supplied knobs as service metadata instead of pretending they are
+	// native Consul fields.
+	if opts.GroupName != "" {
+		meta["group"] = opts.GroupName
+	}
+	if opts.Cluster != "" {
+		meta["cluster"] = opts.Cluster
+	}
+	if opts.Ephemeral != nil {
+		meta["ephemeral"] = strconv.FormatBool(*opts.Ephemeral)
+	}
+	return meta
+}
+
+func serviceInstanceFromHealth(entry *capi.ServiceEntry) cfgov.ServiceInstance {
+	if entry == nil || entry.Service == nil {
+		return cfgov.ServiceInstance{}
+	}
+	service := entry.Service
+	ip := service.Address
+	if ip == "" && entry.Node != nil {
+		ip = entry.Node.Address
+	}
+	meta := map[string]string(nil)
+	if len(service.Meta) > 0 {
+		meta = make(map[string]string, len(service.Meta))
+		for key, value := range service.Meta {
+			meta[key] = value
+		}
+	}
+	return cfgov.ServiceInstance{
+		IP:       ip,
+		Port:     service.DefaultPort(),
+		Healthy:  entry.Checks.AggregatedStatus() == capi.HealthPassing,
+		Enabled:  true,
+		Weight:   float64(service.Weights.Passing),
+		Metadata: meta,
+	}
+}
+
+func paginateNames(names []string, page, pageSize int) []string {
+	if page <= 0 || pageSize <= 0 {
+		return names
+	}
+	start := (page - 1) * pageSize
+	if start >= len(names) {
+		return nil
+	}
+	end := start + pageSize
+	if end > len(names) {
+		end = len(names)
+	}
+	return names[start:end]
 }
 
 func parseRevision(value string) (uint64, error) {

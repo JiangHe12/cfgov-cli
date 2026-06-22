@@ -122,7 +122,7 @@ func currentBackendCapabilities(f *cliFlags) cfgov.Capabilities {
 	case "consul":
 		return cfgov.Capabilities{
 			Backend:          "consul",
-			ResourceTypes:    []string{"config", "rule", "flag"},
+			ResourceTypes:    []string{"config", "rule", "flag", "service"},
 			Verbs:            []string{"get", "list", "diff", "validate", "pull", "listen", "push", "delete"},
 			SupportsCAS:      true,
 			SupportsRevision: true,

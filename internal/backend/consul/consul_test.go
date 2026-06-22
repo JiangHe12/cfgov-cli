@@ -213,8 +213,8 @@ func TestCapabilities(t *testing.T) {
 	if caps.Backend != "consul" || !caps.SupportsWatch || !caps.SupportsCAS || !caps.SupportsRevision || caps.SupportsHistory || !caps.SupportsRules || !caps.SupportsFlags {
 		t.Fatalf("Capabilities() = %#v", caps)
 	}
-	if !hasString(caps.ResourceTypes, "rule") || !hasString(caps.ResourceTypes, "flag") {
-		t.Fatalf("ResourceTypes = %#v, want rule and flag", caps.ResourceTypes)
+	if !hasString(caps.ResourceTypes, "rule") || !hasString(caps.ResourceTypes, "flag") || !hasString(caps.ResourceTypes, "service") {
+		t.Fatalf("ResourceTypes = %#v, want rule, flag, and service", caps.ResourceTypes)
 	}
 }
 
@@ -372,6 +372,201 @@ func TestPingUsesKeysWithoutFetchingValues(t *testing.T) {
 	}
 }
 
+func TestServiceRegistryListGetInstances(t *testing.T) {
+	t.Parallel()
+	catalog := &fakeCatalog{
+		services: map[string][]string{
+			"billing": {},
+			"orders":  {"v1"},
+			"bad/svc": {"skip"},
+		},
+		catalogServices: map[string][]*capi.CatalogService{
+			"orders": {
+				{
+					ServiceTags: []string{"v1", "blue"},
+				},
+				{
+					ServiceTags: []string{"v2"},
+				},
+			},
+		},
+	}
+	health := &fakeHealth{
+		entries: map[string][]*capi.ServiceEntry{
+			"orders": {
+				{
+					Node: &capi.Node{Address: "10.0.0.10"},
+					Service: &capi.AgentService{
+						Address: "10.0.0.11",
+						Port:    8080,
+						Meta:    map[string]string{"group": "DEFAULT_GROUP", "zone": "az1"},
+						Weights: capi.AgentWeights{Passing: 7, Warning: 1},
+					},
+					Checks: capi.HealthChecks{{CheckID: "service:orders", Status: capi.HealthPassing}},
+				},
+				{
+					Node: &capi.Node{Address: "10.0.0.12"},
+					Service: &capi.AgentService{
+						Port: 9090,
+						Meta: map[string]string{"group": "other"},
+					},
+					Checks: capi.HealthChecks{{CheckID: "service:orders", Status: capi.HealthCritical}},
+				},
+			},
+		},
+	}
+	backend := newServiceTestBackend(catalog, health, &fakeAgent{})
+
+	list, err := backend.ListServices(context.Background(), 1, 1)
+	if err != nil {
+		t.Fatalf("ListServices() error = %v", err)
+	}
+	if list.Count != 2 || len(list.Names) != 1 || list.Names[0] != "billing" {
+		t.Fatalf("ListServices() = %#v, want first of two valid sorted services", list)
+	}
+
+	item, err := backend.GetService(context.Background(), "orders")
+	if err != nil {
+		t.Fatalf("GetService() error = %v", err)
+	}
+	if item["name"] != "orders" || item["instances"] != 2 {
+		t.Fatalf("GetService() = %#v", item)
+	}
+
+	instances, err := backend.ListInstances(context.Background(), "orders", "DEFAULT_GROUP")
+	if err != nil {
+		t.Fatalf("ListInstances() error = %v", err)
+	}
+	if len(instances) != 1 {
+		t.Fatalf("ListInstances() len = %d, want 1: %#v", len(instances), instances)
+	}
+	got := instances[0]
+	if got.IP != "10.0.0.11" || got.Port != 8080 || !got.Healthy || !got.Enabled || got.Weight != 7 || got.Metadata["zone"] != "az1" {
+		t.Fatalf("ListInstances()[0] = %#v", got)
+	}
+}
+
+func TestServiceRegistryListInstancesUsesHealthChecks(t *testing.T) {
+	t.Parallel()
+	health := &fakeHealth{
+		entries: map[string][]*capi.ServiceEntry{
+			"orders": {
+				{
+					Node:    &capi.Node{Address: "10.0.0.10"},
+					Service: &capi.AgentService{Port: 8080},
+					Checks:  capi.HealthChecks{{CheckID: "service:orders", Status: capi.HealthCritical}},
+				},
+				{
+					Node:    &capi.Node{Address: "10.0.0.11"},
+					Service: &capi.AgentService{Port: 8081},
+					Checks:  capi.HealthChecks{{CheckID: "service:orders", Status: capi.HealthWarning}},
+				},
+				{
+					Node:    &capi.Node{Address: "10.0.0.12"},
+					Service: &capi.AgentService{Port: 8082},
+					Checks:  capi.HealthChecks{{CheckID: "service:orders", Status: capi.HealthPassing}},
+				},
+			},
+		},
+	}
+	backend := newServiceTestBackend(&fakeCatalog{}, health, &fakeAgent{})
+	instances, err := backend.ListInstances(context.Background(), "orders", "")
+	if err != nil {
+		t.Fatalf("ListInstances() error = %v", err)
+	}
+	if len(instances) != 3 {
+		t.Fatalf("ListInstances() len = %d, want 3: %#v", len(instances), instances)
+	}
+	if instances[0].Healthy || instances[1].Healthy || !instances[2].Healthy {
+		t.Fatalf("health flags = %v/%v/%v, want false/false/true", instances[0].Healthy, instances[1].Healthy, instances[2].Healthy)
+	}
+	if health.calls != 1 || health.lastService != "orders" || health.lastPassingOnly {
+		t.Fatalf("health call = calls:%d service:%q passingOnly:%v", health.calls, health.lastService, health.lastPassingOnly)
+	}
+}
+
+func TestServiceRegistryRegisterDeregister(t *testing.T) {
+	t.Parallel()
+	ephemeral := false
+	agent := &fakeAgent{}
+	backend := newServiceTestBackend(&fakeCatalog{}, &fakeHealth{}, agent)
+	opts := cfgov.InstanceOptions{
+		GroupName: "DEFAULT_GROUP",
+		Cluster:   "blue",
+		Weight:    3,
+		Ephemeral: &ephemeral,
+		Metadata:  map[string]string{"owner": "ops"},
+	}
+
+	if err := backend.RegisterInstance(context.Background(), "orders", "10.0.0.11", 8080, opts); err != nil {
+		t.Fatalf("RegisterInstance() error = %v", err)
+	}
+	if agent.registerCalls != 1 {
+		t.Fatalf("registerCalls = %d, want 1", agent.registerCalls)
+	}
+	reg := agent.lastRegister
+	if reg.ID != "orders-10.0.0.11-8080" || reg.Name != "orders" || reg.Address != "10.0.0.11" || reg.Port != 8080 {
+		t.Fatalf("registration = %#v", reg)
+	}
+	if reg.Meta["owner"] != "ops" || reg.Meta["group"] != "DEFAULT_GROUP" || reg.Meta["cluster"] != "blue" || reg.Meta["ephemeral"] != "false" {
+		t.Fatalf("registration meta = %#v", reg.Meta)
+	}
+	if reg.Weights == nil || reg.Weights.Passing != 3 || reg.Weights.Warning != 3 {
+		t.Fatalf("registration weights = %#v", reg.Weights)
+	}
+
+	if err := backend.DeregisterInstance(context.Background(), "orders", "10.0.0.11", 8080, opts); err != nil {
+		t.Fatalf("DeregisterInstance() error = %v", err)
+	}
+	if agent.deregisterCalls != 1 || agent.lastDeregister != "orders-10.0.0.11-8080" {
+		t.Fatalf("deregisterCalls=%d id=%q", agent.deregisterCalls, agent.lastDeregister)
+	}
+}
+
+func TestServiceRegistryRejectsUnsafeInputsBeforeRPC(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name string
+		call func(*Backend) error
+	}{
+		{name: "list instances service slash", call: func(b *Backend) error {
+			_, err := b.ListInstances(context.Background(), "bad/service", "")
+			return err
+		}},
+		{name: "get service control", call: func(b *Backend) error {
+			_, err := b.GetService(context.Background(), "bad\nservice")
+			return err
+		}},
+		{name: "register bad ip", call: func(b *Backend) error {
+			return b.RegisterInstance(context.Background(), "orders", "not-an-ip", 8080, cfgov.InstanceOptions{})
+		}},
+		{name: "register bad port", call: func(b *Backend) error {
+			return b.RegisterInstance(context.Background(), "orders", "10.0.0.11", 0, cfgov.InstanceOptions{})
+		}},
+		{name: "deregister service leading space", call: func(b *Backend) error {
+			return b.DeregisterInstance(context.Background(), " orders", "10.0.0.11", 8080, cfgov.InstanceOptions{})
+		}},
+		{name: "register metadata control", call: func(b *Backend) error {
+			return b.RegisterInstance(context.Background(), "orders", "10.0.0.11", 8080, cfgov.InstanceOptions{Metadata: map[string]string{"k": "bad\nvalue"}})
+		}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			catalog := &fakeCatalog{}
+			health := &fakeHealth{}
+			agent := &fakeAgent{}
+			backend := newServiceTestBackend(catalog, health, agent)
+			if err := tt.call(backend); err == nil {
+				t.Fatal("operation error = nil, want validation error")
+			}
+			if catalog.calls != 0 || health.calls != 0 || agent.calls != 0 {
+				t.Fatalf("RPC calls catalog=%d health=%d agent=%d, want 0", catalog.calls, health.calls, agent.calls)
+			}
+		})
+	}
+}
+
 func hasString(items []string, value string) bool {
 	for _, item := range items {
 		if item == value {
@@ -386,6 +581,14 @@ func newTestBackend(kv *fakeKV) *Backend {
 	if err != nil {
 		panic(err)
 	}
+	return backend
+}
+
+func newServiceTestBackend(catalog *fakeCatalog, health *fakeHealth, agent *fakeAgent) *Backend {
+	backend := newTestBackend(&fakeKV{})
+	backend.catalog = catalog
+	backend.health = health
+	backend.agent = agent
 	return backend
 }
 
@@ -453,6 +656,72 @@ func (f *fakeKV) Delete(string, *capi.WriteOptions) (*capi.WriteMeta, error) {
 func (f *fakeKV) DeleteCAS(*capi.KVPair, *capi.WriteOptions) (bool, *capi.WriteMeta, error) {
 	f.calls++
 	return f.deleteCASOK, &capi.WriteMeta{}, f.deleteCASErr
+}
+
+type fakeCatalog struct {
+	calls           int
+	services        map[string][]string
+	catalogServices map[string][]*capi.CatalogService
+	err             error
+	lastService     string
+}
+
+func (f *fakeCatalog) Services(*capi.QueryOptions) (map[string][]string, *capi.QueryMeta, error) {
+	f.calls++
+	if f.err != nil {
+		return nil, nil, f.err
+	}
+	return f.services, &capi.QueryMeta{}, nil
+}
+
+func (f *fakeCatalog) Service(service, tag string, _ *capi.QueryOptions) ([]*capi.CatalogService, *capi.QueryMeta, error) {
+	f.calls++
+	f.lastService = service
+	if f.err != nil {
+		return nil, nil, f.err
+	}
+	return f.catalogServices[service], &capi.QueryMeta{}, nil
+}
+
+type fakeHealth struct {
+	calls           int
+	entries         map[string][]*capi.ServiceEntry
+	err             error
+	lastService     string
+	lastPassingOnly bool
+}
+
+func (f *fakeHealth) Service(service, tag string, passingOnly bool, _ *capi.QueryOptions) ([]*capi.ServiceEntry, *capi.QueryMeta, error) {
+	f.calls++
+	f.lastService = service
+	f.lastPassingOnly = passingOnly
+	if f.err != nil {
+		return nil, nil, f.err
+	}
+	return f.entries[service], &capi.QueryMeta{}, nil
+}
+
+type fakeAgent struct {
+	calls           int
+	registerCalls   int
+	deregisterCalls int
+	err             error
+	lastRegister    *capi.AgentServiceRegistration
+	lastDeregister  string
+}
+
+func (f *fakeAgent) ServiceRegisterOpts(service *capi.AgentServiceRegistration, _ capi.ServiceRegisterOpts) error {
+	f.calls++
+	f.registerCalls++
+	f.lastRegister = service
+	return f.err
+}
+
+func (f *fakeAgent) ServiceDeregisterOpts(serviceID string, _ *capi.QueryOptions) error {
+	f.calls++
+	f.deregisterCalls++
+	f.lastDeregister = serviceID
+	return f.err
 }
 
 type ioDiscard struct{}
