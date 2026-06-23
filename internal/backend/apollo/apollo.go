@@ -41,6 +41,7 @@ const (
 	defaultNamespace     = "application"
 	defaultRuleNamespace = "SENTINEL"
 	defaultEnv           = "DEV"
+	apolloListPageSize   = 50
 )
 
 type Options struct {
@@ -78,6 +79,11 @@ type itemResponse struct {
 	Value                      string `json:"value"`
 	DataChangeLastModifiedTime string `json:"dataChangeLastModifiedTime"`
 	DataChangeCreatedTime      string `json:"dataChangeCreatedTime"`
+}
+
+type itemListResponse struct {
+	Content []itemResponse `json:"content"`
+	Total   int            `json:"total"`
 }
 
 type itemCreateRequest struct {
@@ -246,16 +252,9 @@ func (b *Backend) List(ctx context.Context, opts cfgov.ListOptions) ([]cfgov.Lis
 			return nil, err
 		}
 	}
-	body, status, err := b.do(ctx, http.MethodGet, b.itemsPath(ns), nil, nil)
+	items, err := b.listItems(ctx, ns)
 	if err != nil {
 		return nil, err
-	}
-	if err := b.checkStatus(status, body, "apollo list items failed"); err != nil {
-		return nil, err
-	}
-	var items []itemResponse
-	if err := json.Unmarshal(body, &items); err != nil {
-		return nil, apperrors.New(apperrors.CodeBackendError, "failed to decode apollo item list", err)
 	}
 	out := make([]cfgov.ListItem, 0, len(items))
 	for _, item := range items {
@@ -272,6 +271,41 @@ func (b *Backend) List(ctx context.Context, opts cfgov.ListOptions) ([]cfgov.Lis
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].Coordinate.Key < out[j].Coordinate.Key })
 	return out, nil
+}
+
+func (b *Backend) listItems(ctx context.Context, namespace string) ([]itemResponse, error) {
+	items := []itemResponse{}
+	for page := 0; ; page++ {
+		paged, err := b.listItemsPage(ctx, namespace, page)
+		if err != nil {
+			return nil, err
+		}
+		items = append(items, paged.Content...)
+		if paged.Total <= len(items) {
+			return items, nil
+		}
+		if len(paged.Content) == 0 {
+			return nil, apperrors.New(apperrors.CodeBackendError, "apollo item list pagination stalled", nil)
+		}
+	}
+}
+
+func (b *Backend) listItemsPage(ctx context.Context, namespace string, page int) (itemListResponse, error) {
+	params := url.Values{}
+	params.Set("page", fmt.Sprintf("%d", page))
+	params.Set("size", fmt.Sprintf("%d", apolloListPageSize))
+	body, status, err := b.do(ctx, http.MethodGet, b.itemsPath(namespace), params, nil)
+	if err != nil {
+		return itemListResponse{}, err
+	}
+	if err := b.checkStatus(status, body, "apollo list items failed"); err != nil {
+		return itemListResponse{}, err
+	}
+	var paged itemListResponse
+	if err := json.Unmarshal(body, &paged); err != nil {
+		return itemListResponse{}, apperrors.New(apperrors.CodeBackendError, "failed to decode apollo item list", err)
+	}
+	return paged, nil
 }
 
 func (b *Backend) History(context.Context, cfgov.Coordinate, cfgov.HistoryOptions) ([]cfgov.HistoryItem, int, error) {

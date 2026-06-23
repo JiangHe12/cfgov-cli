@@ -2,6 +2,9 @@ package apollo
 
 import (
 	"context"
+	"fmt"
+	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 
@@ -189,6 +192,92 @@ func TestFlagCoordinateRejectsInjectedApp(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestListDecodesApolloPagedItemsResponse(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/openapi/v1/envs/DEV/apps/cfgov/clusters/default/namespaces/application/items" {
+			t.Fatalf("path = %s", r.URL.Path)
+		}
+		if r.URL.Query().Get("page") != "0" || r.URL.Query().Get("size") != "50" {
+			t.Fatalf("query = %s, want page=0&size=50", r.URL.RawQuery)
+		}
+		_, _ = w.Write([]byte(`{
+			"page": 0,
+			"size": 50,
+			"total": 2,
+			"content": [
+				{"key": "beta", "value": "2"},
+				{"key": "alpha", "value": "1"}
+			]
+		}`))
+	}))
+	defer server.Close()
+	backend, err := New(Options{Server: server.URL, AppID: "cfgov"})
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+	items, err := backend.List(context.Background(), cfgov.ListOptions{Namespace: "application"})
+	if err != nil {
+		t.Fatalf("List() error = %v", err)
+	}
+	if len(items) != 2 || items[0].Coordinate.Key != "alpha" || items[1].Coordinate.Key != "beta" {
+		t.Fatalf("List() = %#v, want sorted Apollo paged content", items)
+	}
+}
+
+func TestListFetchesAllApolloItemPages(t *testing.T) {
+	requestedPages := []string{}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		page := r.URL.Query().Get("page")
+		if r.URL.Query().Get("size") != "50" {
+			t.Fatalf("query = %s, want size=50", r.URL.RawQuery)
+		}
+		requestedPages = append(requestedPages, page)
+		switch page {
+		case "0":
+			_, _ = w.Write([]byte(firstApolloItemsPage(50, 51)))
+		case "1":
+			_, _ = w.Write([]byte(`{
+				"page": 1,
+				"size": 50,
+				"total": 51,
+				"content": [{"key": "key-50", "value": "value-50"}]
+			}`))
+		default:
+			t.Fatalf("unexpected page %q", page)
+		}
+	}))
+	defer server.Close()
+	backend, err := New(Options{Server: server.URL, AppID: "cfgov"})
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+	items, err := backend.List(context.Background(), cfgov.ListOptions{Namespace: "application"})
+	if err != nil {
+		t.Fatalf("List() error = %v", err)
+	}
+	if len(items) != 51 {
+		t.Fatalf("List() len = %d, want 51", len(items))
+	}
+	if strings.Join(requestedPages, ",") != "0,1" {
+		t.Fatalf("requested pages = %#v, want 0,1", requestedPages)
+	}
+}
+
+func firstApolloItemsPage(count, total int) string {
+	var b strings.Builder
+	b.WriteString(`{"page":0,"size":50,"total":`)
+	_, _ = fmt.Fprintf(&b, "%d", total)
+	b.WriteString(`,"content":[`)
+	for i := range count {
+		if i > 0 {
+			b.WriteByte(',')
+		}
+		_, _ = fmt.Fprintf(&b, `{"key":"key-%02d","value":"value-%02d"}`, i, i)
+	}
+	b.WriteString(`]}`)
+	return b.String()
 }
 
 func hasString(items []string, value string) bool {
