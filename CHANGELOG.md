@@ -2,6 +2,11 @@
 
 All notable changes to this project are documented in this file.
 
+## v0.5.2
+
+### Fixed
+- `config list` against Apollo 2.x now returns items again. The Apollo adapter decoded the OpenAPI `/items` response as a flat JSON array, but Apollo 2.x returns a paged object (`{page, size, total, content}`), so every list failed with `failed to decode apollo item list`. `List` now decodes the paged envelope and pages through (`page`/`size`) until all `total` items are collected, with a guard that fails closed if pagination stalls. Single-item get/put/delete were unaffected. Verified against real Apollo 2.4.0.
+
 ## v0.5.1
 
 ### Fixed
