@@ -292,7 +292,7 @@ golangci-lint run --timeout=5m
 go vet -tags=integration ./...
 ```
 
-cfgov-cli 构建于共享治理引擎 [`opskit-core`](https://github.com/JiangHe12/opskit-core) 之上,是面向 AI 智能体的 **opskit** 治理型 CLI 家族的一员——同族还有 [`dbgov-cli`](https://www.npmjs.com/package/dbgov-cli)(数据库)与 `srvgov-cli`(远程服务器)。
+cfgov-cli 构建于共享治理引擎 [`opskit-core`](https://github.com/JiangHe12/opskit-core) 之上,是面向 AI 智能体的 **opskit** 治理型 CLI 家族的一员——同族还有 [`dbgov-cli`](https://www.npmjs.com/package/dbgov-cli)(数据库)、[`srvgov-cli`](https://www.npmjs.com/package/srvgov-cli)(远程服务器)与 [`mqgov-cli`](https://www.npmjs.com/package/mqgov-cli)(消息中间件)。
 
 ---
 

@@ -292,7 +292,7 @@ golangci-lint run --timeout=5m
 go vet -tags=integration ./...
 ```
 
-cfgov-cli is built on the shared [`opskit-core`](https://github.com/JiangHe12/opskit-core) governance engine and is part of the **opskit** family of governed CLIs for AI agents — alongside [`dbgov-cli`](https://www.npmjs.com/package/dbgov-cli) (databases) and `srvgov-cli` (remote servers).
+cfgov-cli is built on the shared [`opskit-core`](https://github.com/JiangHe12/opskit-core) governance engine and is part of the **opskit** family of governed CLIs for AI agents — alongside [`dbgov-cli`](https://www.npmjs.com/package/dbgov-cli) (databases), [`srvgov-cli`](https://www.npmjs.com/package/srvgov-cli) (remote servers), and [`mqgov-cli`](https://www.npmjs.com/package/mqgov-cli) (message brokers).
 
 ---
 
