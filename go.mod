@@ -3,7 +3,7 @@ module github.com/JiangHe12/cfgov-cli
 go 1.26.0
 
 require (
-	github.com/JiangHe12/opskit-core v1.1.1
+	github.com/JiangHe12/opskit-core v1.1.3
 	github.com/fatih/color v1.19.0
 	github.com/hashicorp/consul/api v1.34.3
 	github.com/mattn/go-isatty v0.0.22

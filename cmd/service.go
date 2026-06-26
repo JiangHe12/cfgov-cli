@@ -52,10 +52,12 @@ func serviceListCmd(f *cliFlags) *cobra.Command {
 			if err != nil {
 				return err
 			}
+			target := operationTargetFromContext(f, ctxMeta)
 			p := newPrinter(f)
 			if f.Output == "json" {
-				return p.JSONData("ServiceList", result)
+				return targetJSONData(f, "ServiceList", result, target, operationTargetRead)
 			}
+			printOperationTarget(p, target, operationTargetRead)
 			rows := make([][]string, 0, len(result.Names))
 			for _, name := range result.Names {
 				rows = append(rows, []string{name})
@@ -88,7 +90,7 @@ func serviceGetCmd(f *cliFlags) *cobra.Command {
 			if err != nil {
 				return err
 			}
-			return newPrinter(f).JSONData("ServiceItem", result)
+			return targetJSONData(f, "ServiceItem", result, operationTargetFromContext(f, ctxMeta), operationTargetRead)
 		},
 	}
 	cmd.Flags().StringVarP(&service, "service", "s", "", "Service name")
@@ -115,10 +117,12 @@ func serviceInstancesCmd(f *cliFlags) *cobra.Command {
 			if err != nil {
 				return err
 			}
+			target := operationTargetFromContext(f, ctxMeta)
 			p := newPrinter(f)
 			if f.Output == "json" {
-				return p.JSONList("ServiceInstanceList", items, len(items), 1, len(items), false)
+				return targetJSONList(f, "ServiceInstanceList", items, len(items), 1, len(items), target)
 			}
+			printOperationTarget(p, target, operationTargetRead)
 			rows := make([][]string, 0, len(items))
 			for _, item := range items {
 				rows = append(rows, []string{item.IP, strconv.Itoa(item.Port), fmt.Sprint(item.Healthy), fmt.Sprint(item.Enabled), fmt.Sprint(item.Weight)})
@@ -146,7 +150,7 @@ func serviceRegisterCmd(f *cliFlags) *cobra.Command {
 			}
 			if f.DryRun || f.Plan {
 				plan.DryRun = true
-				return newPrinter(f).JSONData("ChangePlan", plan)
+				return targetJSONData(f, "ChangePlan", plan, operationTargetFromContext(f, ctxMeta), operationTargetWrite)
 			}
 			if err := validateBackupPolicy(f, ctxMeta); err != nil {
 				return err
@@ -160,7 +164,7 @@ func serviceRegisterCmd(f *cliFlags) *cobra.Command {
 			if err != nil {
 				return err
 			}
-			return newPrinter(f).JSONData("ChangeResult", map[string]any{"resourceType": "service", "action": "register", "service": plan.Service, "ip": plan.IP, "port": plan.Port})
+			return targetJSONData(f, "ChangeResult", map[string]any{"resourceType": "service", "action": "register", "service": plan.Service, "ip": plan.IP, "port": plan.Port}, operationTargetFromContext(f, ctxMeta), operationTargetWrite)
 		},
 	}
 	opts.bind(cmd)
@@ -180,7 +184,7 @@ func serviceDeregisterCmd(f *cliFlags) *cobra.Command {
 			}
 			if f.DryRun || f.Plan {
 				plan.DryRun = true
-				return newPrinter(f).JSONData("ChangePlan", plan)
+				return targetJSONData(f, "ChangePlan", plan, operationTargetFromContext(f, ctxMeta), operationTargetWrite)
 			}
 			if err := validateBackupPolicy(f, ctxMeta); err != nil {
 				return err
@@ -193,7 +197,7 @@ func serviceDeregisterCmd(f *cliFlags) *cobra.Command {
 			if err != nil {
 				return err
 			}
-			return newPrinter(f).JSONData("ChangeResult", map[string]any{"resourceType": "service", "action": "deregister", "service": plan.Service, "ip": plan.IP, "port": plan.Port})
+			return targetJSONData(f, "ChangeResult", map[string]any{"resourceType": "service", "action": "deregister", "service": plan.Service, "ip": plan.IP, "port": plan.Port}, operationTargetFromContext(f, ctxMeta), operationTargetWrite)
 		},
 	}
 	opts.bind(cmd)

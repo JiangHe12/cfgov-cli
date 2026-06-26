@@ -71,18 +71,20 @@ func configGetCmd(f *cliFlags) *cobra.Command {
 			if err != nil {
 				return err
 			}
+			target := operationTargetFromBackend(f, backend)
 			p := newPrinter(f)
 			if f.Output == "plain" {
+				printOperationTarget(p, target, operationTargetRead)
 				p.Content(key, string(blob.Content))
 				return nil
 			}
-			return p.JSONData("ConfigItem", map[string]any{
+			return targetJSONData(f, "ConfigItem", map[string]any{
 				"namespace": coord.Namespace,
 				"key":       key,
 				"revision":  blob.Revision,
 				"sha256":    sha256Bytes(blob.Content),
 				"content":   string(blob.Content),
-			})
+			}, target, operationTargetRead)
 		},
 	}
 	cmd.Flags().StringVar(&key, "key", "", "Config key: dataId or group/dataId")
@@ -126,10 +128,12 @@ func configListCmd(f *cliFlags) *cobra.Command {
 			if err != nil {
 				return err
 			}
+			target := operationTargetFromBackend(f, backend)
 			p := newPrinter(f)
 			if f.Output == "json" {
-				return p.JSONList("ConfigList", items, len(items), normalizedPage(page), normalizedPageSize(pageSize, len(items)), false)
+				return targetJSONList(f, "ConfigList", items, len(items), normalizedPage(page), normalizedPageSize(pageSize, len(items)), target)
 			}
+			printOperationTarget(p, target, operationTargetRead)
 			rows := make([][]string, 0, len(items))
 			for _, item := range items {
 				rows = append(rows, []string{item.Coordinate.Namespace, item.Coordinate.Key, item.Revision, item.Type})
@@ -181,13 +185,14 @@ func configDiffCmd(f *cliFlags) *cobra.Command {
 			}
 			if f.Output == "plain" {
 				p := newPrinter(f)
+				printOperationTarget(p, operationTargetFromBackend(f, backend), operationTargetRead)
 				p.Info(summary.Summary)
 				for _, line := range summary.Lines {
 					p.Info(line)
 				}
 				return nil
 			}
-			return newPrinter(f).JSONData("DiffResult", summary)
+			return targetJSONData(f, "DiffResult", summary, operationTargetFromBackend(f, backend), operationTargetRead)
 		},
 	}
 	cmd.Flags().StringVar(&key, "key", "", "Config key: dataId or group/dataId")
@@ -262,13 +267,13 @@ func configPullCmd(f *cliFlags) *cobra.Command {
 			if err := writeLocalFile(file, blob.Content); err != nil {
 				return err
 			}
-			return newPrinter(f).JSONData("ConfigItem", map[string]any{
+			return targetJSONData(f, "ConfigItem", map[string]any{
 				"namespace": coord.Namespace,
 				"key":       key,
 				"file":      file,
 				"revision":  blob.Revision,
 				"sha256":    sha256Bytes(blob.Content),
-			})
+			}, operationTargetFromBackend(f, backend), operationTargetRead)
 		},
 	}
 	cmd.Flags().StringVar(&key, "key", "", "Config key: dataId or group/dataId")
@@ -307,10 +312,12 @@ func configHistoryCmd(f *cliFlags) *cobra.Command {
 			if err != nil {
 				return err
 			}
+			target := operationTargetFromBackend(f, backend)
 			p := newPrinter(f)
 			if f.Output == "json" {
-				return p.JSONList("HistoryList", items, total, normalizedPage(page), normalizedPageSize(pageSize, len(items)), false)
+				return targetJSONList(f, "HistoryList", items, total, normalizedPage(page), normalizedPageSize(pageSize, len(items)), target)
 			}
+			printOperationTarget(p, target, operationTargetRead)
 			rows := make([][]string, 0, len(items))
 			for _, item := range items {
 				rows = append(rows, []string{item.ID, item.OpType, item.ModifiedTime, item.Operator, item.DataID, item.Group})
@@ -384,10 +391,12 @@ func configListenCmd(f *cliFlags) *cobra.Command { //nolint:gocyclo // Cobra han
 				revision = event.Revision
 			}
 			if f.Output == "json" {
-				return newPrinter(f).JSONList("ConfigListenEvent", events, len(events), 1, len(events), false)
+				return targetJSONList(f, "ConfigListenEvent", events, len(events), 1, len(events), operationTargetFromBackend(f, backend))
 			}
+			p := newPrinter(f)
+			printOperationTarget(p, operationTargetFromBackend(f, backend), operationTargetRead)
 			for _, event := range events {
-				newPrinter(f).Info(fmt.Sprintf("changed %s revision=%s", event.Coordinate.Key, event.Revision))
+				p.Info(fmt.Sprintf("changed %s revision=%s", event.Coordinate.Key, event.Revision))
 			}
 			return nil
 		},
@@ -481,7 +490,7 @@ func configPushCmd(f *cliFlags) *cobra.Command { //nolint:gocyclo // Cobra handl
 					return err
 				}
 				appendAuditWarn(f, audit.EventType("config.write"), ctxMeta, audit.EventTarget{ResourceType: "config", Resource: key}, audit.StatusSuccess, plan.Impact, nil)
-				return newPrinter(f).JSONData("ChangePlan", plan)
+				return targetJSONData(f, "ChangePlan", plan, operationTargetFromBackend(f, backend), operationTargetWrite)
 			}
 			if err := validateBackupPolicy(f, ctxMeta); err != nil {
 				return err
@@ -509,14 +518,14 @@ func configPushCmd(f *cliFlags) *cobra.Command { //nolint:gocyclo // Cobra handl
 			if err != nil {
 				return err
 			}
-			return newPrinter(f).JSONData("ChangeResult", map[string]any{
+			return targetJSONData(f, "ChangeResult", map[string]any{
 				"resourceType": "config",
 				"namespace":    coord.Namespace,
 				"key":          key,
 				"revision":     blob.Revision,
 				"risk":         class.Risk,
 				"backup":       backupResult,
-			})
+			}, operationTargetFromBackend(f, backend), operationTargetWrite)
 		},
 	}
 	cmd.Flags().StringVar(&key, "key", "", "Config key: dataId or group/dataId")
@@ -550,7 +559,7 @@ func configDeleteCmd(f *cliFlags) *cobra.Command {
 			class := cfgclass.Classify(cfgclass.OperationDelete, nil, "")
 			if f.DryRun {
 				plan := map[string]any{"resourceType": "config", "key": key, "baseRisk": class.Risk, "impact": "delete one config blob"}
-				return newPrinter(f).JSONData("ChangePlan", plan)
+				return targetJSONData(f, "ChangePlan", plan, operationTargetFromBackend(f, backend), operationTargetWrite)
 			}
 			if err := validateBackupPolicy(f, ctxMeta); err != nil {
 				return err
@@ -572,7 +581,7 @@ func configDeleteCmd(f *cliFlags) *cobra.Command {
 			if err != nil {
 				return err
 			}
-			return newPrinter(f).JSONData("ChangeResult", map[string]any{"resourceType": "config", "namespace": coord.Namespace, "key": key, "deleted": true, "backup": backupResult})
+			return targetJSONData(f, "ChangeResult", map[string]any{"resourceType": "config", "namespace": coord.Namespace, "key": key, "deleted": true, "backup": backupResult}, operationTargetFromBackend(f, backend), operationTargetWrite)
 		},
 	}
 	cmd.Flags().StringVar(&key, "key", "", "Config key: dataId or group/dataId")
@@ -683,13 +692,13 @@ func finishIdempotentConfigPush(f *cliFlags, meta cfgovctx.Context, coord cfgov.
 	if isStrictNoChange(f) {
 		return true, apperrors.New(apperrors.CodeNoChangeRequired, "config already matches remote", nil)
 	}
-	return true, newPrinter(f).JSONData("ChangeResult", map[string]any{
+	return true, targetJSONData(f, "ChangeResult", map[string]any{
 		"resourceType": "config",
 		"namespace":    coord.Namespace,
 		"key":          coord.Key,
 		"skipped":      true,
 		"reason":       "idempotent",
-	})
+	}, operationTargetFromContext(f, meta), operationTargetWrite)
 }
 
 func appendReadAudit(f *cliFlags, ctxMeta cfgovctx.Context, key string, err error) {
@@ -991,13 +1000,14 @@ func configContextDiff(ctx context.Context, f *cliFlags, key, sourceContext, tar
 	)
 	if f.Output == "plain" {
 		p := newPrinter(f)
+		printOperationTarget(p, operationTargetFromDescription(targetContext, target.Describe()), operationTargetRead)
 		p.Info(result.Summary)
 		for _, line := range result.Lines {
 			p.Info(line)
 		}
 		return nil
 	}
-	return newPrinter(f).JSONData("DiffResult", result)
+	return targetJSONData(f, "DiffResult", result, operationTargetFromDescription(targetContext, target.Describe()), operationTargetRead)
 }
 
 func diffTargetFor(contextName string, desc cfgov.Description, key string, content []byte) *diffTarget {

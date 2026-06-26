@@ -81,10 +81,13 @@ func flagListCmd(f *cliFlags) *cobra.Command {
 			}
 			result.Flags = nil
 			items := []flagSetResult{result}
+			target := operationTargetFromBackend(f, backend)
 			if f.Output == "json" {
-				return newPrinter(f).JSONList("FlagList", items, len(items), 1, len(items), false)
+				return targetJSONList(f, "FlagList", items, len(items), 1, len(items), target)
 			}
-			newPrinter(f).Table([]string{"KEY", "REVISION", "SHA256", "COUNT"}, [][]string{{result.Key, result.Revision, result.SHA256, intString(result.Count)}})
+			p := newPrinter(f)
+			printOperationTarget(p, target, operationTargetRead)
+			p.Table([]string{"KEY", "REVISION", "SHA256", "COUNT"}, [][]string{{result.Key, result.Revision, result.SHA256, intString(result.Count)}})
 			return nil
 		},
 	}
@@ -112,7 +115,7 @@ func flagGetCmd(f *cliFlags) *cobra.Command {
 			if key != "" {
 				result = filterFlagSetByKey(result, key)
 			}
-			return newPrinter(f).JSONData("FlagSet", result)
+			return targetJSONData(f, "FlagSet", result, operationTargetFromBackend(f, backend), operationTargetRead)
 		},
 	}
 	cmd.Flags().StringVar(&app, "app", "", "Application name")
@@ -145,7 +148,7 @@ func flagExportCmd(f *cliFlags) *cobra.Command {
 				return err
 			}
 			result.Flags = nil
-			return newPrinter(f).JSONData("FlagExport", map[string]any{"app": app, "dir": dir, "items": []flagSetResult{result}})
+			return targetJSONData(f, "FlagExport", map[string]any{"app": app, "dir": dir, "items": []flagSetResult{result}}, operationTargetFromBackend(f, backend), operationTargetRead)
 		},
 	}
 	cmd.Flags().StringVar(&app, "app", "", "Application name")
@@ -183,7 +186,7 @@ func flagDiffCmd(f *cliFlags) *cobra.Command {
 				LocalCount:   local.Count,
 			}
 			result.Same = result.RemoteSHA256 == result.LocalSHA256 && result.RemoteCount == result.LocalCount
-			return newPrinter(f).JSONData("FlagDiff", result)
+			return targetJSONData(f, "FlagDiff", result, operationTargetFromBackend(f, backend), operationTargetRead)
 		},
 	}
 	cmd.Flags().StringVar(&app, "app", "", "Application name")

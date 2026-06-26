@@ -138,7 +138,7 @@ func configExportCmd(f *cliFlags) *cobra.Command {
 				return err
 			}
 			appendAuditWarn(f, audit.EventType("config.export"), ctxMeta, audit.EventTarget{ResourceType: "config"}, audit.StatusSuccess, archiveAuditSummary(archive.Items), nil)
-			return newPrinter(f).JSONData("ExportResult", map[string]any{"dir": dir, "count": len(archive.Items), "items": archive.Items})
+			return targetJSONData(f, "ExportResult", map[string]any{"dir": dir, "count": len(archive.Items), "items": archive.Items}, operationTargetFromBackend(f, backend), operationTargetRead)
 		},
 	}
 	cmd.Flags().StringVar(&dir, "dir", "", "Output directory")
@@ -185,7 +185,7 @@ func configImportCmd(f *cliFlags) *cobra.Command { //nolint:gocyclo // Cobra wir
 			}
 			if f.DryRun || f.Plan {
 				plan.DryRun = true
-				return newPrinter(f).JSONData("ChangePlan", plan)
+				return targetJSONData(f, "ChangePlan", plan, operationTargetFromBackend(f, backend), operationTargetWrite)
 			}
 			if len(plan.Conflict) > 0 {
 				return apperrors.New(apperrors.CodeConflict, fmt.Sprintf("%d config(s) conflict; use --overwrite or --skip-existing", len(plan.Conflict)), nil)
@@ -212,7 +212,7 @@ func configImportCmd(f *cliFlags) *cobra.Command { //nolint:gocyclo // Cobra wir
 				}
 				appendAuditWarn(f, audit.EventType("config.import"), ctxMeta, audit.EventTarget{ResourceType: "config", Resource: item.Key}, audit.StatusSuccess, itemAudit(item), nil)
 			}
-			return newPrinter(f).JSONData("ChangeResult", map[string]any{"action": "config import", "summary": plan.Summary})
+			return targetJSONData(f, "ChangeResult", map[string]any{"action": "config import", "summary": plan.Summary}, operationTargetFromBackend(f, backend), operationTargetWrite)
 		},
 	}
 	cmd.Flags().StringVar(&dir, "dir", "", "Input directory")
@@ -264,7 +264,7 @@ func configPromoteCmd(f *cliFlags) *cobra.Command { //nolint:gocyclo // Cobra wi
 			}
 			if f.DryRun || f.Plan || f.Diff {
 				plan.DryRun = f.DryRun || f.Plan
-				return newPrinter(f).JSONData("ChangePlan", plan)
+				return targetJSONData(f, "ChangePlan", plan, operationTargetFromBackend(f, target), operationTargetWrite)
 			}
 			if err := validateBackupPolicy(f, ctxMeta); err != nil {
 				return err
@@ -276,7 +276,7 @@ func configPromoteCmd(f *cliFlags) *cobra.Command { //nolint:gocyclo // Cobra wi
 			if err := applyUpserts(cmd.Context(), f, target, ctxMeta, localsForItems(locals, append(plan.Create, plan.Update...)), "config.promote"); err != nil {
 				return err
 			}
-			return newPrinter(f).JSONData("ChangeResult", map[string]any{"action": "config promote", "summary": plan.Summary})
+			return targetJSONData(f, "ChangeResult", map[string]any{"action": "config promote", "summary": plan.Summary}, operationTargetFromBackend(f, target), operationTargetWrite)
 		},
 	}
 	cmd.Flags().StringVar(&sourceContext, "source-context", "", "Source context")
@@ -329,7 +329,7 @@ func configRollbackCmd(f *cliFlags) *cobra.Command {
 			}
 			if f.DryRun || f.Plan || f.Diff {
 				plan.DryRun = f.DryRun || f.Plan
-				return newPrinter(f).JSONData("ChangePlan", plan)
+				return targetJSONData(f, "ChangePlan", plan, operationTargetFromBackend(f, backend), operationTargetWrite)
 			}
 			if err := validateBackupPolicy(f, ctxMeta); err != nil {
 				return err
@@ -337,7 +337,7 @@ func configRollbackCmd(f *cliFlags) *cobra.Command {
 			if err := applyUpserts(cmd.Context(), f, backend, ctxMeta, []localConfig{local}, "config.rollback"); err != nil {
 				return err
 			}
-			return newPrinter(f).JSONData("ChangeResult", map[string]any{"action": "config rollback", "summary": plan.Summary})
+			return targetJSONData(f, "ChangeResult", map[string]any{"action": "config rollback", "summary": plan.Summary}, operationTargetFromBackend(f, backend), operationTargetWrite)
 		},
 	}
 	cmd.Flags().StringVar(&key, "key", "", "Config key")
@@ -379,7 +379,7 @@ func configReconcileCmd(f *cliFlags) *cobra.Command {
 			}
 			if f.DryRun || f.Plan {
 				plan.DryRun = true
-				return newPrinter(f).JSONData("ChangePlan", plan)
+				return targetJSONData(f, "ChangePlan", plan, operationTargetFromBackend(f, backend), operationTargetWrite)
 			}
 			if len(plan.Conflict) > 0 {
 				return apperrors.New(apperrors.CodeConflict, fmt.Sprintf("%d config(s) conflict; use --overwrite", len(plan.Conflict)), nil)
@@ -409,7 +409,7 @@ func configReconcileCmd(f *cliFlags) *cobra.Command {
 				}
 				appendAuditWarn(f, audit.EventType("config.reconcile"), ctxMeta, audit.EventTarget{ResourceType: "config", Resource: item.Key}, audit.StatusSuccess, "delete sha256="+item.RemoteSHA256, nil)
 			}
-			return newPrinter(f).JSONData("ChangeResult", map[string]any{"action": "config reconcile", "summary": plan.Summary})
+			return targetJSONData(f, "ChangeResult", map[string]any{"action": "config reconcile", "summary": plan.Summary}, operationTargetFromBackend(f, backend), operationTargetWrite)
 		},
 	}
 	cmd.Flags().StringVar(&dir, "dir", "", "Input directory")

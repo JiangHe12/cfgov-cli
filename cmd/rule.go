@@ -96,14 +96,17 @@ func ruleListCmd(f *cliFlags) *cobra.Command {
 				items = append(items, result)
 			}
 			appendRuleAudit(f, ctxMeta, "list", app, "", audit.StatusSuccess, ruleAuditSummary(items), nil)
+			target := operationTargetFromBackend(f, backend)
 			if f.Output == "json" {
-				return newPrinter(f).JSONList("RuleList", items, len(items), 1, len(items), false)
+				return targetJSONList(f, "RuleList", items, len(items), 1, len(items), target)
 			}
 			rows := make([][]string, 0, len(items))
 			for _, item := range items {
 				rows = append(rows, []string{string(item.Type), item.Key, item.Revision, item.SHA256, intString(item.Count)})
 			}
-			newPrinter(f).Table([]string{"TYPE", "KEY", "REVISION", "SHA256", "COUNT"}, rows)
+			p := newPrinter(f)
+			printOperationTarget(p, target, operationTargetRead)
+			p.Table([]string{"TYPE", "KEY", "REVISION", "SHA256", "COUNT"}, rows)
 			return nil
 		},
 	}
@@ -136,7 +139,7 @@ func ruleGetCmd(f *cliFlags) *cobra.Command {
 			if resource != "" {
 				result = filterRuleSetByResource(result, resource)
 			}
-			return newPrinter(f).JSONData("RuleSet", result)
+			return targetJSONData(f, "RuleSet", result, operationTargetFromBackend(f, backend), operationTargetRead)
 		},
 	}
 	cmd.Flags().StringVar(&app, "app", "", "Sentinel app")
@@ -176,7 +179,7 @@ func ruleExportCmd(f *cliFlags) *cobra.Command {
 				items = append(items, result)
 			}
 			appendRuleAudit(f, ctxMeta, "export", app, "", audit.StatusSuccess, ruleAuditSummary(items), nil)
-			return newPrinter(f).JSONData("RuleExport", map[string]any{"app": app, "dir": dir, "items": items})
+			return targetJSONData(f, "RuleExport", map[string]any{"app": app, "dir": dir, "items": items}, operationTargetFromBackend(f, backend), operationTargetRead)
 		},
 	}
 	cmd.Flags().StringVar(&app, "app", "", "Sentinel app")
@@ -228,7 +231,7 @@ func ruleDiffCmd(f *cliFlags) *cobra.Command {
 				LocalCount:   local.Count,
 			}
 			result.Same = result.RemoteSHA256 == result.LocalSHA256 && result.RemoteCount == result.LocalCount
-			return newPrinter(f).JSONData("RuleDiff", result)
+			return targetJSONData(f, "RuleDiff", result, operationTargetFromBackend(f, backend), operationTargetRead)
 		},
 	}
 	cmd.Flags().StringVar(&app, "app", "", "Sentinel app")
@@ -285,7 +288,7 @@ func ruleDiffDir(ctx context.Context, f *cliFlags, app, typeName, dir string) er
 			break
 		}
 	}
-	return newPrinter(f).JSONData("RuleDiff", map[string]any{"app": app, "dir": dir, "same": same, "items": items})
+	return targetJSONData(f, "RuleDiff", map[string]any{"app": app, "dir": dir, "same": same, "items": items}, operationTargetFromBackend(f, backend), operationTargetRead)
 }
 
 func ruleValidateCmd(f *cliFlags) *cobra.Command {
