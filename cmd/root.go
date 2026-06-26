@@ -320,14 +320,9 @@ func buildBackend(f *cliFlags) (cfgov.Backend, cfgovctx.Context, error) {
 	if err := validateServerURL(server); err != nil {
 		return nil, cfgovctx.Context{}, err
 	}
-	username := firstNonEmpty(f.Username, os.Getenv("NACOS_USERNAME"), item.Username)
-	password := firstNonEmpty(f.Password, os.Getenv("NACOS_PASSWORD"))
-	if password == "" {
-		resolved, rerr := cfgovctx.ResolvePassword(commandContext(f), name, item)
-		if rerr != nil {
-			return nil, cfgovctx.Context{}, rerr
-		}
-		password = resolved
+	server, username, password, err := resolveNacosAuth(commandContext(f), f, name, item, server)
+	if err != nil {
+		return nil, cfgovctx.Context{}, err
 	}
 	namespace := firstNonEmpty(f.Namespace, os.Getenv("NACOS_NAMESPACE"), item.Namespace)
 	client := api.NewClient(server, username, password, namespace, f.Timeout)
@@ -445,6 +440,37 @@ func buildConsulBackend(f *cliFlags, contextName string, item cfgovctx.Context, 
 		Trace:         f.Debug || f.Trace,
 		TraceOut:      os.Stderr,
 	})
+}
+
+func resolveNacosAuth(ctx context.Context, f *cliFlags, contextName string, item cfgovctx.Context, server string) (string, string, string, error) {
+	cleanServer, urlUsername, urlPassword := nacosServerUserInfo(server)
+	username := firstNonEmpty(f.Username, os.Getenv("NACOS_USERNAME"), item.Username, urlUsername)
+	password := firstNonEmpty(f.Password, os.Getenv("NACOS_PASSWORD"))
+	if password == "" && item.Password != "" {
+		resolved, err := cfgovctx.ResolvePassword(ctx, contextName, item)
+		if err != nil {
+			return "", "", "", err
+		}
+		password = resolved
+	}
+	if password == "" && item.Password == "" {
+		password = os.Getenv("CFGOV_PASSWORD")
+	}
+	if password == "" {
+		password = urlPassword
+	}
+	return cleanServer, username, password, nil
+}
+
+func nacosServerUserInfo(server string) (string, string, string) {
+	parsed, err := url.Parse(server)
+	if err != nil || parsed.User == nil {
+		return server, "", ""
+	}
+	username := parsed.User.Username()
+	password, _ := parsed.User.Password()
+	parsed.User = nil
+	return parsed.String(), username, password
 }
 
 func resolvedContext(f *cliFlags) (cfgovctx.Context, string, error) {

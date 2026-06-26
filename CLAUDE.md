@@ -74,6 +74,11 @@ CGO_ENABLED=1 go test -race -count=1 ./...
   namespace/service/history/listen, etcd namespace/service/history, K8s
   namespace/service/history, Consul namespace/history → NotImplemented),
   never silently degrade. `service` is supported on Nacos and Consul only.
+- Nacos username/password credentials can come from `--username` plus
+  `CFGOV_PASSWORD` at command runtime when no credential is stored, or from
+  `ctx set --password` with a non-plain credstore backend. URL userinfo in
+  `--server` remains compatible, but explicit `--password` or `CFGOV_PASSWORD`
+  takes precedence.
 
 ## Code Conventions
 

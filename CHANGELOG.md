@@ -2,6 +2,21 @@
 
 All notable changes to this project are documented in this file.
 
+## v0.5.3
+
+### Added
+- `ctx set --password` to store a Nacos password in a non-plain credstore backend
+  (`keychain` / `encrypted-file`), matching the family credential posture.
+
+### Fixed
+- Nacos username/password can now be supplied without embedding credentials in
+  the `--server` URL. `--username` plus `CFGOV_PASSWORD` (honored at command
+  runtime when no credential is stored, for the current context and `--context`
+  overrides), a stored credstore credential, or `--password` all work; precedence
+  is explicit `--password`/`NACOS_PASSWORD` > stored credential > `CFGOV_PASSWORD`
+  > `--server` URL userinfo. URL userinfo stays compatible (parsed out and not
+  left on the URL). Non-Nacos backends are unchanged. Verified against real Nacos.
+
 ## v0.5.2
 
 ### Fixed
