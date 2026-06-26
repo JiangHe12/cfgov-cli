@@ -22,7 +22,7 @@ Use `cfgov` for governed configuration operations across Nacos, Apollo, etcd, Ku
 Create and select contexts with:
 
 ```bash
-cfgov ctx set <name> --backend nacos --server <url> --namespace <namespace> [--protected]
+cfgov ctx set <name> --backend nacos --server <url> --namespace <namespace> [--username <user>] [--protected]
 cfgov ctx set <name> --backend apollo --server <url> --apollo-app-id <appId> --apollo-env <env> --apollo-cluster <cluster> --apollo-namespace <namespace> [--apollo-rule-namespace SENTINEL] [--protected]
 cfgov ctx set <name> --backend etcd --server <host:port,host:port> [--etcd-key-prefix <prefix>] [--etcd-rule-namespace SENTINEL] [--namespace <namespace>] [--etcd-ca-cert <path>] [--etcd-client-cert <path>] [--etcd-client-key <path>] [--protected]
 cfgov ctx set <name> --backend k8s [--k8s-kubeconfig <path>] [--k8s-context <ctx>] --namespace <k8s-namespace> [--protected]
@@ -33,6 +33,8 @@ cfgov ctx current -o json
 cfgov ctx role set <name> --target-operator <operator> --role reader|writer|admin
 cfgov ctx role list <name> -o json
 ```
+
+For authenticated Nacos, prefer `--username <user>` in the context and `CFGOV_PASSWORD` at command runtime when no credential is stored. To persist a password, use `ctx set --password <password> --credential-backend keychain|encrypted-file`. `--server http://user:pass@host:8848` remains supported, but explicit `--password` or `CFGOV_PASSWORD` takes precedence over URL userinfo.
 
 `--backend` can temporarily override the current context for one command. Nacos supports config, rule, feature flag, namespace, service, config history, and config listen. Apollo supports config, rule, and feature-flag storage; namespace/service management, history, and listen are not supported and fail closed. etcd supports config, rule, and feature-flag storage plus native watch (`config listen`); history, namespace, and service are not supported. Kubernetes (ConfigMap/Secret) supports config, rule, and feature-flag storage plus object-granular watch (`config listen`) — config keys are `<kind>/<name>/<dataKey>` where `<kind>` is `configmap` or `secret`, rule sets use ConfigMap keys `configmap/{app}-{type}-rules/rules.json` in the context `--namespace`, and namespace/service plus history are not supported and fail closed. Consul supports config, rule, and feature-flag storage plus service registry and watch via blocking query (`config listen`); namespace and history are not supported and fail closed. Always check `cfgov capabilities -o json` for the bound backend.
 

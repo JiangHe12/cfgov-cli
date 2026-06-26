@@ -171,6 +171,7 @@ func ctxSetCmd(f *cliFlags) *cobra.Command { //nolint:gocyclo // Cobra wiring fo
 	}
 	cmd.Flags().BoolVar(&protected, "protected", false, "Mark context as protected")
 	cmd.Flags().StringVar(&credentialBackend, "credential-backend", "plain-yaml", "Credential backend")
+	cmd.Flags().StringVar(&f.Password, "password", "", "Password to store in credstore; prefer CFGOV_PASSWORD for non-interactive runs")
 	cmd.Flags().StringVar(&env, "env", "", "Environment label")
 	cmd.Flags().StringVar(&ticketPattern, "ticket-pattern", "", "Regex pattern for ticket validation")
 	cmd.Flags().StringVar(&rolesSource, "roles-source", "", "RBAC roles source: inline | url")

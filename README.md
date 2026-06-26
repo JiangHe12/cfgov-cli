@@ -82,6 +82,7 @@ cfgov doctor          # checks context, backend reachability, and audit-log writ
 # 1. Point cfgov at your config center (stored as a reusable "context")
 cfgov ctx set dev --backend nacos --server http://127.0.0.1:8848 --namespace public
 cfgov ctx use dev
+# For authenticated Nacos, add --username <user> and set CFGOV_PASSWORD when running commands.
 
 # 2. Read something — reads are always free (R0), no flags needed
 cfgov config get --key application.yaml -o json
@@ -229,7 +230,7 @@ cfgov audit verify [--strict] -o json
 cfgov audit prune  (--before <…> | --keep-last <n>) [--confirm]                       # dry-run unless --confirm
 
 # Contexts
-cfgov ctx set <name> --backend nacos  --server <url> [--namespace <ns>] [--protected]
+cfgov ctx set <name> --backend nacos  --server <url> [--namespace <ns>] [--username <u>] [--protected]
 cfgov ctx set <name> --backend apollo --server <url> --apollo-app-id <id> --apollo-env <env> \
                      --apollo-cluster <c> --apollo-namespace <ns>
 cfgov ctx set <name> --backend etcd   --server <host:port,host:port> [--etcd-key-prefix <p>] \
@@ -241,6 +242,9 @@ cfgov ctx set <name> --backend consul --server <host:port> [--consul-key-prefix 
                      [--consul-ca-cert <f>] [--consul-client-cert <f>] [--consul-client-key <f>]
 cfgov ctx use|list|current|delete|export|import|test
 cfgov ctx role set|unset|list <context>
+#   Nacos password: prefer CFGOV_PASSWORD for non-interactive runs when no credential is stored.
+#   To persist a password, use ctx set --password <pw> with --credential-backend keychain|encrypted-file.
+#   --server URL userinfo remains supported; explicit --password/CFGOV_PASSWORD takes precedence.
 
 # Diagnostics & ecosystem
 cfgov doctor -o json            # read-only health check (redacted output)

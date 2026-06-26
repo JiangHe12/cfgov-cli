@@ -782,9 +782,13 @@ func buildBackendFromNamedContext(parent context.Context, f *cliFlags, name stri
 			TraceOut:   os.Stderr,
 		})
 	}
-	client := api.NewClient(item.Server, item.Username, password, item.Namespace, f.Timeout)
+	server, username, password, err := resolveNacosAuth(parent, f, name, item, item.Server)
+	if err != nil {
+		return nil, err
+	}
+	client := api.NewClient(server, username, password, item.Namespace, f.Timeout)
 	client.SetTrace(api.TraceOptions{Debug: f.Debug, Trace: f.Trace, BodyLimit: f.TraceBodyLim, Writer: os.Stderr})
-	return nacos.New(client, item.Server), nil
+	return nacos.New(client, server), nil
 }
 
 func writeManifest(dir string, archive configArchive) error {
