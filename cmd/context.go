@@ -115,8 +115,8 @@ func ctxSetCmd(f *cliFlags) *cobra.Command { //nolint:gocyclo // Cobra wiring fo
 				}
 			}
 			credential := firstNonEmpty(f.Password, apolloToken, apolloSecret)
-			if credential != "" && (credentialBackend == "" || credentialBackend == "plain-yaml") {
-				return apperrors.New(apperrors.CodeUsageError, "credentials must use a non-plain credential backend", nil)
+			if err := credstore.RequireSecureBackend(credentialBackend, credential != ""); err != nil {
+				return err
 			}
 			item := cfgovctx.Context{
 				Base: corectx.Base{
