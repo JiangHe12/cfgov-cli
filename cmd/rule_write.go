@@ -374,7 +374,7 @@ func applyRuleWrites(ctx context.Context, f *cliFlags, backend cfgov.Backend, ct
 	plan.DryRun = f.DryRun || f.Plan
 	if plan.DryRun {
 		appendRuleAudit(f, ctxMeta, plan.Action, plan.App, plan.Type, audit.StatusSuccess, ruleWriteAudit(plan), nil)
-		return newPrinter(f).JSONData("ChangePlan", plan)
+		return targetJSONData(f, "ChangePlan", plan, operationTargetFromBackend(f, backend), operationTargetWrite)
 	}
 	if err := validateBackupPolicy(f, ctxMeta); err != nil {
 		return err
@@ -414,7 +414,7 @@ func applyRuleWrites(ctx context.Context, f *cliFlags, backend cfgov.Backend, ct
 		}
 	}
 	appendRuleAudit(f, ctxMeta, plan.Action, plan.App, plan.Type, audit.StatusSuccess, ruleWriteAudit(plan), nil)
-	return newPrinter(f).JSONData("ChangeResult", map[string]any{"resourceType": "rule", "action": plan.Action, "app": plan.App, "summary": plan.Summary, "items": plan.Items, "backup": backups})
+	return targetJSONData(f, "ChangeResult", map[string]any{"resourceType": "rule", "action": plan.Action, "app": plan.App, "summary": plan.Summary, "items": plan.Items, "backup": backups}, operationTargetFromBackend(f, backend), operationTargetWrite)
 }
 
 func validateMandatoryRuleBackup(f *cliFlags, writes []plannedRuleWrite) error {

@@ -341,7 +341,7 @@ func applyFlagWrites(ctx context.Context, f *cliFlags, backend cfgov.Backend, ct
 	plan.DryRun = f.DryRun || f.Plan
 	if plan.DryRun {
 		appendFlagAudit(f, ctxMeta, plan.Action, plan.App, audit.StatusSuccess, flagWriteAudit(plan), nil)
-		return newPrinter(f).JSONData("ChangePlan", plan)
+		return targetJSONData(f, "ChangePlan", plan, operationTargetFromBackend(f, backend), operationTargetWrite)
 	}
 	if err := validateBackupPolicy(f, ctxMeta); err != nil {
 		return err
@@ -380,7 +380,7 @@ func applyFlagWrites(ctx context.Context, f *cliFlags, backend cfgov.Backend, ct
 		}
 	}
 	appendFlagAudit(f, ctxMeta, plan.Action, plan.App, audit.StatusSuccess, flagWriteAudit(plan), nil)
-	return newPrinter(f).JSONData("ChangeResult", map[string]any{"resourceType": "flag", "action": plan.Action, "app": plan.App, "summary": plan.Summary, "items": plan.Items, "backup": backups})
+	return targetJSONData(f, "ChangeResult", map[string]any{"resourceType": "flag", "action": plan.Action, "app": plan.App, "summary": plan.Summary, "items": plan.Items, "backup": backups}, operationTargetFromBackend(f, backend), operationTargetWrite)
 }
 
 func validateMandatoryFlagBackup(f *cliFlags, writes []plannedFlagWrite) error {

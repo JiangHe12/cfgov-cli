@@ -53,10 +53,12 @@ func namespaceListCmd(f *cliFlags) *cobra.Command {
 			if err != nil {
 				return err
 			}
+			target := operationTargetFromContext(f, ctxMeta)
 			p := newPrinter(f)
 			if f.Output == "json" {
-				return p.JSONList("NamespaceList", items, len(items), 1, len(items), false)
+				return targetJSONList(f, "NamespaceList", items, len(items), 1, len(items), target)
 			}
+			printOperationTarget(p, target, operationTargetRead)
 			rows := make([][]string, 0, len(items))
 			for _, item := range items {
 				rows = append(rows, []string{item.ID, item.Name, fmt.Sprint(item.ConfigCount), item.Description})
@@ -100,7 +102,7 @@ func namespaceMutateCmd(
 			}
 			plan := namespacePlan{ResourceType: "namespace", Action: action, ID: id, Name: name, Description: desc, Risk: safety.R1, Impact: action + " one namespace", DryRun: f.DryRun || f.Plan}
 			if f.DryRun || f.Plan {
-				return newPrinter(f).JSONData("ChangePlan", plan)
+				return targetJSONData(f, "ChangePlan", plan, operationTargetFromContext(f, ctxMeta), operationTargetWrite)
 			}
 			if err := authorize(f, safety.R1, ctxMeta, ""); err != nil {
 				return err
@@ -110,7 +112,7 @@ func namespaceMutateCmd(
 			if err != nil {
 				return err
 			}
-			return newPrinter(f).JSONData("ChangeResult", map[string]any{"resourceType": "namespace", "action": action, "id": id, "name": name})
+			return targetJSONData(f, "ChangeResult", map[string]any{"resourceType": "namespace", "action": action, "id": id, "name": name}, operationTargetFromContext(f, ctxMeta), operationTargetWrite)
 		},
 	}
 	cmd.Flags().StringVar(&id, "id", "", "Namespace id")
@@ -144,7 +146,7 @@ func namespaceDeleteCmd(f *cliFlags) *cobra.Command {
 			impact := fmt.Sprintf("delete namespace %s; configCount=%d", id, count)
 			plan := namespacePlan{ResourceType: "namespace", Action: "delete", ID: id, Risk: safety.R2, ConfigCount: count, Impact: impact, DryRun: f.DryRun || f.Plan}
 			if f.DryRun || f.Plan {
-				return newPrinter(f).JSONData("ChangePlan", plan)
+				return targetJSONData(f, "ChangePlan", plan, operationTargetFromContext(f, ctxMeta), operationTargetWrite)
 			}
 			if err := authorizeNamespaceDelete(f, ctxMeta); err != nil {
 				return err
@@ -157,7 +159,7 @@ func namespaceDeleteCmd(f *cliFlags) *cobra.Command {
 			if err != nil {
 				return err
 			}
-			return newPrinter(f).JSONData("ChangeResult", map[string]any{"resourceType": "namespace", "action": "delete", "id": id, "configCount": count})
+			return targetJSONData(f, "ChangeResult", map[string]any{"resourceType": "namespace", "action": "delete", "id": id, "configCount": count}, operationTargetFromContext(f, ctxMeta), operationTargetWrite)
 		},
 	}
 	cmd.Flags().StringVar(&id, "id", "", "Namespace id")
