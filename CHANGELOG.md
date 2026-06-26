@@ -2,6 +2,11 @@
 
 All notable changes to this project are documented in this file.
 
+## v0.5.4
+
+### Changed
+- Reuse opskit-core's shared secure-backend guard for stored credentials; behavior is unchanged.
+
 ## v0.5.3
 
 ### Added
