@@ -63,7 +63,7 @@ npm install -g cfgov-cli
 
 - **直接下载**——从 [Releases 页面](https://github.com/JiangHe12/cfgov-cli/releases)取对应平台二进制,用(cosign 签名的)`checksums.txt` 校验,放进 `PATH` 并重命名为 `cfgov`。
 - **从源码**——`go install github.com/JiangHe12/cfgov-cli@latest`(Go 1.26+)。
-- **镜像 / 内网隔离**——设置 `CFGOV_CLI_DOWNLOAD_MIRROR=<base-url>`,从你自己的镜像拉二进制。
+- **镜像 / 内网隔离**——设置 `CFGOV_DOWNLOAD_MIRROR=<base-url>`,从你自己的镜像拉二进制。旧的 `CFGOV_CLI_DOWNLOAD_MIRROR` 仍兼容但已 deprecated。
 
 验证安装:
 

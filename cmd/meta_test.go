@@ -56,6 +56,7 @@ func TestCapabilitiesJSONFamilySchema(t *testing.T) {
 			OutputFormats []string        `json:"outputFormats"`
 			ErrorCodes    []string        `json:"errorCodes"`
 			ExitCodes     []int           `json:"exitCodes"`
+			Environment   []string        `json:"environmentVariables"`
 		} `json:"domain"`
 	}
 	if err := json.Unmarshal(payload, &env); err != nil {
@@ -75,6 +76,17 @@ func TestCapabilitiesJSONFamilySchema(t *testing.T) {
 	}
 	if strings.Join(env.Domain.OutputFormats, ",") != "table,json,plain" || len(env.Domain.ErrorCodes) == 0 || len(env.Domain.ExitCodes) == 0 {
 		t.Fatalf("domain metadata incomplete: %+v", env.Domain)
+	}
+	environment := "," + strings.Join(env.Domain.Environment, ",") + ","
+	for _, name := range []string{"CFGOV_AUDIT_PRIVATE_KEY", "CFGOV_CREDENTIAL_PASSPHRASE", "CFGOV_OPERATOR"} {
+		if !strings.Contains(environment, ","+name+",") {
+			t.Fatalf("environmentVariables missing %s: %#v", name, env.Domain.Environment)
+		}
+	}
+	for _, name := range []string{"CFGOV_CLI_AUDIT_PRIVATE_KEY", "CFGOV_CLI_CREDENTIAL_PASSPHRASE", "CFGOV_CLI_OPERATOR"} {
+		if strings.Contains(environment, ","+name+",") {
+			t.Fatalf("environmentVariables should not advertise deprecated %s: %#v", name, env.Domain.Environment)
+		}
 	}
 }
 

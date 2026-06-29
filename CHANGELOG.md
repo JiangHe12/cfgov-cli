@@ -2,6 +2,11 @@
 
 All notable changes to this project are documented in this file.
 
+## v0.5.11
+
+### Changed
+- CLI-owned environment variables now prefer the family-standard `CFGOV_*` names: `CFGOV_AUDIT_PRIVATE_KEY`, `CFGOV_CREDENTIAL_PASSPHRASE`, `CFGOV_OPERATOR`, `CFGOV_DOWNLOAD_MIRROR`, and `CFGOV_SKIP_VERIFY`. Deprecated `CFGOV_CLI_*` aliases remain supported for compatibility.
+
 ## v0.5.10
 
 ### Changed

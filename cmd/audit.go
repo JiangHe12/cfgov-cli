@@ -110,7 +110,7 @@ func runAuditQuery(f *cliFlags, opts auditQueryOptions) error {
 		Status:      opts.status,
 		Limit:       opts.limit,
 		Reverse:     opts.reverse,
-		PrivateKey:  os.Getenv("CFGOV_CLI_AUDIT_PRIVATE_KEY"),
+		PrivateKey:  envWithDeprecatedAlias(cfgovAuditPrivateKeyEnv, deprecatedCfgovAuditPrivateKeyEnv),
 	}
 	now := time.Now().UTC()
 	if opts.since != "" {
@@ -252,7 +252,7 @@ func auditVerifyCmd(f *cliFlags) *cobra.Command {
 	cmd.Flags().BoolVar(&opts.repair, "repair", false, "Quarantine malformed entries and rewrite audit log")
 	cmd.Flags().BoolVar(&opts.confirm, "confirm", false, "Confirm audit repair")
 	cmd.Flags().BoolVar(&opts.yes, "yes", false, "Alias for --confirm")
-	cmd.Flags().BoolVar(&opts.decrypt, "decrypt", false, "Decrypt audit entries using CFGOV_CLI_AUDIT_PRIVATE_KEY")
+	cmd.Flags().BoolVar(&opts.decrypt, "decrypt", false, "Decrypt audit entries using CFGOV_AUDIT_PRIVATE_KEY")
 	return cmd
 }
 
@@ -267,7 +267,7 @@ func runAuditVerify(f *cliFlags, opts auditVerifyOptions) error {
 	}
 	privateKey := ""
 	if opts.decrypt {
-		privateKey = os.Getenv("CFGOV_CLI_AUDIT_PRIVATE_KEY")
+		privateKey = envWithDeprecatedAlias(cfgovAuditPrivateKeyEnv, deprecatedCfgovAuditPrivateKeyEnv)
 	}
 	result, err := audit.Verify(path, audit.VerifyOptions{
 		Decrypt:    opts.decrypt,

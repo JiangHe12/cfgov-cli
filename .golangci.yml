@@ -1,6 +1,6 @@
 version: "2"
 
-# golangci-lint configuration for nacos-cli
+# golangci-lint configuration for cfgov-cli
 # Pinned version: v2.12.2 (also pinned in .github/workflows/ci.yml lint job)
 
 run:

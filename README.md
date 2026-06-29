@@ -63,7 +63,7 @@ This installs a tiny launcher; on first run it downloads the right pre-built bin
 
 - **Direct download** — grab the binary for your platform from the [Releases page](https://github.com/JiangHe12/cfgov-cli/releases), verify it against `checksums.txt` (cosign-signed), put it on your `PATH`, and rename it to `cfgov`.
 - **From source** — `go install github.com/JiangHe12/cfgov-cli@latest` (Go 1.26+).
-- **Mirror / air-gapped** — set `CFGOV_CLI_DOWNLOAD_MIRROR=<base-url>` to fetch the binary from your own mirror.
+- **Mirror / air-gapped** — set `CFGOV_DOWNLOAD_MIRROR=<base-url>` to fetch the binary from your own mirror. Deprecated `CFGOV_CLI_DOWNLOAD_MIRROR` is still accepted.
 
 Verify the install:
 

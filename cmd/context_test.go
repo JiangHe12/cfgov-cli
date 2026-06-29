@@ -52,7 +52,7 @@ func TestCtxSetRejectsPlainCredential(t *testing.T) {
 
 func TestCtxSetStoresPasswordCredentialReference(t *testing.T) {
 	configPath := filepath.Join(t.TempDir(), "config.yaml")
-	t.Setenv("CFGOV_CLI_CREDENTIAL_PASSPHRASE", "test-passphrase")
+	t.Setenv("CFGOV_CREDENTIAL_PASSPHRASE", "test-passphrase")
 
 	out, err := runCommandForTest(t,
 		"--config", configPath,

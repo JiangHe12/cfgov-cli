@@ -31,8 +31,12 @@ function isAllowedRedirectHost(urlStr) {
   }
 }
 
+function envWithDeprecatedAlias(primary, deprecatedName) {
+  return process.env[primary] || process.env[deprecatedName] || '';
+}
+
 function applyMirror(canonicalUrl) {
-  const mirror = process.env.CFGOV_CLI_DOWNLOAD_MIRROR;
+  const mirror = envWithDeprecatedAlias('CFGOV_DOWNLOAD_MIRROR', 'CFGOV_CLI_DOWNLOAD_MIRROR');
   if (!mirror) return canonicalUrl;
   return mirror.replace(/\/+$/, '') + '/' + canonicalUrl;
 }
@@ -170,8 +174,8 @@ function parseChecksums(text) {
 }
 
 async function verifyDownloadedBinary(binaryPath, binaryName) {
-  if (process.env.CFGOV_CLI_SKIP_VERIFY === '1') {
-    console.log('Verification skipped (CFGOV_CLI_SKIP_VERIFY=1)');
+  if (envWithDeprecatedAlias('CFGOV_SKIP_VERIFY', 'CFGOV_CLI_SKIP_VERIFY') === '1') {
+    console.log('Verification skipped (CFGOV_SKIP_VERIFY=1)');
     return;
   }
   const checksumsUrl = getChecksumsUrl();
@@ -181,13 +185,13 @@ async function verifyDownloadedBinary(binaryPath, binaryName) {
   } catch (err) {
     throw new Error(
       `Could not fetch canonical checksums.txt from ${checksumsUrl}: ${err.message}. ` +
-      'Set CFGOV_CLI_SKIP_VERIFY=1 to install without checksum verification.'
+      'Set CFGOV_SKIP_VERIFY=1 to install without checksum verification.'
     );
   }
   if (!checksums[binaryName]) {
     throw new Error(
       `No checksum found for ${binaryName}. ` +
-      'Set CFGOV_CLI_SKIP_VERIFY=1 to install without checksum verification.'
+      'Set CFGOV_SKIP_VERIFY=1 to install without checksum verification.'
     );
   }
   const actual = await sha256File(binaryPath);

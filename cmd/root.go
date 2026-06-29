@@ -111,8 +111,15 @@ func init() {
 	cfgovctx.Configure()
 	apperrors.Configure(apperrors.Options{APIVersion: apiVersion})
 	printer.Configure(printer.Options{APIVersion: apiVersion, JSONEnvelopeByDefault: true})
-	audit.Configure(audit.Config{APIVersion: auditAPIVersion, ConfigDirName: ".cfgov-cli", PrivateKeyEnvVar: "CFGOV_CLI_AUDIT_PRIVATE_KEY"})
-	safety.Configure(safety.Config{Prompt: "Proceed with cfgov write? [y/N] ", OperatorEnvVar: "CFGOV_CLI_OPERATOR"})
+	audit.Configure(audit.Config{
+		APIVersion:       auditAPIVersion,
+		ConfigDirName:    ".cfgov-cli",
+		PrivateKeyEnvVar: configureEnvWithDeprecatedAlias(cfgovAuditPrivateKeyEnv, deprecatedCfgovAuditPrivateKeyEnv),
+	})
+	safety.Configure(safety.Config{
+		Prompt:         "Proceed with cfgov write? [y/N] ",
+		OperatorEnvVar: configureEnvWithDeprecatedAlias(cfgovOperatorEnv, deprecatedCfgovOperatorEnv),
+	})
 	telemetry.Configure(telemetry.Config{ServiceName: "cfgov-cli", AttributePrefix: "cfgov", MetricNamePrefix: "cfgov", DomainAttributeName: "resource"})
 }
 
@@ -630,7 +637,7 @@ func currentOperator(f *cliFlags) string {
 	if f.Operator != "" {
 		return f.Operator
 	}
-	if env := os.Getenv("CFGOV_CLI_OPERATOR"); env != "" {
+	if env := envWithDeprecatedAlias(cfgovOperatorEnv, deprecatedCfgovOperatorEnv); env != "" {
 		return env
 	}
 	if u, err := osuser.Current(); err == nil && u != nil && u.Username != "" {
