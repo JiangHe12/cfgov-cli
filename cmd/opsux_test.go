@@ -15,16 +15,16 @@ import (
 func TestCapabilitiesDoNotDeclareBackupCleanRiskContract(t *testing.T) {
 	t.Parallel()
 	data := buildCapabilities(newDefaultFlags(), currentBackendCapabilities(&cliFlags{Backend: "nacos"}))
-	if strings.Join(data.Supported.OutputFormats, ",") != "table,json,plain" {
-		t.Fatalf("outputFormats = %#v", data.Supported.OutputFormats)
+	if strings.Join(data.Domain.OutputFormats, ",") != "table,json,plain" {
+		t.Fatalf("outputFormats = %#v", data.Domain.OutputFormats)
 	}
-	for _, item := range data.Supported.Commands {
+	for _, item := range data.Domain.Commands {
 		if item.Noun == "backup" && item.Verb == "clean" {
 			t.Fatalf("backup clean must not be in R0-R3 risk table: %#v", item)
 		}
 	}
 	foundList := false
-	for _, item := range data.Supported.Commands {
+	for _, item := range data.Domain.Commands {
 		if item.Noun == "backup" && item.Verb == "list" && item.Risk == "R0" {
 			foundList = true
 		}

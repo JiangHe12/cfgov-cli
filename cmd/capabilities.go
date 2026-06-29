@@ -14,10 +14,8 @@ import (
 
 type capabilitiesData struct {
 	Tool      capTool      `json:"tool"`
-	Backend   capBackend   `json:"backend"`
 	Supported capSupported `json:"supported"`
-	Limits    capLimits    `json:"limits"`
-	Features  capFeatures  `json:"features"`
+	Domain    capDomain    `json:"domain"`
 }
 
 type capTool struct {
@@ -54,9 +52,15 @@ type capFeatures struct {
 }
 
 type capSupported struct {
+	ContextAPIVersions []string `json:"contextApiVersions"`
+	AuditAPIVersions   []string `json:"auditApiVersions"`
+}
+
+type capDomain struct {
+	Backend            capBackend   `json:"backend"`
 	Commands           []capCommand `json:"commands"`
-	ContextAPIVersions []string     `json:"contextApiVersions"`
-	AuditAPIVersions   []string     `json:"auditApiVersions"`
+	Limits             capLimits    `json:"limits"`
+	Features           capFeatures  `json:"features"`
 	OutputFormats      []string     `json:"outputFormats"`
 	ErrorCodes         []string     `json:"errorCodes"`
 	ExitCodes          []int        `json:"exitCodes"`
@@ -90,7 +94,7 @@ func newCapabilitiesCmd(f *cliFlags) *cobra.Command {
 				}
 				return nil
 			}
-			p.Table([]string{"NOUN", "VERB", "RISK", "ALLOW FLAG"}, capabilityRows(data.Supported.Commands))
+			p.Table([]string{"NOUN", "VERB", "RISK", "ALLOW FLAG"}, capabilityRows(data.Domain.Commands))
 			return nil
 		},
 	}
@@ -187,17 +191,21 @@ func buildCapabilities(f *cliFlags, backend cfgov.Capabilities) capabilitiesData
 	v, c, _ := getVersionInfo()
 	return capabilitiesData{
 		Tool: capTool{Name: "cfgov-cli", Version: v, Commit: c},
-		Backend: capBackend{
-			Name:            backend.Backend,
-			ResourceTypes:   backend.ResourceTypes,
-			SupportsHistory: backend.SupportsHistory,
-			SupportsWatch:   backend.SupportsWatch,
-			SupportsRules:   backend.SupportsRules,
-			SupportsFlags:   backend.SupportsFlags,
-			SupportsCAS:     backend.SupportsCAS,
-			Verbs:           backend.Verbs,
-		},
 		Supported: capSupported{
+			ContextAPIVersions: []string{"cfgov-cli.io/context/v1"},
+			AuditAPIVersions:   []string{auditAPIVersion},
+		},
+		Domain: capDomain{
+			Backend: capBackend{
+				Name:            backend.Backend,
+				ResourceTypes:   backend.ResourceTypes,
+				SupportsHistory: backend.SupportsHistory,
+				SupportsWatch:   backend.SupportsWatch,
+				SupportsRules:   backend.SupportsRules,
+				SupportsFlags:   backend.SupportsFlags,
+				SupportsCAS:     backend.SupportsCAS,
+				Verbs:           backend.Verbs,
+			},
 			Commands: []capCommand{
 				{Noun: "config", Verb: "get", Risk: "R0"},
 				{Noun: "config", Verb: "list", Risk: "R0"},
@@ -250,8 +258,6 @@ func buildCapabilities(f *cliFlags, backend cfgov.Capabilities) capabilitiesData
 				{Noun: "flag", Verb: "delete(protected ctx)", Risk: "R3", AllowFlag: "allow-production-flag-delete"},
 				{Noun: "backup", Verb: "list", Risk: "R0"},
 			},
-			ContextAPIVersions: []string{"cfgov-cli.io/context/v1"},
-			AuditAPIVersions:   []string{auditAPIVersion},
 			OutputFormats:      []string{"table", "json", "plain"},
 			ErrorCodes:         errorCodeStrings(),
 			ExitCodes:          apperrors.AllExitCodes(),
@@ -259,20 +265,20 @@ func buildCapabilities(f *cliFlags, backend cfgov.Capabilities) capabilitiesData
 			CredentialBackends: credstore.Available(),
 			Environment:        []string{"APOLLO_APP_ID", "APOLLO_CLUSTER", "APOLLO_ENV", "APOLLO_NAMESPACE", "APOLLO_RULE_NAMESPACE", "APOLLO_SECRET", "APOLLO_SERVER", "APOLLO_TOKEN", "CFGOV_CLI_AUDIT_PRIVATE_KEY", "CFGOV_CLI_CREDENTIAL_PASSPHRASE", "CFGOV_CLI_OPERATOR", "CONSUL_CACERT", "CONSUL_CLIENT_CERT", "CONSUL_CLIENT_KEY", "CONSUL_KEY_PREFIX", "CONSUL_NAMESPACE", "CONSUL_RULE_NAMESPACE", "CONSUL_SERVER", "CONSUL_TOKEN", "ETCD_CACERT", "ETCD_CLIENT_CERT", "ETCD_CLIENT_KEY", "ETCD_ENDPOINTS", "ETCD_KEY_PREFIX", "ETCD_NAMESPACE", "ETCD_PASSWORD", "ETCD_RULE_NAMESPACE", "ETCD_SERVER", "ETCD_USERNAME", "KUBECONFIG", "NACOS_NAMESPACE", "NACOS_PASSWORD", "NACOS_SERVER", "NACOS_USERNAME"},
 			RuleTypes:          []string{"flow", "degrade", "system", "authority", "param"},
-		},
-		Limits: capLimits{
-			DefaultConcurrency: 1,
-			MaxConcurrency:     16,
-			TraceBodyLimit:     f.TraceBodyLim,
-			AuditMaxSizeBytes:  firstPositiveInt64(f.AuditMaxSize, audit.DefaultMaxSizeBytes),
-			BackupKeep:         f.BackupKeep,
-		},
-		Features: capFeatures{
-			ContextOverride: true,
-			DebugTrace:      true,
-			AuditPrune:      true,
-			AuditTablePlain: true,
-			StrictNoChange:  true,
+			Limits: capLimits{
+				DefaultConcurrency: 1,
+				MaxConcurrency:     16,
+				TraceBodyLimit:     f.TraceBodyLim,
+				AuditMaxSizeBytes:  firstPositiveInt64(f.AuditMaxSize, audit.DefaultMaxSizeBytes),
+				BackupKeep:         f.BackupKeep,
+			},
+			Features: capFeatures{
+				ContextOverride: true,
+				DebugTrace:      true,
+				AuditPrune:      true,
+				AuditTablePlain: true,
+				StrictNoChange:  true,
+			},
 		},
 	}
 }
