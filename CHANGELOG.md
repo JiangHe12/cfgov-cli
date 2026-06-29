@@ -2,6 +2,12 @@
 
 All notable changes to this project are documented in this file.
 
+## v0.5.13
+
+### Changed
+
+- Updated opskit-core to v1.1.4.
+
 ## v0.5.12
 
 ### Added
