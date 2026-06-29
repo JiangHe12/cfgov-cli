@@ -272,6 +272,35 @@ func TestCtxImportDoesNotOverwriteWithoutForce(t *testing.T) {
 	}
 }
 
+func TestCtxMigrateCredentialsDryRun(t *testing.T) {
+	configPath := filepath.Join(t.TempDir(), "config.yaml")
+	cfgovctx.SetConfigPath(configPath)
+	t.Cleanup(func() { cfgovctx.SetConfigPath("") })
+	if err := cfgovctx.Set("literal", cfgovctx.Context{Base: corectx.Base{Server: "http://127.0.0.1:8848", Password: "secret"}, Backend: "nacos"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := cfgovctx.Set("ref", cfgovctx.Context{Base: corectx.Base{Server: "http://127.0.0.1:8848", Password: credstore.EncodeRef("encrypted-file"), CredentialBackend: "encrypted-file"}, Backend: "nacos"}); err != nil {
+		t.Fatal(err)
+	}
+
+	out, err := runCommandForTest(t, "--config", configPath, "-o", "json", "ctx", "migrate-credentials", "--dry-run")
+	if err != nil {
+		t.Fatalf("ctx migrate-credentials --dry-run error = %v; out=%s", err, out)
+	}
+	for _, want := range []string{`"kind": "CredentialMigration"`, `"dryRun": true`, `"count": 1`, `"literal"`} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("migrate dry-run output missing %q: %s", want, out)
+		}
+	}
+	cfg, err := cfgovctx.Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Contexts["literal"].Password != "secret" {
+		t.Fatalf("dry-run mutated literal credential: %+v", cfg.Contexts["literal"].Base)
+	}
+}
+
 func TestCtxRoleLifecycleAndRBAC(t *testing.T) {
 	dir := t.TempDir()
 	cfgovctx.SetConfigPath(filepath.Join(dir, "config.yaml"))

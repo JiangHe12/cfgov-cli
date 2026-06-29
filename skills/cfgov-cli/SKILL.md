@@ -32,6 +32,8 @@ cfgov ctx list -o json
 cfgov ctx current -o json
 cfgov ctx role set <name> --target-operator <operator> --role reader|writer|admin
 cfgov ctx role list <name> -o json
+cfgov ctx migrate-credentials --dry-run
+cfgov ctx migrate-credentials --yes
 ```
 
 For authenticated Nacos, prefer `--username <user>` in the context and `CFGOV_PASSWORD` at command runtime when no credential is stored. To persist a password, use `ctx set --password <password> --credential-backend keychain|encrypted-file`. `--server http://user:pass@host:8848` remains supported, but explicit `--password` or `CFGOV_PASSWORD` takes precedence over URL userinfo.

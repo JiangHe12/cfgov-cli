@@ -2,6 +2,11 @@
 
 All notable changes to this project are documented in this file.
 
+## v0.5.8
+
+### Added
+- `ctx migrate-credentials` subcommand for credential store migration.
+
 ## v0.5.7
 
 ### Changed

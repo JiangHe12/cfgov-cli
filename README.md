@@ -240,10 +240,11 @@ cfgov ctx set <name> --backend k8s    [--k8s-kubeconfig <path>] [--k8s-context <
 cfgov ctx set <name> --backend consul --server <host:port> [--consul-key-prefix <p>] \
                      [--consul-rule-namespace SENTINEL] [--namespace <ns>] \
                      [--consul-ca-cert <f>] [--consul-client-cert <f>] [--consul-client-key <f>]
-cfgov ctx use|list|current|delete|export|import|test
+cfgov ctx use|list|current|delete|export|import|migrate-credentials|test
 cfgov ctx role set|unset|list <context>
 #   Nacos password: prefer CFGOV_PASSWORD for non-interactive runs when no credential is stored.
 #   To persist a password, use ctx set --password <pw> with --credential-backend keychain|encrypted-file.
+#   To migrate existing literal credentials, run ctx migrate-credentials --dry-run, then ctx migrate-credentials --yes.
 #   --server URL userinfo remains supported; explicit --password/CFGOV_PASSWORD takes precedence.
 
 # Diagnostics & ecosystem

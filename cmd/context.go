@@ -25,8 +25,11 @@ import (
 )
 
 const (
-	ctxExportAPIVersion = "cfgov-cli.io/ctx-export/v1"
-	redactedCredential  = "<REDACTED>"
+	ctxExportAPIVersion          = "cfgov-cli.io/ctx-export/v1"
+	redactedCredential           = "<REDACTED>"
+	credentialBackendEncrypted   = "encrypted-file"
+	credentialBackendKeychain    = "keychain"
+	credentialMigrationEventType = audit.EventType("credential.migrate")
 )
 
 type contextExportDocument struct {
@@ -50,9 +53,28 @@ type roleItem struct {
 	Role     string `json:"role"`
 }
 
+type migrateCredentialsOptions struct {
+	toBackend   string
+	contextName string
+	dryRun      bool
+}
+
+type migrateCredentialCandidate struct {
+	name     string
+	context  cfgovctx.Context
+	password string
+}
+
+type credentialMigrationResult struct {
+	DryRun   bool     `json:"dryRun"`
+	Backend  string   `json:"backend"`
+	Contexts []string `json:"contexts"`
+	Count    int      `json:"count"`
+}
+
 func newContextCmd(f *cliFlags) *cobra.Command {
 	cmd := &cobra.Command{Use: "ctx", Aliases: []string{"context"}, Short: "Manage cfgov contexts", Args: requireSubcommand, RunE: runParentHelp}
-	cmd.AddCommand(ctxSetCmd(f), ctxUseCmd(f), ctxListCmd(f), ctxCurrentCmd(f), ctxDeleteCmd(f), ctxExportCmd(f), ctxImportCmd(f), ctxTestCmd(f), ctxRoleCmd(f))
+	cmd.AddCommand(ctxSetCmd(f), ctxUseCmd(f), ctxListCmd(f), ctxCurrentCmd(f), ctxDeleteCmd(f), ctxExportCmd(f), ctxImportCmd(f), ctxMigrateCredentialsCmd(f), ctxTestCmd(f), ctxRoleCmd(f))
 	return cmd
 }
 
@@ -342,6 +364,22 @@ func ctxImportCmd(f *cliFlags) *cobra.Command {
 	return cmd
 }
 
+func ctxMigrateCredentialsCmd(f *cliFlags) *cobra.Command {
+	opts := migrateCredentialsOptions{toBackend: credentialBackendEncrypted}
+	cmd := &cobra.Command{
+		Use:   "migrate-credentials",
+		Short: "Move literal context credentials to a secure credential backend",
+		Args:  cobra.NoArgs,
+		RunE: func(_ *cobra.Command, _ []string) error {
+			return runCtxMigrateCredentials(f, opts)
+		},
+	}
+	cmd.Flags().StringVar(&opts.toBackend, "to", credentialBackendEncrypted, "Target backend: encrypted-file or keychain")
+	cmd.Flags().StringVar(&opts.contextName, "context", "", "Context to migrate")
+	cmd.Flags().BoolVar(&opts.dryRun, "dry-run", false, "Preview credential migration without writing")
+	return cmd
+}
+
 func ctxTestCmd(f *cliFlags) *cobra.Command {
 	return &cobra.Command{
 		Use:   "test [name]",
@@ -613,6 +651,120 @@ func runCtxImport(f *cliFlags, file, rename string, force bool) error {
 	return nil
 }
 
+func runCtxMigrateCredentials(f *cliFlags, opts migrateCredentialsOptions) error {
+	if err := validateCredentialMigrationOptions(f, opts); err != nil {
+		return err
+	}
+	cfg, err := cfgovctx.Load()
+	if err != nil {
+		return err
+	}
+	candidates, err := credentialMigrationCandidates(cfg, opts.contextName)
+	if err != nil {
+		return err
+	}
+	result := credentialMigrationResult{
+		DryRun:   opts.dryRun,
+		Backend:  opts.toBackend,
+		Contexts: credentialMigrationContextNames(candidates),
+		Count:    len(candidates),
+	}
+	if opts.dryRun || len(candidates) == 0 {
+		return printCredentialMigrationResult(f, result)
+	}
+	backend, err := credstore.New(opts.toBackend)
+	if err != nil {
+		return apperrors.New(apperrors.CodeUsageError, err.Error(), err)
+	}
+	if err := backend.Available(); err != nil {
+		return apperrors.New(apperrors.CodeUsageError, fmt.Sprintf("backend %q not available", opts.toBackend), err)
+	}
+	for _, candidate := range candidates {
+		if err := backend.Put(context.Background(), candidate.name, candidate.password); err != nil {
+			return apperrors.New(apperrors.CodeCredentialStoreError, fmt.Sprintf("store credential for context %q failed", candidate.name), err)
+		}
+	}
+	for _, candidate := range candidates {
+		item := candidate.context
+		item.Password = credstore.EncodeRef(opts.toBackend)
+		item.CredentialBackend = opts.toBackend
+		if err := cfgovctx.Set(candidate.name, item); err != nil {
+			appendCredentialMigrationAuditWarn(f, candidate.name, item, opts.toBackend, err)
+			return err
+		}
+		appendCredentialMigrationAuditWarn(f, candidate.name, item, opts.toBackend, nil)
+	}
+	return printCredentialMigrationResult(f, result)
+}
+
+func validateCredentialMigrationOptions(f *cliFlags, opts migrateCredentialsOptions) error {
+	if !validCredentialMigrationBackend(opts.toBackend) {
+		return apperrors.New(apperrors.CodeUsageError, "--to must be encrypted-file or keychain", nil)
+	}
+	if opts.dryRun && f.Yes {
+		return apperrors.New(apperrors.CodeUsageError, "ctx migrate-credentials accepts only one of --dry-run or --yes", nil)
+	}
+	if !opts.dryRun && !f.Yes {
+		return apperrors.New(apperrors.CodeAuthorizationRequired, "ctx migrate-credentials requires --dry-run or --yes", nil)
+	}
+	return nil
+}
+
+func validCredentialMigrationBackend(name string) bool {
+	return name == credentialBackendEncrypted || name == credentialBackendKeychain
+}
+
+func credentialMigrationCandidates(cfg *corectx.Config[cfgovctx.Context], contextName string) ([]migrateCredentialCandidate, error) {
+	if contextName != "" {
+		item, ok := cfg.Contexts[contextName]
+		if !ok {
+			return nil, apperrors.New(apperrors.CodeUsageError, fmt.Sprintf("context %q not found", contextName), nil)
+		}
+		if isLiteralCredential(item.Password) {
+			return []migrateCredentialCandidate{{name: contextName, context: item, password: item.Password}}, nil
+		}
+		return nil, nil
+	}
+	names := make([]string, 0, len(cfg.Contexts))
+	for name := range cfg.Contexts {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	candidates := make([]migrateCredentialCandidate, 0, len(names))
+	for _, name := range names {
+		item := cfg.Contexts[name]
+		if isLiteralCredential(item.Password) {
+			candidates = append(candidates, migrateCredentialCandidate{name: name, context: item, password: item.Password})
+		}
+	}
+	return candidates, nil
+}
+
+func isLiteralCredential(value string) bool {
+	return value != "" && value != redactedCredential && !credstore.ParseRef(value).IsRef
+}
+
+func credentialMigrationContextNames(candidates []migrateCredentialCandidate) []string {
+	names := make([]string, 0, len(candidates))
+	for _, candidate := range candidates {
+		names = append(names, candidate.name)
+	}
+	return names
+}
+
+func printCredentialMigrationResult(f *cliFlags, result credentialMigrationResult) error {
+	p := newPrinter(f)
+	if f.Output == "json" {
+		return p.JSONData("CredentialMigration", result)
+	}
+	action := "would migrate"
+	if !result.DryRun {
+		action = "migrated"
+	}
+	p.Success(fmt.Sprintf("%s %d context credential(s) to %s", action, result.Count, result.Backend))
+	return nil
+}
+
 func readContextExportDocument(path string) (contextExportDocument, error) {
 	clean := filepath.Clean(path)
 	if clean == "." || clean == string(filepath.Separator) {
@@ -803,6 +955,33 @@ func appendRoleAuditWarn(f *cliFlags, eventType audit.EventType, contextName str
 			ChangedOperator: operator,
 			Role:            role,
 		},
+	}
+	if err != nil {
+		appErr := apperrors.AsAppError(err)
+		evt.Error = &audit.EventError{Code: string(appErr.Code), Message: appErr.Message}
+	}
+	if appendErr := audit.AppendWithOptions(path, evt, auditOptions(f)); appendErr != nil {
+		_, _ = fmt.Fprintf(os.Stderr, "warning: audit write failed: %v\n", appendErr)
+	}
+}
+
+func appendCredentialMigrationAuditWarn(f *cliFlags, contextName string, item cfgovctx.Context, backendName string, err error) {
+	path, pathErr := audit.DefaultPath()
+	if pathErr != nil {
+		_, _ = fmt.Fprintf(os.Stderr, "warning: audit path failed: %v\n", pathErr)
+		return
+	}
+	status := audit.StatusSuccess
+	if err != nil {
+		status = audit.StatusFailed
+	}
+	evt := audit.Event{
+		EventType: credentialMigrationEventType,
+		Operator:  currentOperator(f),
+		Context:   audit.EventContext{Name: contextName, Env: item.Env, Protected: item.Protected},
+		Target:    audit.EventTarget{ResourceType: "credential", Resource: backendName},
+		Status:    status,
+		Diff:      "credential backend=" + backendName,
 	}
 	if err != nil {
 		appErr := apperrors.AsAppError(err)

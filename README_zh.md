@@ -240,10 +240,11 @@ cfgov ctx set <name> --backend k8s    [--k8s-kubeconfig <path>] [--k8s-context <
 cfgov ctx set <name> --backend consul --server <host:port> [--consul-key-prefix <p>] \
                      [--consul-rule-namespace SENTINEL] [--namespace <ns>] \
                      [--consul-ca-cert <f>] [--consul-client-cert <f>] [--consul-client-key <f>]
-cfgov ctx use|list|current|delete|export|import|test
+cfgov ctx use|list|current|delete|export|import|migrate-credentials|test
 cfgov ctx role set|unset|list <context>
 #   Nacos 密码:context 未保存凭据时,非交互运行优先用 CFGOV_PASSWORD。
 #   若要持久化密码,用 ctx set --password <pw> 配 --credential-backend keychain|encrypted-file。
+#   若要迁移已有明文凭据,先运行 ctx migrate-credentials --dry-run,再运行 ctx migrate-credentials --yes。
 #   --server URL 内联 userinfo 仍兼容;显式 --password/CFGOV_PASSWORD 优先。
 
 # 诊断与生态
