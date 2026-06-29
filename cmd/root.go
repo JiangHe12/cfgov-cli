@@ -140,7 +140,7 @@ func NewRootCmd() *cobra.Command {
 func newRootCmdWith(f *cliFlags) *cobra.Command {
 	v, _, _ := getVersionInfo()
 	cmd := &cobra.Command{
-		Use:           "cfgov",
+		Use:           "cfgov-cli",
 		Short:         "Governed configuration CLI",
 		Version:       v,
 		SilenceUsage:  true,

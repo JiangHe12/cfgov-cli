@@ -2,6 +2,11 @@
 
 All notable changes to this project are documented in this file.
 
+## v0.5.6
+
+### Changed
+- Aligned root `--version` output with the family format by using the full CLI name.
+
 ## v0.5.5
 
 ### Changed
