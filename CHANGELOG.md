@@ -2,6 +2,11 @@
 
 All notable changes to this project are documented in this file.
 
+## v0.5.12
+
+### Added
+- Contract tests for JSON envelopes, JSON error output, plain version output, and success/error exit codes.
+
 ## v0.5.11
 
 ### Changed
