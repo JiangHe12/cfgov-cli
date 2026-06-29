@@ -1,6 +1,8 @@
 package cmd
 
 import (
+	"fmt"
+
 	"github.com/spf13/cobra"
 
 	"github.com/JiangHe12/opskit-core/apperrors"
@@ -79,12 +81,35 @@ func newCapabilitiesCmd(f *cliFlags) *cobra.Command {
 		RunE: func(_ *cobra.Command, _ []string) error {
 			data := buildCapabilities(f, currentBackendCapabilities(f))
 			p := newPrinter(f)
-			if f.Output == "json" || f.Output == "plain" {
+			if f.Output == "json" {
 				return p.JSONData("Capabilities", data)
+			}
+			if f.Output == "plain" {
+				for _, command := range capabilityPlainCommands() {
+					_, _ = fmt.Fprintln(p.Out, command)
+				}
+				return nil
 			}
 			p.Table([]string{"NOUN", "VERB", "RISK", "ALLOW FLAG"}, capabilityRows(data.Supported.Commands))
 			return nil
 		},
+	}
+}
+
+func capabilityPlainCommands() []string {
+	return []string{
+		"ctx",
+		"config",
+		"namespace",
+		"service",
+		"rule",
+		"flag",
+		"backup",
+		"capabilities",
+		"audit",
+		"doctor",
+		"version",
+		"install",
 	}
 }
 
