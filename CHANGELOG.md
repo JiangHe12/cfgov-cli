@@ -2,6 +2,11 @@
 
 All notable changes to this project are documented in this file.
 
+## v0.5.9
+
+### Added
+- Global flag: `--no-color`.
+
 ## v0.5.8
 
 ### Added

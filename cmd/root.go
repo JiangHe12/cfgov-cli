@@ -62,6 +62,7 @@ type cliFlags struct {
 	PlainHead      bool
 	Debug          bool
 	Trace          bool
+	NoColor        bool
 	TraceBodyLim   int
 	StrictNoChange bool
 	AuditMaxSize   int64
@@ -146,6 +147,7 @@ func newRootCmdWith(f *cliFlags) *cobra.Command {
 		SilenceUsage:  true,
 		SilenceErrors: true,
 		PersistentPreRunE: func(c *cobra.Command, _ []string) error {
+			applyGlobalFlags(f)
 			f.commandCtx = c.Context()
 			f.commandName = strings.ReplaceAll(c.CommandPath(), " ", ".")
 			f.commandTime = time.Now()
@@ -180,8 +182,9 @@ func newRootCmdWith(f *cliFlags) *cobra.Command {
 	cmd.PersistentFlags().DurationVar(&f.Timeout, "timeout", 30*time.Second, "Request timeout")
 	cmd.PersistentFlags().StringVarP(&f.Output, "output", "o", "table", "Output format: table | json | plain")
 	cmd.PersistentFlags().BoolVar(&f.PlainHead, "plain-header", false, "Show headers in plain output")
-	cmd.PersistentFlags().BoolVar(&f.Debug, "debug", false, "Output backend request summary to stderr")
-	cmd.PersistentFlags().BoolVar(&f.Trace, "trace", false, "Output backend request/response trace to stderr")
+	cmd.PersistentFlags().BoolVar(&f.Debug, "debug", false, "Enable debug logging")
+	cmd.PersistentFlags().BoolVar(&f.Trace, "trace", false, "Enable trace logging (implies --debug)")
+	cmd.PersistentFlags().BoolVar(&f.NoColor, "no-color", false, "Disable colored output")
 	cmd.PersistentFlags().IntVar(&f.TraceBodyLim, "trace-body-limit", 2048, "Trace body byte limit (0 = unlimited)")
 	_ = cmd.PersistentFlags().MarkHidden("trace-body-limit")
 	cmd.PersistentFlags().BoolVar(&f.StrictNoChange, "strict-no-change", false, "Exit 13 (NO_CHANGE_REQUIRED) when a plan has no changes to apply")
@@ -213,6 +216,16 @@ func newRootCmdWith(f *cliFlags) *cobra.Command {
 	cmd.AddCommand(newContextCmd(f), newConfigCmd(f), newNamespaceCmd(f), newServiceCmd(f), newRuleCmd(f), newFlagCmd(f), newBackupCmd(f), newCapabilitiesCmd(f), newAuditCmd(f), newDoctorCmd(f), newCompletionCmd(f), newVersionCmd(f), newInstallCmd(f))
 	setSuggestionsRecursive(cmd, 1)
 	return cmd
+}
+
+func applyGlobalFlags(f *cliFlags) {
+	if f.Trace {
+		f.Debug = true
+	}
+	if f.NoColor {
+		_ = os.Setenv("NO_COLOR", "1")
+		color.NoColor = true
+	}
 }
 
 func Execute() {

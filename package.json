@@ -1,6 +1,6 @@
 {
   "name": "cfgov-cli",
-  "version": "0.5.8",
+  "version": "0.5.9",
   "description": "Governed configuration, Sentinel-rule, and feature-flag operations CLI for AI agents (Nacos, Apollo, etcd, Kubernetes, Consul)",
   "bin": {
     "cfgov": "bin/cfgov-cli.js",
