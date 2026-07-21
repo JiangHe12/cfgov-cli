@@ -94,14 +94,32 @@ func TestEnsureMutationSpoolDirectoryDoesNotRewriteUnsafeExistingParent(t *testi
 func prepareMutationAuditTestParent(t *testing.T, path string) {
 	t.Helper()
 	for parent := filepath.Dir(path); !strings.EqualFold(parent, os.TempDir()); parent = filepath.Dir(parent) {
-		if err := setMutationSpoolACL(parent, windows.SUB_CONTAINERS_AND_OBJECTS_INHERIT); err != nil {
-			t.Fatalf("setMutationSpoolACL(test ancestor %s) error = %v", parent, err)
-		}
+		prepareMutationAuditTestPath(t, parent, windows.SUB_CONTAINERS_AND_OBJECTS_INHERIT)
 	}
-	if err := setMutationSpoolACL(path, windows.SUB_CONTAINERS_AND_OBJECTS_INHERIT); err != nil {
-		t.Fatalf("setMutationSpoolACL(test parent) error = %v", err)
-	}
+	prepareMutationAuditTestPath(t, path, windows.SUB_CONTAINERS_AND_OBJECTS_INHERIT)
 	if err := verifyMutationSpoolACL(path); err != nil {
 		t.Fatalf("verifyMutationSpoolACL(test parent) error = %v", err)
+	}
+}
+
+func prepareMutationAuditTestPath(t *testing.T, path string, inheritance uint32) {
+	t.Helper()
+	userSID, _, _, err := trustedMutationSpoolSIDs()
+	if err != nil {
+		t.Fatalf("trustedMutationSpoolSIDs(test path %s) error = %v", path, err)
+	}
+	if err := windows.SetNamedSecurityInfo(
+		path,
+		windows.SE_FILE_OBJECT,
+		windows.OWNER_SECURITY_INFORMATION,
+		userSID,
+		nil,
+		nil,
+		nil,
+	); err != nil {
+		t.Fatalf("set test path owner %s error = %v", path, err)
+	}
+	if err := setMutationSpoolACL(path, inheritance); err != nil {
+		t.Fatalf("setMutationSpoolACL(test path %s) error = %v", path, err)
 	}
 }

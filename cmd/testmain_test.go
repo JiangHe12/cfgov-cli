@@ -17,10 +17,29 @@ func TestMain(m *testing.M) {
 		_, _ = fmt.Fprintf(os.Stderr, "create isolated test home: %v\n", err)
 		os.Exit(1)
 	}
-	oldHome, hadHome := os.LookupEnv("HOME")
-	oldProfile, hadProfile := os.LookupEnv("USERPROFILE")
-	_ = os.Setenv("HOME", home)
-	_ = os.Setenv("USERPROFILE", home)
+	canonicalHome, err := filepath.EvalSymlinks(home)
+	if err != nil {
+		_, _ = fmt.Fprintf(os.Stderr, "resolve isolated test home: %v\n", err)
+		_ = os.RemoveAll(home)
+		os.Exit(1)
+	}
+	home = canonicalHome
+	type environmentValue struct {
+		name    string
+		value   string
+		present bool
+	}
+	environment := []environmentValue{
+		{name: "HOME"},
+		{name: "USERPROFILE"},
+		{name: "TMPDIR"},
+		{name: "TEMP"},
+		{name: "TMP"},
+	}
+	for index := range environment {
+		environment[index].value, environment[index].present = os.LookupEnv(environment[index].name)
+		_ = os.Setenv(environment[index].name, home)
+	}
 	if err := createPrivateMutationAuditDirectory(filepath.Join(home, ".cfgov-cli")); err != nil {
 		_, _ = fmt.Fprintf(os.Stderr, "create isolated audit directory: %v\n", err)
 		_ = os.RemoveAll(home)
@@ -29,15 +48,12 @@ func TestMain(m *testing.M) {
 
 	code := m.Run()
 
-	if hadHome {
-		_ = os.Setenv("HOME", oldHome)
-	} else {
-		_ = os.Unsetenv("HOME")
-	}
-	if hadProfile {
-		_ = os.Setenv("USERPROFILE", oldProfile)
-	} else {
-		_ = os.Unsetenv("USERPROFILE")
+	for _, variable := range environment {
+		if variable.present {
+			_ = os.Setenv(variable.name, variable.value)
+		} else {
+			_ = os.Unsetenv(variable.name)
+		}
 	}
 	_ = os.RemoveAll(home)
 	os.Exit(code)

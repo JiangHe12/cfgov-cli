@@ -51,8 +51,8 @@ func verifyMutationSpoolParent(path string) error {
 		if !ok {
 			return apperrors.New(apperrors.CodeLocalIOError, "failed to identify mutation outcome spool ancestor owner", nil)
 		}
-		uid := uint64(stat.Uid)
-		euid := uint64(os.Geteuid())
+		uid := int64(stat.Uid)
+		euid := int64(os.Geteuid())
 		if uid != euid && uid != 0 {
 			return apperrors.New(apperrors.CodeLocalIOError, "mutation outcome spool ancestor has an untrusted owner", nil)
 		}
@@ -115,7 +115,7 @@ func verifyMutationSpoolFile(path string) error {
 
 func verifyMutationSpoolOwner(info os.FileInfo, path string) error {
 	stat, ok := info.Sys().(*syscall.Stat_t)
-	if !ok || uint64(stat.Uid) != uint64(os.Geteuid()) {
+	if !ok || int64(stat.Uid) != int64(os.Geteuid()) {
 		return apperrors.New(
 			apperrors.CodeLocalIOError,
 			fmt.Sprintf("mutation outcome spool path %s is not owned by the current user", path),
