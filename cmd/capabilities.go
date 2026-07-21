@@ -5,9 +5,9 @@ import (
 
 	"github.com/spf13/cobra"
 
-	"github.com/JiangHe12/opskit-core/apperrors"
-	"github.com/JiangHe12/opskit-core/audit"
-	"github.com/JiangHe12/opskit-core/credstore"
+	"github.com/JiangHe12/opskit-core/v2/apperrors"
+	"github.com/JiangHe12/opskit-core/v2/audit"
+	"github.com/JiangHe12/opskit-core/v2/credstore"
 
 	"github.com/JiangHe12/cfgov-cli/internal/cfgov"
 )
@@ -40,15 +40,17 @@ type capLimits struct {
 	MaxConcurrency     int   `json:"maxConcurrency"`
 	TraceBodyLimit     int   `json:"traceBodyLimit"`
 	AuditMaxSizeBytes  int64 `json:"auditMaxSizeBytes"`
-	BackupKeep         int   `json:"backupKeep"`
 }
 
 type capFeatures struct {
-	ContextOverride bool `json:"contextOverride"`
-	DebugTrace      bool `json:"debugTrace"`
-	AuditPrune      bool `json:"auditPrune"`
-	AuditTablePlain bool `json:"auditTablePlain"`
-	StrictNoChange  bool `json:"strictNoChange"`
+	ContextOverride      bool `json:"contextOverride"`
+	DebugTrace           bool `json:"debugTrace"`
+	AuditPrune           bool `json:"auditPrune"`
+	AuditTablePlain      bool `json:"auditTablePlain"`
+	StrictNoChange       bool `json:"strictNoChange"`
+	MutationIntent       bool `json:"mutationIntent"`
+	DurableOutcomeSpool  bool `json:"durableOutcomeSpool"`
+	FingerprintOnlyAudit bool `json:"fingerprintOnlyAudit"`
 }
 
 type capSupported struct {
@@ -90,12 +92,13 @@ func newCapabilitiesCmd(f *cliFlags) *cobra.Command {
 			}
 			if f.Output == "plain" {
 				for _, command := range capabilityPlainCommands() {
-					_, _ = fmt.Fprintln(p.Out, command)
+					if _, err := fmt.Fprintln(p.Out, command); err != nil {
+						return apperrors.New(apperrors.CodeLocalIOError, "failed to write capabilities output", err)
+					}
 				}
 				return nil
 			}
-			p.Table([]string{"NOUN", "VERB", "RISK", "ALLOW FLAG"}, capabilityRows(data.Domain.Commands))
-			return nil
+			return p.Table([]string{"NOUN", "VERB", "RISK", "ALLOW FLAG"}, capabilityRows(data.Domain.Commands))
 		},
 	}
 }
@@ -129,7 +132,7 @@ func currentBackendCapabilities(f *cliFlags) cfgov.Capabilities {
 			Backend:          "apollo",
 			ResourceTypes:    []string{"config", "rule", "flag"},
 			Verbs:            []string{"get", "list", "diff", "validate", "pull", "push", "delete"},
-			SupportsCAS:      true,
+			SupportsCAS:      false,
 			SupportsRevision: true,
 			SupportsHistory:  false,
 			SupportsWatch:    true,
@@ -177,7 +180,7 @@ func currentBackendCapabilities(f *cliFlags) cfgov.Capabilities {
 			Backend:          "nacos",
 			ResourceTypes:    []string{"config", "namespace", "service", "rule", "flag"},
 			Verbs:            []string{"get", "list", "diff", "validate", "pull", "history", "listen", "push", "delete"},
-			SupportsCAS:      true,
+			SupportsCAS:      false,
 			SupportsRevision: true,
 			SupportsHistory:  true,
 			SupportsWatch:    true,
@@ -193,7 +196,7 @@ func buildCapabilities(f *cliFlags, backend cfgov.Capabilities) capabilitiesData
 		Tool: capTool{Name: "cfgov-cli", Version: v, Commit: c},
 		Supported: capSupported{
 			ContextAPIVersions: []string{"cfgov-cli.io/context/v1"},
-			AuditAPIVersions:   []string{auditAPIVersion},
+			AuditAPIVersions:   []string{auditAPIVersion, mutationAuditAPIVersion},
 		},
 		Domain: capDomain{
 			Backend: capBackend{
@@ -221,6 +224,7 @@ func buildCapabilities(f *cliFlags, backend cfgov.Capabilities) capabilitiesData
 				{Noun: "config", Verb: "rollback", Risk: "R1"},
 				{Noun: "config", Verb: "delete", Risk: "R2"},
 				{Noun: "config", Verb: "reconcile(no prune)", Risk: "R2"},
+				{Noun: "config", Verb: "reconcile(no prune, protected ctx)", Risk: "R3", AllowFlag: "allow-production-reconcile"},
 				{Noun: "config", Verb: "reconcile(prune)", Risk: "R3", AllowFlag: "allow-production-prune"},
 				{Noun: "config", Verb: "delete(protected ctx)", Risk: "R3", AllowFlag: "allow-production-config-delete"},
 				{Noun: "namespace", Verb: "list", Risk: "R0"},
@@ -257,27 +261,31 @@ func buildCapabilities(f *cliFlags, backend cfgov.Capabilities) capabilitiesData
 				{Noun: "flag", Verb: "delete", Risk: "R2"},
 				{Noun: "flag", Verb: "delete(protected ctx)", Risk: "R3", AllowFlag: "allow-production-flag-delete"},
 				{Noun: "backup", Verb: "list", Risk: "R0"},
+				{Noun: "audit", Verb: "prune", Risk: "R3", AllowFlag: "allow-audit-prune"},
+				{Noun: "audit", Verb: "verify --repair", Risk: "R3", AllowFlag: "allow-audit-repair"},
 			},
 			OutputFormats:      []string{"table", "json", "plain"},
 			ErrorCodes:         errorCodeStrings(),
 			ExitCodes:          apperrors.AllExitCodes(),
-			Kinds:              []string{"AuditPruneResult", "AuditQueryResult", "AuditVerifyResult", "BackupCleanResult", "BackupList", "Capabilities", "ChangePlan", "ChangeResult", "ConfigExport", "ConfigItem", "ConfigList", "ConfigListenEvent", "ContextImportResult", "ContextItem", "ContextList", "ContextTestResult", "DiffResult", "DoctorResult", "Error", "ExportResult", "FlagDiff", "FlagExport", "FlagList", "FlagSet", "FlagValidation", "HistoryList", "NamespaceItem", "NamespaceList", "RoleList", "RuleDiff", "RuleExport", "RuleList", "RuleSet", "RuleValidation", "ServiceInstanceList", "ServiceItem", "ServiceList", "ValidationResult", "VersionInfo"},
+			Kinds:              []string{"AuditPruneResult", "AuditQueryResult", "AuditVerifyResult", "BackupCleanResult", "BackupList", "Capabilities", "ChangePlan", "ChangeResult", "ConfigExport", "ConfigItem", "ConfigList", "ConfigListenEvent", "ContextImportResult", "ContextItem", "ContextList", "ContextTestResult", "DiffResult", "DoctorResult", "Error", "ExportResult", "FlagDiff", "FlagExport", "FlagList", "FlagSet", "FlagValidation", "HistoryList", "MutationAuditRecord", "NamespaceItem", "NamespaceList", "RoleList", "RuleDiff", "RuleExport", "RuleList", "RuleSet", "RuleValidation", "ServiceInstanceList", "ServiceItem", "ServiceList", "ValidationResult", "VersionInfo"},
 			CredentialBackends: credstore.Available(),
-			Environment:        []string{"APOLLO_APP_ID", "APOLLO_CLUSTER", "APOLLO_ENV", "APOLLO_NAMESPACE", "APOLLO_RULE_NAMESPACE", "APOLLO_SECRET", "APOLLO_SERVER", "APOLLO_TOKEN", "CFGOV_AUDIT_PRIVATE_KEY", "CFGOV_CREDENTIAL_PASSPHRASE", "CFGOV_OPERATOR", "CONSUL_CACERT", "CONSUL_CLIENT_CERT", "CONSUL_CLIENT_KEY", "CONSUL_KEY_PREFIX", "CONSUL_NAMESPACE", "CONSUL_RULE_NAMESPACE", "CONSUL_SERVER", "CONSUL_TOKEN", "ETCD_CACERT", "ETCD_CLIENT_CERT", "ETCD_CLIENT_KEY", "ETCD_ENDPOINTS", "ETCD_KEY_PREFIX", "ETCD_NAMESPACE", "ETCD_PASSWORD", "ETCD_RULE_NAMESPACE", "ETCD_SERVER", "ETCD_USERNAME", "KUBECONFIG", "NACOS_NAMESPACE", "NACOS_PASSWORD", "NACOS_SERVER", "NACOS_USERNAME"},
+			Environment:        []string{"APOLLO_APP_ID", "APOLLO_CLUSTER", "APOLLO_ENV", "APOLLO_NAMESPACE", "APOLLO_RULE_NAMESPACE", "APOLLO_SECRET", "APOLLO_SERVER", "APOLLO_TOKEN", "CFGOV_AUDIT_PRIVATE_KEY", "CFGOV_CREDENTIAL_PASSPHRASE", "CONSUL_CACERT", "CONSUL_CLIENT_CERT", "CONSUL_CLIENT_KEY", "CONSUL_KEY_PREFIX", "CONSUL_NAMESPACE", "CONSUL_RULE_NAMESPACE", "CONSUL_SERVER", "CONSUL_TOKEN", "ETCD_CACERT", "ETCD_CLIENT_CERT", "ETCD_CLIENT_KEY", "ETCD_ENDPOINTS", "ETCD_KEY_PREFIX", "ETCD_NAMESPACE", "ETCD_PASSWORD", "ETCD_RULE_NAMESPACE", "ETCD_SERVER", "ETCD_USERNAME", "KUBECONFIG", "NACOS_NAMESPACE", "NACOS_PASSWORD", "NACOS_SERVER", "NACOS_USERNAME"},
 			RuleTypes:          []string{"flow", "degrade", "system", "authority", "param"},
 			Limits: capLimits{
 				DefaultConcurrency: 1,
-				MaxConcurrency:     16,
+				MaxConcurrency:     1,
 				TraceBodyLimit:     f.TraceBodyLim,
 				AuditMaxSizeBytes:  firstPositiveInt64(f.AuditMaxSize, audit.DefaultMaxSizeBytes),
-				BackupKeep:         f.BackupKeep,
 			},
 			Features: capFeatures{
-				ContextOverride: true,
-				DebugTrace:      true,
-				AuditPrune:      true,
-				AuditTablePlain: true,
-				StrictNoChange:  true,
+				ContextOverride:      true,
+				DebugTrace:           true,
+				AuditPrune:           true,
+				AuditTablePlain:      true,
+				StrictNoChange:       true,
+				MutationIntent:       true,
+				DurableOutcomeSpool:  true,
+				FingerprintOnlyAudit: true,
 			},
 		},
 	}

@@ -5,16 +5,19 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"sort"
 	"strings"
 	"time"
 
 	"github.com/spf13/cobra"
 
-	"github.com/JiangHe12/opskit-core/apperrors"
-	"github.com/JiangHe12/opskit-core/audit"
+	"github.com/JiangHe12/opskit-core/v2/apperrors"
+	"github.com/JiangHe12/opskit-core/v2/audit"
+	corectx "github.com/JiangHe12/opskit-core/v2/ctx"
+	"github.com/JiangHe12/opskit-core/v2/lockfile"
+	"github.com/JiangHe12/opskit-core/v2/safety"
 
 	"github.com/JiangHe12/cfgov-cli/internal/cfgov"
+	"github.com/JiangHe12/cfgov-cli/internal/cfgovctx"
 )
 
 type auditQueryOptions struct {
@@ -43,22 +46,24 @@ type auditVerifyOptions struct {
 	strict  bool
 	repair  bool
 	confirm bool
-	yes     bool
 	decrypt bool
 }
 
 type auditPruneOptions struct {
-	path     string
-	before   string
-	keepLast int
-	dryRun   bool
-	confirm  bool
+	path      string
+	before    string
+	keepLast  int
+	dryRun    bool
+	dryRunSet bool
+	confirm   bool
 }
 
 type auditPruneResult struct {
-	DryRun       bool     `json:"dryRun"`
-	DeletedFiles []string `json:"deletedFiles"`
-	Count        int      `json:"count"`
+	DryRun          bool                       `json:"dryRun"`
+	DeletedFiles    []string                   `json:"deletedFiles"`
+	Count           int                        `json:"count"`
+	Started         bool                       `json:"started"`
+	CheckpointState audit.PruneCheckpointState `json:"checkpointState,omitempty"`
 }
 
 func newAuditCmd(f *cliFlags) *cobra.Command {
@@ -204,16 +209,18 @@ func printAuditQueryResult(f *cliFlags, result audit.Result) error {
 	case "json":
 		return p.JSONData("AuditQueryResult", map[string]any{
 			"apiVersion":       auditAPIVersion,
-			"events":           result.Events,
+			"events":           auditEventsForOutput(result.Events),
 			"malformedEntries": result.MalformedEntries,
 		})
 	case "plain":
 		for _, event := range result.Events {
-			data, err := json.Marshal(event)
+			data, err := json.Marshal(auditEventForOutput(event))
 			if err != nil {
 				return apperrors.New(apperrors.CodeLocalIOError, "failed to marshal audit event", err)
 			}
-			p.Info(string(data))
+			if err := p.Info(string(data)); err != nil {
+				return err
+			}
 		}
 		return nil
 	default:
@@ -229,12 +236,40 @@ func printAuditQueryResult(f *cliFlags, result audit.Result) error {
 				auditDashIfEmpty(event.Status),
 			})
 		}
-		p.Table([]string{"TIMESTAMP", "TYPE", "OPERATOR", "CONTEXT", "ENV", "RESOURCE", "STATUS"}, rows)
+		if err := p.Table([]string{"TIMESTAMP", "TYPE", "OPERATOR", "CONTEXT", "ENV", "RESOURCE", "STATUS"}, rows); err != nil {
+			return err
+		}
 		if result.MalformedEntries > 0 {
-			p.Info(fmt.Sprintf("(skipped %d malformed audit entries)", result.MalformedEntries))
+			return p.Info(fmt.Sprintf("(skipped %d malformed audit entries)", result.MalformedEntries))
 		}
 		return nil
 	}
+}
+
+func auditEventsForOutput(events []audit.Event) []any {
+	out := make([]any, 0, len(events))
+	for _, event := range events {
+		out = append(out, auditEventForOutput(event))
+	}
+	return out
+}
+
+func auditEventForOutput(event audit.Event) any {
+	event = sanitizeHistoricalAuditEvent(event)
+	if event.EventType == audit.EventType("command.preview") {
+		return previewAuditRecord{Event: event, Preview: true, DryRun: true}
+	}
+	return event
+}
+
+func sanitizeHistoricalAuditEvent(event audit.Event) audit.Event {
+	event.Ticket = ""
+	event.Reason = ""
+	event.Diff = ""
+	if event.Error != nil {
+		event.Error = &audit.EventError{Code: event.Error.Code}
+	}
+	return event
 }
 
 func auditVerifyCmd(f *cliFlags) *cobra.Command {
@@ -250,15 +285,15 @@ func auditVerifyCmd(f *cliFlags) *cobra.Command {
 	cmd.Flags().StringVar(&opts.path, "path", "", "Override audit log path")
 	cmd.Flags().BoolVar(&opts.strict, "strict", false, "Exit non-zero on malformed entries or invariant violations")
 	cmd.Flags().BoolVar(&opts.repair, "repair", false, "Quarantine malformed entries and rewrite audit log")
-	cmd.Flags().BoolVar(&opts.confirm, "confirm", false, "Confirm audit repair")
-	cmd.Flags().BoolVar(&opts.yes, "yes", false, "Alias for --confirm")
+	cmd.Flags().BoolVar(&opts.confirm, "confirm", false, "Confirm audit repair; R3 authorization is also required")
 	cmd.Flags().BoolVar(&opts.decrypt, "decrypt", false, "Decrypt audit entries using CFGOV_AUDIT_PRIVATE_KEY")
 	return cmd
 }
 
-func runAuditVerify(f *cliFlags, opts auditVerifyOptions) error {
-	confirm := opts.confirm || opts.yes
-	if opts.repair && !confirm {
+func runAuditVerify(f *cliFlags, opts auditVerifyOptions) error { //nolint:gocyclo,nestif // Verification, optional repair preview, mutation audit, printing, and strict-mode handling form one command flow.
+	confirm := opts.confirm
+	planRepair := opts.repair && isPlanOnly(f)
+	if opts.repair && !confirm && !planRepair {
 		return apperrors.New(apperrors.CodeUsageError, "audit verify --repair requires --confirm", nil)
 	}
 	path, err := auditPath(opts.path)
@@ -269,17 +304,60 @@ func runAuditVerify(f *cliFlags, opts auditVerifyOptions) error {
 	if opts.decrypt {
 		privateKey = envWithDeprecatedAlias(cfgovAuditPrivateKeyEnv, deprecatedCfgovAuditPrivateKeyEnv)
 	}
-	result, err := audit.Verify(path, audit.VerifyOptions{
+	verifyOptions := audit.VerifyOptions{
 		Decrypt:    opts.decrypt,
 		PrivateKey: privateKey,
-		Repair:     opts.repair,
-		Confirm:    confirm,
-	})
+		Repair:     opts.repair && !planRepair,
+		Confirm:    confirm && !planRepair,
+	}
+	var result audit.VerifyResult
+	//nolint:nestif // Repair keeps preview binding, R3 authorization, intent, apply, and outcome in one ordered branch.
+	if opts.repair && !planRepair {
+		var previewCandidates []string
+		previewCandidates, err = strictAuditRotatedFiles(path)
+		if err != nil {
+			return err
+		}
+		err = withAuditControlPolicyLock(f, allowAuditRepair, func() error {
+			metadata := mutationValueMetadata("audit.repair", previewCandidates)
+			metadata.Items = len(previewCandidates) + 1
+			metadata.Updates = metadata.Items
+			mutation, auditErr := beginMutationAudit(f, mutationAuditSpec{
+				Action:    "audit.repair",
+				Target:    audit.EventTarget{ResourceType: "audit", Resource: path},
+				Metadata:  metadata,
+				AuditPath: auditControlPath(path),
+			})
+			if auditErr != nil {
+				return auditErr
+			}
+			var operationErr error
+			result, operationErr = repairAudit(path, previewCandidates, verifyOptions)
+			repaired := 0
+			for _, file := range result.Files {
+				if file.Repaired {
+					repaired++
+				}
+			}
+			return finishBatchMutationAudit(mutation, len(result.Files), repaired, 0, operationErr)
+		})
+		if err != nil {
+			return err
+		}
+	} else {
+		result, err = audit.Verify(path, verifyOptions)
+	}
 	if err != nil {
 		return err
 	}
-	if err := printAuditVerifyResult(f, result); err != nil {
-		return err
+	if planRepair {
+		if err := printLocalChangePlan(f, "audit", "repair", path, map[string]any{"verification": result}); err != nil {
+			return err
+		}
+	} else {
+		if err := printAuditVerifyResult(f, result); err != nil {
+			return err
+		}
 	}
 	if opts.strict && auditVerifyHasProblems(result) {
 		return apperrors.New(apperrors.CodeValidationFailed, "audit verification failed", nil)
@@ -288,7 +366,7 @@ func runAuditVerify(f *cliFlags, opts auditVerifyOptions) error {
 }
 
 func auditVerifyHasProblems(result audit.VerifyResult) bool {
-	return result.Malformed > 0 || result.SchemaErrors > 0 || result.TimestampOrderViolations > 0
+	return result.HasProblems()
 }
 
 func printAuditVerifyResult(f *cliFlags, result audit.VerifyResult) error {
@@ -297,9 +375,10 @@ func printAuditVerifyResult(f *cliFlags, result audit.VerifyResult) error {
 	case "json":
 		return p.JSONData("AuditVerifyResult", result)
 	case "plain":
-		p.Info(fmt.Sprintf("total=%d valid=%d malformed=%d schemaErrors=%d timestampOrderViolations=%d",
-			result.Total, result.Valid, result.Malformed, result.SchemaErrors, result.TimestampOrderViolations))
-		return nil
+		return p.Info(fmt.Sprintf("total=%d valid=%d malformed=%d schemaErrors=%d timestampOrderViolations=%d authenticated=%d legacyUnauthenticated=%d encryptedOpaque=%d integrityErrors=%d sequenceViolations=%d checkpointViolations=%d truncationDetected=%t lockPresent=%t",
+			result.Total, result.Valid, result.Malformed, result.SchemaErrors, result.TimestampOrderViolations,
+			result.Authenticated, result.LegacyUnauthenticated, result.EncryptedOpaque, result.IntegrityErrors,
+			result.SequenceViolations, result.CheckpointViolations, result.TruncationDetected, result.Lock.Present))
 	default:
 		rows := make([][]string, 0, len(result.Files))
 		for _, file := range result.Files {
@@ -309,13 +388,23 @@ func printAuditVerifyResult(f *cliFlags, result audit.VerifyResult) error {
 				fmt.Sprintf("%d", file.Valid),
 				fmt.Sprintf("%d", file.Malformed),
 				fmt.Sprintf("%d", file.SchemaError),
+				fmt.Sprintf("%d", file.TimestampOrderViolations),
+				fmt.Sprintf("%d", file.Authenticated),
+				fmt.Sprintf("%d", file.LegacyUnauthenticated),
+				fmt.Sprintf("%d", file.EncryptedOpaque),
+				fmt.Sprintf("%d", file.IntegrityErrors),
+				fmt.Sprintf("%d", file.SequenceViolations),
+				auditDashIfEmpty(file.Quarantine),
 				fmt.Sprintf("%t", file.Repaired),
 			})
 		}
-		p.Table([]string{"PATH", "TOTAL", "VALID", "MALFORMED", "SCHEMA_ERRORS", "REPAIRED"}, rows)
-		p.Info(fmt.Sprintf("total=%d valid=%d malformed=%d schemaErrors=%d timestampOrderViolations=%d lockPresent=%t",
-			result.Total, result.Valid, result.Malformed, result.SchemaErrors, result.TimestampOrderViolations, result.Lock.Present))
-		return nil
+		if err := p.Table([]string{"PATH", "TOTAL", "VALID", "MALFORMED", "SCHEMA_ERRORS", "TIMESTAMP_ORDER_VIOLATIONS", "AUTHENTICATED", "LEGACY_UNAUTHENTICATED", "ENCRYPTED_OPAQUE", "INTEGRITY_ERRORS", "SEQUENCE_VIOLATIONS", "QUARANTINE", "REPAIRED"}, rows); err != nil {
+			return err
+		}
+		return p.Info(fmt.Sprintf("total=%d valid=%d malformed=%d schemaErrors=%d timestampOrderViolations=%d authenticated=%d legacyUnauthenticated=%d encryptedOpaque=%d integrityErrors=%d sequenceViolations=%d checkpointViolations=%d truncationDetected=%t lockPresent=%t",
+			result.Total, result.Valid, result.Malformed, result.SchemaErrors, result.TimestampOrderViolations,
+			result.Authenticated, result.LegacyUnauthenticated, result.EncryptedOpaque, result.IntegrityErrors,
+			result.SequenceViolations, result.CheckpointViolations, result.TruncationDetected, result.Lock.Present))
 	}
 }
 
@@ -325,7 +414,8 @@ func auditPruneCmd(f *cliFlags) *cobra.Command {
 		Use:   "prune",
 		Short: "Prune rotated audit logs",
 		Args:  cobra.NoArgs,
-		RunE: func(_ *cobra.Command, _ []string) error {
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			opts.dryRunSet = cmd.Flags().Changed("dry-run")
 			return runAuditPrune(f, opts)
 		},
 	}
@@ -333,11 +423,11 @@ func auditPruneCmd(f *cliFlags) *cobra.Command {
 	cmd.Flags().StringVar(&opts.before, "before", "", "Prune rotated logs before this time (30d / RFC3339 / YYYY-MM-DD)")
 	cmd.Flags().IntVar(&opts.keepLast, "keep-last", -1, "Keep the newest N rotated logs (0 = delete all rotated logs)")
 	cmd.Flags().BoolVar(&opts.dryRun, "dry-run", true, "Preview matched rotated logs without deleting")
-	cmd.Flags().BoolVar(&opts.confirm, "confirm", false, "Actually delete matched rotated logs")
+	cmd.Flags().BoolVar(&opts.confirm, "confirm", false, "Confirm deletion; R3 authorization is also required")
 	return cmd
 }
 
-func runAuditPrune(f *cliFlags, opts auditPruneOptions) error {
+func runAuditPrune(f *cliFlags, opts auditPruneOptions) error { //nolint:gocyclo // Selector validation, preview precedence, deletion, audit, and output form one command flow.
 	if opts.before == "" && opts.keepLast < 0 {
 		return apperrors.New(apperrors.CodeUsageError, "audit prune requires --before or --keep-last", nil)
 	}
@@ -351,30 +441,115 @@ func runAuditPrune(f *cliFlags, opts auditPruneOptions) error {
 	if err != nil {
 		return err
 	}
-	candidates, err := auditPruneCandidates(path, opts)
+	expectedRotated, err := strictAuditRotatedFiles(path)
 	if err != nil {
 		return err
 	}
-	if opts.confirm {
-		for _, filePath := range candidates {
-			if err := os.Remove(filePath); err != nil {
-				return apperrors.New(apperrors.CodeLocalIOError, "failed to delete rotated audit log", err)
-			}
-		}
-		if len(candidates) > 0 {
-			evt := audit.Event{
-				EventType:  audit.EventAuditPrune,
-				Operator:   currentOperator(f),
-				Context:    audit.EventContext{Name: f.contextName()},
-				Status:     audit.StatusSuccess,
-				AuditPrune: &audit.AuditPruneDetail{DeletedFiles: candidates, Count: len(candidates)},
-			}
-			if err := audit.AppendWithOptions(path, evt, auditOptions(f)); err != nil {
-				return err
-			}
-		}
+	candidates, err := auditPruneCandidatesFrom(path, opts, expectedRotated, time.Now().UTC())
+	if err != nil {
+		return err
 	}
-	return printAuditPruneResult(f, auditPruneResult{DryRun: !opts.confirm, DeletedFiles: candidates, Count: len(candidates)})
+	preview := !opts.confirm || isPlanOnly(f) || (opts.dryRunSet && opts.dryRun)
+	if preview {
+		return printAuditPruneResult(f, auditPruneResult{DryRun: true, DeletedFiles: candidates, Count: len(candidates)})
+	}
+	var pruneResult audit.PruneResult
+	err = withAuditControlPolicyLock(f, allowAuditPrune, func() error {
+		if len(candidates) == 0 {
+			return nil
+		}
+		metadata := mutationValueMetadata("audit.prune", candidates)
+		metadata.Items = len(candidates)
+		metadata.Deletes = len(candidates)
+		mutation, auditErr := beginMutationAudit(f, mutationAuditSpec{
+			Action:    "audit.prune",
+			Target:    audit.EventTarget{ResourceType: "audit", Resource: path},
+			Metadata:  metadata,
+			AuditPath: auditControlPath(path),
+		})
+		if auditErr != nil {
+			return auditErr
+		}
+		var operationErr error
+		pruneResult, operationErr = audit.PruneRotatedFiles(path, candidates, audit.PruneOptions{
+			Confirm:              true,
+			ExpectedRotatedFiles: append([]string{}, expectedRotated...),
+		})
+		return finishBatchMutationAudit(mutation, len(candidates), len(pruneResult.DeletedFiles), 0, operationErr)
+	})
+	if err != nil {
+		return err
+	}
+	return printAuditPruneResult(f, auditPruneResult{
+		DryRun:          false,
+		DeletedFiles:    pruneResult.DeletedFiles,
+		Count:           len(pruneResult.DeletedFiles),
+		Started:         pruneResult.Started,
+		CheckpointState: pruneResult.CheckpointState,
+	})
+}
+
+func repairAudit(
+	path string,
+	previewCandidates []string,
+	verifyOptions audit.VerifyOptions,
+) (audit.VerifyResult, error) {
+	verifyOptions.ExpectedRotatedFiles = append([]string{}, previewCandidates...)
+	return audit.Verify(path, verifyOptions)
+}
+
+func authorizeAuditControlConfig(
+	f *cliFlags,
+	cfg *corectx.Config[cfgovctx.Context],
+	required safety.AllowFlag,
+) error {
+	if cfg == nil {
+		return apperrors.New(apperrors.CodeLocalIOError, "audit control policy is unavailable", nil)
+	}
+	contextName := strings.TrimSpace(cfg.CurrentContext)
+	if contextName == "" {
+		return authorizeForContext(f, safety.R3, cfgovctx.Context{}, required, "")
+	}
+	policy, ok := cfg.Contexts[contextName]
+	if !ok {
+		return apperrors.New(
+			apperrors.CodeAuthorizationRequired,
+			fmt.Sprintf("current context %q has no persisted policy; refusing audit evidence mutation", contextName),
+			nil,
+		)
+	}
+	return authorizeForContext(f, safety.R3, policy, required, contextName)
+}
+
+func withAuditControlPolicyLock(
+	f *cliFlags,
+	required safety.AllowFlag,
+	action func() error,
+) (retErr error) {
+	dir, err := corectx.ConfigDir()
+	if err != nil {
+		return err
+	}
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return apperrors.New(apperrors.CodeLocalIOError, "failed to create context directory for audit control", err)
+	}
+	lock := lockfile.New(filepath.Join(dir, "config"))
+	if err := lock.Acquire(); err != nil {
+		return err
+	}
+	defer func() {
+		if err := lock.Release(); retErr == nil && err != nil {
+			retErr = apperrors.New(apperrors.CodeLocalIOError, "failed to release audit control policy lock", err)
+		}
+	}()
+	cfg, err := cfgovctx.Load()
+	if err != nil {
+		return err
+	}
+	if err := authorizeAuditControlConfig(f, cfg, required); err != nil {
+		return err
+	}
+	return action()
 }
 
 func auditPath(override string) (string, error) {
@@ -388,24 +563,37 @@ func auditPath(override string) (string, error) {
 	return path, nil
 }
 
+func auditControlPath(path string) string {
+	return filepath.Join(filepath.Dir(path), "."+filepath.Base(path)+"-control")
+}
+
 func auditPruneCandidates(path string, opts auditPruneOptions) ([]string, error) {
-	rotated, err := audit.RotatedFiles(path)
+	rotated, err := strictAuditRotatedFiles(path)
 	if err != nil {
 		return nil, err
 	}
+	return auditPruneCandidatesFrom(path, opts, rotated, time.Now().UTC())
+}
+
+func auditPruneCandidatesFrom(
+	path string,
+	opts auditPruneOptions,
+	rotated []string,
+	now time.Time,
+) ([]string, error) {
 	if opts.keepLast >= 0 {
 		if opts.keepLast >= len(rotated) {
 			return []string{}, nil
 		}
 		return append([]string{}, rotated[:len(rotated)-opts.keepLast]...), nil
 	}
-	cutoff, err := parseAuditPruneBefore(opts.before, time.Now().UTC())
+	cutoff, err := parseAuditPruneBefore(opts.before, now)
 	if err != nil {
 		return nil, err
 	}
 	out := make([]string, 0, len(rotated))
 	for _, filePath := range rotated {
-		ts, ok := audit.RotatedFileTimestamp(path, filePath)
+		ts, _, ok := strictAuditRotatedFileOrder(path, filePath)
 		if ok && ts.Before(cutoff) {
 			out = append(out, filePath)
 		}
@@ -425,13 +613,18 @@ func parseAuditPruneBefore(value string, now time.Time) (time.Time, error) {
 }
 
 func printAuditPruneResult(f *cliFlags, result auditPruneResult) error {
+	if result.DryRun {
+		markPreview(f)
+	}
 	p := newPrinter(f)
 	switch f.Output {
 	case "json":
 		return p.JSONData("AuditPruneResult", result)
 	case "plain":
 		for _, filePath := range result.DeletedFiles {
-			p.Info(filePath)
+			if err := p.Info(filePath); err != nil {
+				return err
+			}
 		}
 		return nil
 	default:
@@ -440,18 +633,17 @@ func printAuditPruneResult(f *cliFlags, result auditPruneResult) error {
 		if !result.DryRun {
 			action = "deleted"
 		}
-		files := append([]string{}, result.DeletedFiles...)
-		sort.Strings(files)
-		for _, filePath := range files {
+		for _, filePath := range result.DeletedFiles {
 			rows = append(rows, []string{action, filepath.Base(filePath), filePath})
 		}
 		if len(rows) == 0 {
-			p.Info("(no rotated audit logs matched)")
-			return nil
+			return p.Info("(no rotated audit logs matched)")
 		}
-		p.Table([]string{"ACTION", "FILE", "PATH"}, rows)
+		if err := p.Table([]string{"ACTION", "FILE", "PATH"}, rows); err != nil {
+			return err
+		}
 		if result.DryRun {
-			p.Info(fmt.Sprintf("(dry-run: pass --confirm to delete %d rotated audit logs)", result.Count))
+			return p.Info(fmt.Sprintf("(dry-run: deleting %d rotated audit logs requires --confirm --yes --ticket <ticket> --allow-audit-prune)", result.Count))
 		}
 		return nil
 	}

@@ -7,7 +7,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/JiangHe12/opskit-core/apperrors"
+	"github.com/JiangHe12/opskit-core/v2/apperrors"
 	"go.etcd.io/etcd/api/v3/mvccpb"
 	clientv3 "go.etcd.io/etcd/client/v3"
 
@@ -130,6 +130,14 @@ func TestCASConflictMapsToAppConflict(t *testing.T) {
 	_, err := backend.Put(context.Background(), cfgov.PutRequest{Coordinate: cfgov.Coordinate{Namespace: "prod", Key: "app"}, Content: []byte("x"), ExpectedRevision: "7"})
 	if got := apperrors.AsAppError(err).Code; got != apperrors.CodeConflict {
 		t.Fatalf("Put() code = %s, want %s", got, apperrors.CodeConflict)
+	}
+	_, err = backend.Put(context.Background(), cfgov.PutRequest{
+		Coordinate:    cfgov.Coordinate{Namespace: "prod", Key: "new"},
+		Content:       []byte("x"),
+		RequireAbsent: true,
+	})
+	if got := apperrors.AsAppError(err).Code; got != apperrors.CodeConflict {
+		t.Fatalf("Put(require absent) code = %s, want %s", got, apperrors.CodeConflict)
 	}
 }
 

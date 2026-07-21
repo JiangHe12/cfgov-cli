@@ -4,8 +4,8 @@ import (
 	"context"
 	"testing"
 
-	"github.com/JiangHe12/opskit-core/apperrors"
-	"github.com/JiangHe12/opskit-core/safety"
+	"github.com/JiangHe12/opskit-core/v2/apperrors"
+	"github.com/JiangHe12/opskit-core/v2/safety"
 
 	"github.com/JiangHe12/cfgov-cli/internal/cfgov"
 	"github.com/JiangHe12/cfgov-cli/internal/cfgovctx"
@@ -66,6 +66,21 @@ func (f fakeConfigBackend) Describe() cfgov.Description {
 
 func (f fakeConfigBackend) Capabilities() cfgov.Capabilities { return cfgov.Capabilities{} }
 
+type recordingConfigBackend struct {
+	fakeConfigBackend
+	supportsCAS bool
+	puts        []cfgov.PutRequest
+}
+
+func (f *recordingConfigBackend) Put(_ context.Context, req cfgov.PutRequest) (cfgov.Blob, error) {
+	f.puts = append(f.puts, req)
+	return cfgov.Blob{Coordinate: req.Coordinate, Content: req.Content, Revision: "next"}, nil
+}
+
+func (f *recordingConfigBackend) Capabilities() cfgov.Capabilities {
+	return cfgov.Capabilities{SupportsCAS: f.supportsCAS, SupportsRevision: true}
+}
+
 func TestReconcilePrunePlanIsR3(t *testing.T) {
 	t.Parallel()
 	backend := fakeConfigBackend{namespace: "ns", blobs: map[string][]byte{
@@ -117,6 +132,115 @@ func TestImportPlanSkipExistingAndOverwriteAreDistinct(t *testing.T) {
 	}
 }
 
+func TestBulkPlanBindsCreateAndUpdatePreconditions(t *testing.T) {
+	t.Parallel()
+	backend := &recordingConfigBackend{
+		fakeConfigBackend: fakeConfigBackend{
+			namespace: "ns",
+			blobs: map[string][]byte{
+				"existing.yaml": []byte("old\n"),
+			},
+		},
+		supportsCAS: true,
+	}
+	locals := []localConfig{
+		{Key: "existing.yaml", Content: []byte("new\n"), Type: "yaml"},
+		{Key: "new.yaml", Content: []byte("created\n"), Type: "yaml"},
+	}
+	plan, err := buildUpsertPlan(
+		context.Background(),
+		backend,
+		"ns",
+		locals,
+		upsertPlanOptions{Action: "import", Overwrite: true},
+	)
+	if err != nil {
+		t.Fatalf("buildUpsertPlan() error = %v", err)
+	}
+	if len(plan.Create) != 1 || len(plan.Update) != 1 {
+		t.Fatalf("plan = %#v, want one create and one update", plan)
+	}
+	if plan.Update[0].Revision == "" {
+		t.Fatalf("update revision = empty, want observed backend revision")
+	}
+	changes := localsForPlannedItems(locals, plan.Create, plan.Update)
+	if len(changes) != 2 {
+		t.Fatalf("changes = %#v, want two bound changes", changes)
+	}
+	bound := map[string]localConfig{}
+	for _, item := range changes {
+		bound[item.Key] = item
+	}
+	if !bound["new.yaml"].RequireAbsent || bound["new.yaml"].ExpectedRevision != "" {
+		t.Fatalf("create binding = %#v, want RequireAbsent only", bound["new.yaml"])
+	}
+	if bound["existing.yaml"].RequireAbsent ||
+		bound["existing.yaml"].ExpectedRevision != plan.Update[0].Revision {
+		t.Fatalf("update binding = %#v, want revision %q", bound["existing.yaml"], plan.Update[0].Revision)
+	}
+}
+
+func TestReconcilePruneBindsObservedRevision(t *testing.T) {
+	t.Parallel()
+	backend := fakeConfigBackend{namespace: "ns", blobs: map[string][]byte{
+		"orphan.yaml": []byte("old\n"),
+	}}
+	plan, err := buildReconcilePlan(
+		context.Background(),
+		backend,
+		"ns",
+		nil,
+		reconcilePlanOptions{Prune: true, PruneScopes: []string{"ns"}},
+	)
+	if err != nil {
+		t.Fatalf("buildReconcilePlan() error = %v", err)
+	}
+	if len(plan.Prune) != 1 || plan.Prune[0].Revision == "" {
+		t.Fatalf("prune = %#v, want observed revision", plan.Prune)
+	}
+}
+
+func TestUnsupportedCASRejectsWholeBatchBeforeAnyWrite(t *testing.T) {
+	t.Parallel()
+	backend := &recordingConfigBackend{
+		fakeConfigBackend: fakeConfigBackend{namespace: "ns", blobs: map[string][]byte{}},
+		supportsCAS:       false,
+	}
+	items := []localConfig{
+		{Key: "a.yaml", Content: []byte("a\n"), Type: "yaml", RequireAbsent: true},
+		{Key: "b.yaml", Content: []byte("b\n"), Type: "yaml", RequireAbsent: true},
+	}
+	f := newDefaultFlags()
+	_, err := applyUpserts(context.Background(), f, backend, cfgovctx.Context{}, items, "config.import")
+	if got := apperrors.AsAppError(err).Code; got != apperrors.CodeNotImplemented {
+		t.Fatalf("applyUpserts() code = %s, want %s (err=%v)", got, apperrors.CodeNotImplemented, err)
+	}
+	if len(backend.puts) != 0 {
+		t.Fatalf("puts = %#v, want zero writes on unsupported CAS", backend.puts)
+	}
+}
+
+func TestUnsupportedCASStillAllowsPlanConstruction(t *testing.T) {
+	t.Parallel()
+	backend := &recordingConfigBackend{
+		fakeConfigBackend: fakeConfigBackend{namespace: "ns", blobs: map[string][]byte{}},
+		supportsCAS:       false,
+	}
+	plan, err := buildUpsertPlan(
+		context.Background(),
+		backend,
+		"ns",
+		[]localConfig{{Key: "new.yaml", Content: []byte("created\n"), Type: "yaml"}},
+		upsertPlanOptions{Action: "import"},
+	)
+	if err != nil {
+		t.Fatalf("buildUpsertPlan() error = %v; plan/dry-run must remain available", err)
+	}
+	if len(plan.Create) != 1 {
+		t.Fatalf("plan = %#v, want create preview", plan)
+	}
+}
+
 func TestConfigPushStrictModes(t *testing.T) {
 	t.Parallel()
 	if err := validateConfigPushMode(true, false, true); apperrors.AsAppError(err).Code != apperrors.CodeResourceAlreadyExists {
@@ -160,6 +284,7 @@ func TestReconcilePruneRequiresAllowFlag(t *testing.T) {
 	f := newDefaultFlags()
 	f.Yes = true
 	f.Ticket = "OPS-1"
+	f.AllowReconcile = true
 	err := authorize(f, safety.R3, meta, allowProductionPrune)
 	if apperrors.AsAppError(err).Code != apperrors.CodeAuthorizationRequired {
 		t.Fatalf("error = %v, want authorization required", err)
@@ -170,15 +295,21 @@ func TestReconcilePruneRequiresAllowFlag(t *testing.T) {
 	}
 }
 
-func TestProtectedReconcileWithoutPruneDoesNotRequirePruneAllowFlag(t *testing.T) {
+func TestProtectedReconcileWithoutPruneRequiresR3AllowFlag(t *testing.T) {
 	t.Parallel()
 	meta := cfgovctx.Context{}
 	meta.Protected = true
 	f := newDefaultFlags()
 	f.Yes = true
 	f.Ticket = "OPS-1"
+	f.AllowPrune = true
+	err := authorizeReconcile(f, safety.R2, meta, "")
+	if err == nil || apperrors.AsAppError(err).Code != apperrors.CodeAuthorizationRequired {
+		t.Fatalf("error = %v, want authorization required", err)
+	}
+	f.AllowReconcile = true
 	if err := authorizeReconcile(f, safety.R2, meta, ""); err != nil {
-		t.Fatalf("authorize protected reconcile without prune error = %v", err)
+		t.Fatalf("authorize with reconcile allow error = %v", err)
 	}
 }
 

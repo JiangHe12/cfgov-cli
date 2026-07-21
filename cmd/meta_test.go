@@ -65,7 +65,7 @@ func TestCapabilitiesJSONFamilySchema(t *testing.T) {
 	if strings.Join(env.Supported.ContextAPIVersions, ",") != "cfgov-cli.io/context/v1" {
 		t.Fatalf("context API versions = %#v", env.Supported.ContextAPIVersions)
 	}
-	if strings.Join(env.Supported.AuditAPIVersions, ",") != auditAPIVersion {
+	if strings.Join(env.Supported.AuditAPIVersions, ",") != auditAPIVersion+","+mutationAuditAPIVersion {
 		t.Fatalf("audit API versions = %#v", env.Supported.AuditAPIVersions)
 	}
 	if len(env.Supported.Commands) != 0 || top["backend"] != nil || top["limits"] != nil || top["features"] != nil {
@@ -78,12 +78,12 @@ func TestCapabilitiesJSONFamilySchema(t *testing.T) {
 		t.Fatalf("domain metadata incomplete: %+v", env.Domain)
 	}
 	environment := "," + strings.Join(env.Domain.Environment, ",") + ","
-	for _, name := range []string{"CFGOV_AUDIT_PRIVATE_KEY", "CFGOV_CREDENTIAL_PASSPHRASE", "CFGOV_OPERATOR"} {
+	for _, name := range []string{"CFGOV_AUDIT_PRIVATE_KEY", "CFGOV_CREDENTIAL_PASSPHRASE"} {
 		if !strings.Contains(environment, ","+name+",") {
 			t.Fatalf("environmentVariables missing %s: %#v", name, env.Domain.Environment)
 		}
 	}
-	for _, name := range []string{"CFGOV_CLI_AUDIT_PRIVATE_KEY", "CFGOV_CLI_CREDENTIAL_PASSPHRASE", "CFGOV_CLI_OPERATOR"} {
+	for _, name := range []string{"CFGOV_OPERATOR", "CFGOV_CLI_AUDIT_PRIVATE_KEY", "CFGOV_CLI_CREDENTIAL_PASSPHRASE", "CFGOV_CLI_OPERATOR"} {
 		if strings.Contains(environment, ","+name+",") {
 			t.Fatalf("environmentVariables should not advertise deprecated %s: %#v", name, env.Domain.Environment)
 		}
@@ -95,11 +95,44 @@ func TestGlobalFlagsHelp(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Execute() error = %v", err)
 	}
-	for _, flag := range []string{"--debug", "--trace", "--no-color"} {
+	for _, flag := range []string{"--debug", "--trace", "--no-color", "--allow-production-reconcile"} {
 		if !strings.Contains(out, flag) {
 			t.Fatalf("help missing %s:\n%s", flag, out)
 		}
 	}
+}
+
+func TestNoOpGlobalFlagsAndCapabilitiesAreNotAdvertised(t *testing.T) {
+	root := newRootCmdWith(newDefaultFlags())
+	for _, name := range []string{"concurrency", "backup-keep"} {
+		if flag := root.PersistentFlags().Lookup(name); flag != nil {
+			t.Fatalf("global --%s still advertised without an implementation", name)
+		}
+	}
+	data := buildCapabilities(newDefaultFlags(), currentBackendCapabilities(&cliFlags{Backend: "nacos"}))
+	if data.Domain.Limits.DefaultConcurrency != 1 || data.Domain.Limits.MaxConcurrency != 1 {
+		t.Fatalf("concurrency limits = %#v, want fixed single-threaded execution", data.Domain.Limits)
+	}
+	payload, err := json.Marshal(data.Domain.Limits)
+	if err != nil {
+		t.Fatalf("Marshal(limits) error = %v", err)
+	}
+	if strings.Contains(string(payload), "backupKeep") {
+		t.Fatalf("capabilities still advertise unimplemented backup retention: %s", payload)
+	}
+}
+
+func TestCapabilitiesDeclareProtectedReconcileAllowFlag(t *testing.T) {
+	data := buildCapabilities(newDefaultFlags(), currentBackendCapabilities(&cliFlags{Backend: "nacos"}))
+	for _, command := range data.Domain.Commands {
+		if command.Noun == "config" && command.Verb == "reconcile(no prune, protected ctx)" {
+			if command.Risk != "R3" || command.AllowFlag != "allow-production-reconcile" {
+				t.Fatalf("protected reconcile capability = %#v", command)
+			}
+			return
+		}
+	}
+	t.Fatal("protected reconcile capability is missing")
 }
 
 func TestGlobalFlagsWithVersion(t *testing.T) {

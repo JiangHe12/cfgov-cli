@@ -5,8 +5,8 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/JiangHe12/opskit-core/apperrors"
-	"github.com/JiangHe12/opskit-core/safety"
+	"github.com/JiangHe12/opskit-core/v2/apperrors"
+	"github.com/JiangHe12/opskit-core/v2/safety"
 
 	"github.com/JiangHe12/cfgov-cli/internal/cfgovctx"
 	"github.com/JiangHe12/cfgov-cli/internal/rule"

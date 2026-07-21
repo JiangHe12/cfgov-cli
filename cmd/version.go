@@ -4,6 +4,8 @@ import (
 	"fmt"
 
 	"github.com/spf13/cobra"
+
+	"github.com/JiangHe12/opskit-core/v2/apperrors"
 )
 
 func newVersionCmd(f *cliFlags) *cobra.Command {
@@ -18,10 +20,14 @@ func newVersionCmd(f *cliFlags) *cobra.Command {
 				return newPrinter(f).JSONData("VersionInfo", data)
 			}
 			if f.Output == "plain" {
-				_, _ = fmt.Fprintln(newPrinter(f).Out, v)
+				if _, err := fmt.Fprintln(newPrinter(f).Out, v); err != nil {
+					return apperrors.New(apperrors.CodeLocalIOError, "failed to write version output", err)
+				}
 				return nil
 			}
-			_, _ = fmt.Fprintf(newPrinter(f).Out, "cfgov-cli %s (commit: %s, built: %s)\n", v, c, b)
+			if _, err := fmt.Fprintf(newPrinter(f).Out, "cfgov-cli %s (commit: %s, built: %s)\n", v, c, b); err != nil {
+				return apperrors.New(apperrors.CodeLocalIOError, "failed to write version output", err)
+			}
 			return nil
 		},
 	}

@@ -16,27 +16,35 @@ Use `cfgov` for governed configuration operations across Nacos, Apollo, etcd, Ku
 - R0 reads are audited. R1 requires `--yes`. R2 requires `--yes` and a non-empty `--ticket`. R3 requires those plus the exact `--allow-*` flag.
 - Protected contexts raise the effective risk by one tier through opskit-core safety.
 - Audit records metadata, revisions, counts, and sha256 fingerprints; never put raw configuration or rule bodies into tickets, reasons, or summaries.
+- Authorization and audit identity comes only from the local OS username plus hostname. The legacy root `--operator`, `CFGOV_OPERATOR`, and `CFGOV_CLI_OPERATOR` inputs are deprecated and ignored; `audit query --operator` is only a record filter.
+- This identity rule does not separate an AI process from a human using the same OS account. That boundary requires externally verified approval or a separate OS identity.
 
 ## Contexts And Backends
 
 Create and select contexts with:
 
 ```bash
-cfgov ctx set <name> --backend nacos --server <url> --namespace <namespace> [--username <user>] [--protected]
-cfgov ctx set <name> --backend apollo --server <url> --apollo-app-id <appId> --apollo-env <env> --apollo-cluster <cluster> --apollo-namespace <namespace> [--apollo-rule-namespace SENTINEL] [--protected]
-cfgov ctx set <name> --backend etcd --server <host:port,host:port> [--etcd-key-prefix <prefix>] [--etcd-rule-namespace SENTINEL] [--namespace <namespace>] [--etcd-ca-cert <path>] [--etcd-client-cert <path>] [--etcd-client-key <path>] [--protected]
-cfgov ctx set <name> --backend k8s [--k8s-kubeconfig <path>] [--k8s-context <ctx>] --namespace <k8s-namespace> [--protected]
-cfgov ctx set <name> --backend consul --server <host:port> [--consul-key-prefix <prefix>] [--consul-rule-namespace SENTINEL] [--namespace <namespace>] [--consul-ca-cert <path>] [--consul-client-cert <path>] [--consul-client-key <path>] [--protected]
-cfgov ctx use <name>
+cfgov ctx set <name> --backend nacos --server <url> --namespace <namespace> [--username <user>] [--protected] --plan -o json
+cfgov ctx set <name> --backend apollo --server <url> --apollo-app-id <appId> --apollo-env <env> --apollo-cluster <cluster> --apollo-namespace <namespace> [--apollo-rule-namespace SENTINEL] [--protected] --plan -o json
+cfgov ctx set <name> --backend etcd --server <host:port,host:port> [--etcd-key-prefix <prefix>] [--etcd-rule-namespace SENTINEL] [--namespace <namespace>] [--etcd-ca-cert <path>] [--etcd-client-cert <path>] [--etcd-client-key <path>] [--protected] --plan -o json
+cfgov ctx set <name> --backend k8s [--k8s-kubeconfig <path>] [--k8s-context <ctx>] --namespace <k8s-namespace> [--protected] --plan -o json
+cfgov ctx set <name> --backend consul --server <host:port> [--consul-key-prefix <prefix>] [--consul-rule-namespace SENTINEL] [--namespace <namespace>] [--consul-ca-cert <path>] [--consul-client-cert <path>] [--consul-client-key <path>] [--protected] --plan -o json
+cfgov ctx use <name> --plan -o json
 cfgov ctx list -o json
 cfgov ctx current -o json
-cfgov ctx role set <name> --target-operator <operator> --role reader|writer|admin
+cfgov ctx role set <name> --target-operator <operator> --role reader|writer|admin --yes --ticket <ticket> --allow-role-change
 cfgov ctx role list <name> -o json
 cfgov ctx migrate-credentials --dry-run
-cfgov ctx migrate-credentials --yes
+cfgov ctx migrate-credentials --yes --ticket <ticket> --allow-context-change
 ```
 
+Every `ctx set`/`ctx use` line above is a preview. To apply the reviewed command, rerun the exact command with `--plan` replaced by `--yes --ticket <human-ticket> --allow-context-change`. Never supply those human-approval values yourself.
+
+Context create/replace/switch/import/credential migration is always R3 with `--allow-context-change`; context deletion is R3 with `--allow-context-delete`; role set/unset is R3 with `--allow-role-change`. Existing set/import targets authorize against their own pre-change protected/RBAC policy. A new target uses the persisted current context's pre-change policy, or an empty bootstrap policy when no current context exists. `ctx use` authorizes against the old persisted current policy, falling back to the target policy only when no current context exists. Every apply path re-reads and authorizes its pre-change policy inside the context-file lock; credential migration authorizes the complete locked batch before its first credential write. Preview modes return before authorization and perform no target mutation. Portable context import accepts exactly one YAML document, rejects unknown fields, and validates credential backend availability, `ticketPattern` syntax, and inline `reader`/`writer`/`admin` roles without writing credentials.
+
 For authenticated Nacos, prefer `--username <user>` in the context and `CFGOV_PASSWORD` at command runtime when no credential is stored. To persist a password, use `ctx set --password <password> --credential-backend keychain|encrypted-file`. `--server http://user:pass@host:8848` remains supported, but explicit `--password` or `CFGOV_PASSWORD` takes precedence over URL userinfo.
+
+`ctx set --plan` still loads and validates the context configuration and verifies that the selected credential backend exists and is available. It does not write the context or credential store.
 
 `--backend` can temporarily override the current context for one command. Nacos supports config, rule, feature flag, namespace, service, config history, and config listen. Apollo supports config, rule, and feature-flag storage; namespace/service management, history, and listen are not supported and fail closed. etcd supports config, rule, and feature-flag storage plus native watch (`config listen`); history, namespace, and service are not supported. Kubernetes (ConfigMap/Secret) supports config, rule, and feature-flag storage plus object-granular watch (`config listen`) — config keys are `<kind>/<name>/<dataKey>` where `<kind>` is `configmap` or `secret`, rule sets use ConfigMap keys `configmap/{app}-{type}-rules/rules.json` in the context `--namespace`, and namespace/service plus history are not supported and fail closed. Consul supports config, rule, and feature-flag storage plus service registry and watch via blocking query (`config listen`); namespace and history are not supported and fail closed. Always check `cfgov capabilities -o json` for the bound backend.
 
@@ -57,6 +65,8 @@ cfgov config listen --key <key> [--max-events 1] [--long-poll 30s] -o json
 cfgov config export --dir <dir> [--group <group>] [--prefix <prefix>] [--limit 1000] -o json
 ```
 
+An externally canceled `config listen` exits nonzero; treat it as incomplete rather than success.
+
 Write operations:
 
 ```bash
@@ -67,10 +77,20 @@ cfgov config delete --key <key> --yes --ticket <ticket> [--allow-production-conf
 cfgov config import --dir <dir> --dry-run --plan -o json
 cfgov config promote --source-context <ctx> (--key <key>|--prefix <prefix>) --dry-run --diff -o json
 cfgov config rollback --key <key> (--backup-file <file>|--backup-id <id>|--history-id <id>) --dry-run --diff -o json
-cfgov config reconcile --dir <dir> [--prune] --dry-run --plan -o json
+cfgov config reconcile --dir <dir> [--allow-production-reconcile] [--prune --allow-production-prune] --dry-run --plan -o json
 ```
 
-Risk model: `push`, `import`, `promote`, and `rollback` are R1; `delete` is R2 and protected delete becomes R3 with `--allow-production-config-delete`; `reconcile` without prune is R2, while `--prune` is R3 with `--allow-production-prune`.
+Risk model: `push`, `import`, `promote`, and `rollback` are R1; `delete` is R2 and protected delete becomes R3 with `--allow-production-config-delete`; `reconcile` without prune is R2 and protected-context escalation requires `--allow-production-reconcile`, while `--prune` is R3 with `--allow-production-prune`.
+
+`--plan` is a hard target no-mutation override for both backend writes and local mutations (contexts/RBAC/credentials, pull/export, audit repair/prune, backup cleanup, and skill installation). It wins over `--confirm`; command-local `--dry-run` flags and write-command `--diff` paths that return `ChangePlan` are also previews. Every successfully completed preview emits exactly one `command.preview` audit event with `status=skipped`, `preview=true`, and `dryRun=true`; failure to append it fails the command. The governed audit log, including resource-read records for reads that actually occurred, is the only permitted local mutation.
+
+`config export`, `rule export`, and `flag export` are create-only. Generated names and every destination path are preflighted before the mutation intent; collisions fail in plan and apply mode, and apply uses exclusive creation so existing files are never overwritten.
+
+Every actual target mutation synchronously persists a `MutationAuditRecord` intent after authorization/final validation and before the first target write, then an outcome before ordinary success. Batch operations use one pair with aggregate counts. Core v2 commit state is authoritative: only known-not-committed outcomes enter the owner-only, fsynced `<audit.log>.outcome-spool`; committed-post-commit-error and indeterminate outcomes are not blindly queued. An indeterminate replay is renamed with `.indeterminate` and blocks later automatic replay. Every incomplete path returns `AUDIT_INCOMPLETE`; reconcile by `mutationId + phase` before any manual recovery.
+
+Audit and telemetry contain no raw ticket, reason, config/rule/flag body, or full error text. Use the domain-separated SHA-256 fingerprints, byte/item/revision metadata, and machine error code. Historical audit query output blanks legacy ticket/reason/diff/error-message values.
+
+`doctor --plan` marks the audit write check as `skipped` and returns `complete=false`; it does not claim that audit-log writability was verified.
 
 Use `--backup` or `--no-backup` according to policy. Protected destructive writes require an explicit backup decision. Overwrite/delete paths back up current remote content before mutation when backup is required.
 
@@ -164,12 +184,14 @@ cfgov capabilities -o json
 cfgov backup list [--context-filter <ctx>] [--namespace <ns>] [--data-id <key>] -o json
 cfgov backup clean (--before <30d|rfc3339|yyyy-mm-dd>|--keep-last <n>) --confirm -o json
 cfgov audit query [--since 24h] [--until <rfc3339>] [--type <type>] [--operator <name>] [--context-filter <ctx>] [--status <status>] [--limit 100] -o json
-cfgov audit prune (--before <30d|rfc3339|yyyy-mm-dd>|--keep-last <n>) --confirm -o json
 cfgov audit verify [--strict] -o json
+cfgov audit verify --repair --confirm --yes --ticket <ticket> --allow-audit-repair -o json
+cfgov audit prune (--before <30d|rfc3339|yyyy-mm-dd>|--keep-last <n>) -o json
+cfgov audit prune (--before <30d|rfc3339|yyyy-mm-dd>|--keep-last <n>) --confirm --yes --ticket <ticket> --allow-audit-prune -o json
 cfgov version -o json
 cfgov install <agent> --skills
 ```
 
-`backup clean` and `audit prune` default to dry-run; only `--confirm` deletes local files. Do not add `--confirm` unless the human explicitly asked for deletion after reviewing the listed files.
+`backup clean` and `audit prune` default to dry-run. Confirmed audit pruning and repair are fixed R3 evidence mutations requiring `--confirm`, `--yes`, a non-empty human ticket, and the exact `--allow-audit-prune` or `--allow-audit-repair`. They authorize against the persisted current-context policy (empty only when no current context exists), never a `--context` override. Preview returns before authorization and does not change the evidence. Core v2 holds the audit-path lock, binds confirmation to the exact preview set, fully verifies history, and returns `CONFLICT` if that set changed. Pruning supports authenticated v2 history and advances its checkpoint before deletion; repair remains legacy-only. Both operations write control evidence to the sibling `.<audit-base>-control` log. Vault credential backends require an absolute HTTPS address without userinfo, query, or fragment. Do not add confirmation or authorization inputs unless the human explicitly supplied them after reviewing the preview.
 
 Check `cfgov capabilities -o json` before assuming a backend supports a noun or verb.

@@ -5,7 +5,7 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/JiangHe12/opskit-core/apperrors"
+	"github.com/JiangHe12/opskit-core/v2/apperrors"
 
 	etcdBackend "github.com/JiangHe12/cfgov-cli/internal/backend/etcd"
 	k8sBackend "github.com/JiangHe12/cfgov-cli/internal/backend/k8s"

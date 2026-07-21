@@ -31,7 +31,7 @@ import (
 	"k8s.io/client-go/rest"
 	"k8s.io/client-go/tools/clientcmd"
 
-	"github.com/JiangHe12/opskit-core/apperrors"
+	"github.com/JiangHe12/opskit-core/v2/apperrors"
 
 	"github.com/JiangHe12/cfgov-cli/internal/cfgov"
 	"github.com/JiangHe12/cfgov-cli/internal/flag"
@@ -138,6 +138,9 @@ func (b *Backend) Get(ctx context.Context, coord cfgov.Coordinate) (cfgov.Blob, 
 }
 
 func (b *Backend) Put(ctx context.Context, req cfgov.PutRequest) (cfgov.Blob, error) {
+	if err := req.ValidatePreconditions(); err != nil {
+		return cfgov.Blob{}, err
+	}
 	resolved, err := b.resolve(req.Coordinate)
 	if err != nil {
 		return cfgov.Blob{}, err
@@ -369,8 +372,14 @@ func (b *Backend) putConfigMap(ctx context.Context, resolved coordinate, req cfg
 		}
 		return cfgov.Blob{Coordinate: resolved.coord(), Content: append([]byte(nil), req.Content...), Revision: created.ResourceVersion}, nil
 	}
-	if err := checkRevision(item.ResourceVersion, req.ExpectedRevision); err != nil {
-		return cfgov.Blob{}, err
+	if req.RequireAbsent {
+		if _, exists := item.Data[resolved.DataKey]; exists {
+			return cfgov.Blob{}, apperrors.New(apperrors.CodeConflict, "config precondition failed", nil)
+		}
+	} else {
+		if err := checkRevision(item.ResourceVersion, req.ExpectedRevision); err != nil {
+			return cfgov.Blob{}, err
+		}
 	}
 	if item.Data == nil {
 		item.Data = map[string]string{}
@@ -403,8 +412,14 @@ func (b *Backend) putSecret(ctx context.Context, resolved coordinate, req cfgov.
 		}
 		return cfgov.Blob{Coordinate: resolved.coord(), Content: append([]byte(nil), req.Content...), Revision: created.ResourceVersion}, nil
 	}
-	if err := checkRevision(item.ResourceVersion, req.ExpectedRevision); err != nil {
-		return cfgov.Blob{}, err
+	if req.RequireAbsent {
+		if _, exists := item.Data[resolved.DataKey]; exists {
+			return cfgov.Blob{}, apperrors.New(apperrors.CodeConflict, "config precondition failed", nil)
+		}
+	} else {
+		if err := checkRevision(item.ResourceVersion, req.ExpectedRevision); err != nil {
+			return cfgov.Blob{}, err
+		}
 	}
 	if item.Type == "" {
 		item.Type = corev1.SecretTypeOpaque
@@ -607,7 +622,7 @@ func backendErr(message string, err error) error {
 	switch {
 	case k8serrors.IsNotFound(err):
 		return apperrors.New(apperrors.CodeResourceNotFound, message, err)
-	case k8serrors.IsConflict(err):
+	case k8serrors.IsConflict(err), k8serrors.IsAlreadyExists(err):
 		return apperrors.New(apperrors.CodeConflict, "config revision changed", err)
 	default:
 		return apperrors.New(apperrors.CodeBackendError, message, err)

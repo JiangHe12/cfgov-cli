@@ -28,7 +28,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/JiangHe12/opskit-core/apperrors"
+	"github.com/JiangHe12/opskit-core/v2/apperrors"
 	"go.etcd.io/etcd/api/v3/mvccpb"
 	clientv3 "go.etcd.io/etcd/client/v3"
 
@@ -175,18 +175,21 @@ func (b *Backend) Get(ctx context.Context, coord cfgov.Coordinate) (cfgov.Blob, 
 }
 
 func (b *Backend) Put(ctx context.Context, req cfgov.PutRequest) (cfgov.Blob, error) {
+	if err := req.ValidatePreconditions(); err != nil {
+		return cfgov.Blob{}, err
+	}
 	ns, key, fullKey, err := b.resolve(req.Coordinate)
 	if err != nil {
 		return cfgov.Blob{}, err
 	}
-	if req.ExpectedRevision != "" {
-		rev, err := parseRevision(req.ExpectedRevision)
+	if req.RequireAbsent || req.ExpectedRevision != "" {
+		compare, err := etcdPutCompare(fullKey, req.ExpectedRevision)
 		if err != nil {
 			return cfgov.Blob{}, err
 		}
 		b.tracef("[trace] >>> etcd txn put %s\n", redactKey(fullKey))
 		resp, err := b.client.Txn(ctx).
-			If(clientv3.Compare(clientv3.ModRevision(fullKey), "=", rev)).
+			If(compare).
 			Then(clientv3.OpPut(fullKey, string(req.Content))).
 			Else().
 			Commit()
@@ -194,7 +197,7 @@ func (b *Backend) Put(ctx context.Context, req cfgov.PutRequest) (cfgov.Blob, er
 			return cfgov.Blob{}, backendErr("etcd put failed", err)
 		}
 		if !resp.Succeeded {
-			return cfgov.Blob{}, apperrors.New(apperrors.CodeConflict, "config revision changed", nil)
+			return cfgov.Blob{}, apperrors.New(apperrors.CodeConflict, "config precondition failed", nil)
 		}
 		return b.Get(ctx, cfgov.Coordinate{Namespace: ns, Key: key})
 	}
@@ -203,6 +206,17 @@ func (b *Backend) Put(ctx context.Context, req cfgov.PutRequest) (cfgov.Blob, er
 		return cfgov.Blob{}, backendErr("etcd put failed", err)
 	}
 	return b.Get(ctx, cfgov.Coordinate{Namespace: ns, Key: key})
+}
+
+func etcdPutCompare(fullKey string, expectedRevision string) (clientv3.Cmp, error) {
+	if expectedRevision == "" {
+		return clientv3.Compare(clientv3.Version(fullKey), "=", 0), nil
+	}
+	revision, err := parseRevision(expectedRevision)
+	if err != nil {
+		return clientv3.Cmp{}, err
+	}
+	return clientv3.Compare(clientv3.ModRevision(fullKey), "=", revision), nil
 }
 
 func (b *Backend) Delete(ctx context.Context, req cfgov.DeleteRequest) error {

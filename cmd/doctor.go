@@ -9,17 +9,19 @@ import (
 
 	"github.com/spf13/cobra"
 
-	"github.com/JiangHe12/opskit-core/apperrors"
-	"github.com/JiangHe12/opskit-core/audit"
-	"github.com/JiangHe12/opskit-core/redact"
-	"github.com/JiangHe12/opskit-core/safety"
+	"github.com/JiangHe12/opskit-core/v2/apperrors"
+	"github.com/JiangHe12/opskit-core/v2/audit"
+	"github.com/JiangHe12/opskit-core/v2/redact"
+	"github.com/JiangHe12/opskit-core/v2/safety"
 
 	"github.com/JiangHe12/cfgov-cli/internal/cfgovctx"
 )
 
 type doctorResult struct {
-	Checks []doctorCheck `json:"checks"`
-	OK     bool          `json:"ok"`
+	Checks   []doctorCheck `json:"checks"`
+	OK       bool          `json:"ok"`
+	Complete bool          `json:"complete"`
+	DryRun   bool          `json:"dryRun,omitempty"`
 }
 
 type doctorCheck struct {
@@ -43,7 +45,8 @@ func newDoctorCmd(f *cliFlags) *cobra.Command {
 }
 
 func runDoctor(ctx context.Context, f *cliFlags) error {
-	result := doctorResult{OK: true}
+	planOnly := isPlanOnly(f)
+	result := doctorResult{OK: true, Complete: true, DryRun: planOnly}
 	ctxMeta, ctxName, ctxErr := resolvedContext(f)
 	if ctxErr != nil {
 		result.add(doctorFailed("context", ctxErr))
@@ -70,8 +73,13 @@ func runDoctor(ctx context.Context, f *cliFlags) error {
 		})
 	}
 
-	result.add(doctorAuditCheck(f))
-	appendAuditWarn(f, audit.EventType("doctor"), ctxMeta, audit.EventTarget{ResourceType: "diagnostic"}, audit.StatusSuccess, "doctor checks="+intString(len(result.Checks)), nil)
+	if planOnly {
+		markPreview(f)
+		result.add(doctorAuditPlanCheck(f))
+	} else {
+		result.add(doctorAuditCheck(f))
+		appendAuditWarn(f, audit.EventType("doctor"), ctxMeta, audit.EventTarget{ResourceType: "diagnostic"}, audit.StatusSuccess, "doctor checks="+intString(len(result.Checks)), nil)
+	}
 	if err := printDoctorResult(f, result); err != nil {
 		return err
 	}
@@ -84,6 +92,9 @@ func runDoctor(ctx context.Context, f *cliFlags) error {
 func (r *doctorResult) add(check doctorCheck) {
 	if check.Status == audit.StatusFailed {
 		r.OK = false
+	}
+	if check.Status == auditStatusSkipped {
+		r.Complete = false
 	}
 	r.Checks = append(r.Checks, check)
 }
@@ -130,6 +141,19 @@ func doctorAuditCheck(f *cliFlags) doctorCheck {
 	return doctorCheck{Name: "audit", Status: audit.StatusSuccess, Message: redact.String("audit log writable"), Context: f.contextName()}
 }
 
+func doctorAuditPlanCheck(f *cliFlags) doctorCheck {
+	path, err := audit.DefaultPath()
+	if err != nil {
+		return doctorFailed("audit", err)
+	}
+	return doctorCheck{
+		Name:    "audit",
+		Status:  auditStatusSkipped,
+		Message: redact.String("audit write check skipped in plan; writability not verified; path=" + path),
+		Context: f.contextName(),
+	}
+}
+
 func doctorFailed(name string, err error) doctorCheck {
 	return doctorCheck{Name: name, Status: audit.StatusFailed, Message: redact.String(err.Error())}
 }
@@ -150,9 +174,13 @@ func printDoctorResult(f *cliFlags, result doctorResult) error {
 	for _, check := range result.Checks {
 		rows = append(rows, []string{check.Name, check.Status, check.Backend, check.Context, check.Latency, check.Message})
 	}
-	p.Table([]string{"CHECK", "STATUS", "BACKEND", "CONTEXT", "LATENCY", "MESSAGE"}, rows)
+	if err := p.Table([]string{"CHECK", "STATUS", "BACKEND", "CONTEXT", "LATENCY", "MESSAGE"}, rows); err != nil {
+		return err
+	}
 	if !result.OK {
-		p.Info(fmt.Sprintf("%d checks ran; failures present", len(result.Checks)))
+		return p.Info(fmt.Sprintf("%d checks ran; failures present", len(result.Checks)))
+	} else if !result.Complete {
+		return p.Info(fmt.Sprintf("%d checks ran; audit writability was not verified", len(result.Checks)))
 	}
 	return nil
 }

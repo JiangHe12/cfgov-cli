@@ -5,7 +5,7 @@ import (
 	"encoding/json"
 	"strings"
 
-	"github.com/JiangHe12/opskit-core/safety"
+	"github.com/JiangHe12/opskit-core/v2/safety"
 	"gopkg.in/yaml.v3"
 )
 

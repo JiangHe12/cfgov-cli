@@ -2,7 +2,6 @@ package cmd
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"net/url"
 	"os"
@@ -20,12 +19,12 @@ import (
 	"go.opentelemetry.io/otel/codes"
 	"go.opentelemetry.io/otel/trace"
 
-	"github.com/JiangHe12/opskit-core/apperrors"
-	"github.com/JiangHe12/opskit-core/audit"
-	"github.com/JiangHe12/opskit-core/printer"
-	"github.com/JiangHe12/opskit-core/redact"
-	"github.com/JiangHe12/opskit-core/safety"
-	"github.com/JiangHe12/opskit-core/telemetry"
+	"github.com/JiangHe12/opskit-core/v2/apperrors"
+	"github.com/JiangHe12/opskit-core/v2/audit"
+	"github.com/JiangHe12/opskit-core/v2/printer"
+	"github.com/JiangHe12/opskit-core/v2/redact"
+	"github.com/JiangHe12/opskit-core/v2/safety"
+	"github.com/JiangHe12/opskit-core/v2/telemetry"
 
 	"github.com/JiangHe12/cfgov-cli/internal/api"
 	apolloBackend "github.com/JiangHe12/cfgov-cli/internal/backend/apollo"
@@ -41,63 +40,80 @@ const (
 	apiVersion                  = "cfgov-cli.io/v1"
 	auditAPIVersion             = "cfgov-cli.io/audit/v1"
 	allowProductionConfigDelete = safety.AllowFlag("allow-production-config-delete")
+	allowProductionReconcile    = safety.AllowFlag("allow-production-reconcile")
 	allowProductionPrune        = safety.AllowFlag("allow-production-prune")
 	allowProductionNamespaceDel = safety.AllowFlag("allow-production-namespace-delete")
 	allowProductionServiceDereg = safety.AllowFlag("allow-production-service-deregister")
 	allowProductionRuleDelete   = safety.AllowFlag("allow-production-rule-delete")
 	allowProductionFlagDelete   = safety.AllowFlag("allow-production-flag-delete")
+	allowContextChange          = safety.AllowFlag("allow-context-change")
+	allowContextDelete          = safety.AllowFlag("allow-context-delete")
+	allowRoleChange             = safety.AllowFlag("allow-role-change")
+	allowAuditPrune             = safety.AllowFlag("allow-audit-prune")
+	allowAuditRepair            = safety.AllowFlag("allow-audit-repair")
 	auditStatusSkipped          = "skipped"
 )
 
 type cliFlags struct {
-	Config         string
-	Context        string
-	Backend        string
-	Server         string
-	Username       string
-	Password       string
-	Namespace      string
-	Timeout        time.Duration
-	Output         string
-	PlainHead      bool
-	Debug          bool
-	Trace          bool
-	NoColor        bool
-	TraceBodyLim   int
-	StrictNoChange bool
-	AuditMaxSize   int64
-	BackupKeep     int
-	DryRun         bool
-	Plan           bool
-	Diff           bool
-	Yes            bool
-	Backup         bool
-	NoBackup       bool
-	Ticket         string
-	Operator       string
-	Reason         string
-	NonInter       bool
-	AllowDel       bool
-	AllowPrune     bool
-	AllowNSDel     bool
-	AllowSvcDereg  bool
-	AllowRuleDel   bool
-	AllowFlagDel   bool
-	Concurrency    int
-	K8sKubeconfig  string
-	K8sContext     string
-	OTLPEnd        string
-	OTLPMetrics    string
-	OTLPInsec      bool
-	contextOnce    sync.Once
-	cachedCtx      string
-	commandCtx     context.Context
-	commandName    string
-	commandTime    time.Time
-	activeSpan     trace.Span
-	telemetryStop  telemetry.ShutdownFunc
-	metricsStop    telemetry.ShutdownFunc
-	metricAttrs    []attribute.KeyValue
+	Config              string
+	Context             string
+	Backend             string
+	Server              string
+	Username            string
+	Password            string
+	Namespace           string
+	Timeout             time.Duration
+	Output              string
+	PlainHead           bool
+	Debug               bool
+	Trace               bool
+	NoColor             bool
+	TraceBodyLim        int
+	StrictNoChange      bool
+	AuditMaxSize        int64
+	DryRun              bool
+	Plan                bool
+	Diff                bool
+	Yes                 bool
+	Backup              bool
+	NoBackup            bool
+	Ticket              string
+	Operator            string
+	Reason              string
+	NonInter            bool
+	AllowDel            bool
+	AllowReconcile      bool
+	AllowPrune          bool
+	AllowNSDel          bool
+	AllowSvcDereg       bool
+	AllowRuleDel        bool
+	AllowFlagDel        bool
+	AllowCtxChange      bool
+	AllowCtxDelete      bool
+	AllowRoleChange     bool
+	AllowAuditPrune     bool
+	AllowAuditRepair    bool
+	K8sKubeconfig       string
+	K8sContext          string
+	OTLPEnd             string
+	OTLPMetrics         string
+	OTLPInsec           bool
+	contextOnce         sync.Once
+	cachedCtx           string
+	commandCtx          context.Context
+	commandName         string
+	commandTime         time.Time
+	activeSpan          trace.Span
+	telemetryStop       telemetry.ShutdownFunc
+	metricsStop         telemetry.ShutdownFunc
+	metricAttrs         []attribute.KeyValue
+	preview             bool
+	trustedOperator     string
+	resolveOperator     func() (string, error)
+	beforeContextUpdate func()
+	mutationAudit       *mutationAuditRuntime
+	mutationAuditPath   string
+	contextImport       *contextImportRuntime
 }
 
 var versionInfo = struct {
@@ -109,7 +125,12 @@ var versionInfo = struct {
 
 func init() {
 	cfgovctx.Configure()
-	apperrors.Configure(apperrors.Options{APIVersion: apiVersion})
+	errorCodes := append(apperrors.AllCodes(), codeAuditIncomplete)
+	apperrors.Configure(apperrors.Options{
+		APIVersion:  apiVersion,
+		Codes:       errorCodes,
+		Suggestions: map[apperrors.ErrorCode]string{codeAuditIncomplete: "Resolve audit storage and replay durable mutation outcomes before retrying."},
+	})
 	printer.Configure(printer.Options{APIVersion: apiVersion, JSONEnvelopeByDefault: true})
 	audit.Configure(audit.Config{
 		APIVersion:       auditAPIVersion,
@@ -117,8 +138,7 @@ func init() {
 		PrivateKeyEnvVar: configureEnvWithDeprecatedAlias(cfgovAuditPrivateKeyEnv, deprecatedCfgovAuditPrivateKeyEnv),
 	})
 	safety.Configure(safety.Config{
-		Prompt:         "Proceed with cfgov write? [y/N] ",
-		OperatorEnvVar: configureEnvWithDeprecatedAlias(cfgovOperatorEnv, deprecatedCfgovOperatorEnv),
+		Prompt: "Proceed with cfgov write? [y/N] ",
 	})
 	telemetry.Configure(telemetry.Config{ServiceName: "cfgov-cli", AttributePrefix: "cfgov", MetricNamePrefix: "cfgov", DomainAttributeName: "resource"})
 }
@@ -138,7 +158,13 @@ func getVersionInfo() (string, string, string) {
 }
 
 func newDefaultFlags() *cliFlags {
-	return &cliFlags{Timeout: 30 * time.Second, Output: "table", TraceBodyLim: 2048, AuditMaxSize: audit.DefaultMaxSizeBytes, BackupKeep: 10}
+	return &cliFlags{
+		Timeout:         30 * time.Second,
+		Output:          "table",
+		TraceBodyLim:    2048,
+		AuditMaxSize:    audit.DefaultMaxSizeBytes,
+		resolveOperator: resolveOSOperator,
+	}
 }
 
 func NewRootCmd() *cobra.Command {
@@ -155,6 +181,7 @@ func newRootCmdWith(f *cliFlags) *cobra.Command {
 		SilenceErrors: true,
 		PersistentPreRunE: func(c *cobra.Command, _ []string) error {
 			applyGlobalFlags(f)
+			f.preview = false
 			f.commandCtx = c.Context()
 			f.commandName = strings.ReplaceAll(c.CommandPath(), " ", ".")
 			f.commandTime = time.Now()
@@ -164,18 +191,24 @@ func newRootCmdWith(f *cliFlags) *cobra.Command {
 			if err := validateOutput(f.Output); err != nil {
 				return err
 			}
-			if f.Concurrency <= 0 || f.Concurrency > 16 {
-				return apperrors.New(apperrors.CodeUsageError, "--concurrency must be between 1 and 16", nil)
+			if _, err := trustedOperator(f); err != nil {
+				return err
 			}
 			traceEndpoint, metricsEndpoint, insecure, ctxMeta, ctxName := resolveTelemetryConfig(f)
 			f.telemetryStop = telemetry.Init(c.Context(), traceEndpoint, insecure, v)
 			f.metricsStop = telemetry.InitMetrics(c.Context(), metricsEndpoint, insecure, v)
 			spanCtx, span := telemetry.Tracer().Start(c.Context(), f.commandName)
-			f.metricAttrs = telemetry.SpanAttributes(currentOperator(f), ctxName, ctxMeta.Env, "", f.Ticket, ctxMeta.Protected, true, "")
+			f.metricAttrs = telemetry.SpanAttributes(currentOperator(f), ctxName, ctxMeta.Env, "", "", ctxMeta.Protected, true, "")
+			if ticketFingerprint, _ := sensitiveAuditFingerprint("telemetry:ticket", f.Ticket); ticketFingerprint != "" {
+				f.metricAttrs = append(f.metricAttrs, attribute.String("cfgov.ticket_fingerprint", ticketFingerprint))
+			}
 			span.SetAttributes(f.metricAttrs...)
 			f.commandCtx = spanCtx
 			f.activeSpan = span
 			return nil
+		},
+		PersistentPostRunE: func(_ *cobra.Command, _ []string) error {
+			return appendPreviewAudit(f)
 		},
 	}
 	cmd.PersistentFlags().StringVar(&f.Config, "config", "", "Override context config path")
@@ -196,24 +229,28 @@ func newRootCmdWith(f *cliFlags) *cobra.Command {
 	_ = cmd.PersistentFlags().MarkHidden("trace-body-limit")
 	cmd.PersistentFlags().BoolVar(&f.StrictNoChange, "strict-no-change", false, "Exit 13 (NO_CHANGE_REQUIRED) when a plan has no changes to apply")
 	cmd.PersistentFlags().Int64Var(&f.AuditMaxSize, "audit-max-size", audit.DefaultMaxSizeBytes, "Active audit log rotation size in bytes")
-	cmd.PersistentFlags().IntVar(&f.BackupKeep, "backup-keep", 10, "Number of local backup snapshots to keep")
-	cmd.PersistentFlags().BoolVar(&f.DryRun, "dry-run", false, "Plan only, do not mutate")
-	cmd.PersistentFlags().BoolVar(&f.Plan, "plan", false, "Alias for --dry-run plan output")
+	cmd.PersistentFlags().BoolVar(&f.DryRun, "dry-run", false, "Preview only, do not apply backend or local target mutations")
+	cmd.PersistentFlags().BoolVar(&f.Plan, "plan", false, "Alias for --dry-run; takes precedence over confirmation flags")
 	cmd.PersistentFlags().BoolVar(&f.Diff, "diff", false, "Include CLI-computed impact summary")
 	cmd.PersistentFlags().BoolVar(&f.Yes, "yes", false, "Confirm write authorization")
 	cmd.PersistentFlags().BoolVar(&f.Backup, "backup", false, "Backup current remote config before writing")
 	cmd.PersistentFlags().BoolVar(&f.NoBackup, "no-backup", false, "Explicitly skip backup before writing")
 	cmd.PersistentFlags().StringVar(&f.Ticket, "ticket", "", "Human-supplied change ticket")
-	cmd.PersistentFlags().StringVar(&f.Operator, "operator", "", "Operator identity")
+	cmd.PersistentFlags().StringVar(&f.Operator, "operator", "", "Deprecated compatibility input; ignored for identity and authorization")
 	cmd.PersistentFlags().StringVar(&f.Reason, "reason", "", "Change reason")
 	cmd.PersistentFlags().BoolVar(&f.NonInter, "non-interactive", false, "Disable interactive confirmation")
 	cmd.PersistentFlags().BoolVar(&f.AllowDel, "allow-production-config-delete", false, "Allow protected config delete")
+	cmd.PersistentFlags().BoolVar(&f.AllowReconcile, "allow-production-reconcile", false, "Allow protected config reconcile without prune")
 	cmd.PersistentFlags().BoolVar(&f.AllowPrune, "allow-production-prune", false, "Allow protected reconcile prune actions")
 	cmd.PersistentFlags().BoolVar(&f.AllowNSDel, "allow-production-namespace-delete", false, "Allow protected namespace delete")
 	cmd.PersistentFlags().BoolVar(&f.AllowSvcDereg, "allow-production-service-deregister", false, "Allow protected service deregister")
 	cmd.PersistentFlags().BoolVar(&f.AllowRuleDel, "allow-production-rule-delete", false, "Allow protected Sentinel rule delete")
 	cmd.PersistentFlags().BoolVar(&f.AllowFlagDel, "allow-production-flag-delete", false, "Allow protected feature flag delete")
-	cmd.PersistentFlags().IntVar(&f.Concurrency, "concurrency", 1, "Maximum concurrent batch operations")
+	cmd.PersistentFlags().BoolVar(&f.AllowCtxChange, "allow-context-change", false, "Allow an R3 context create, replace, switch, import, or credential migration")
+	cmd.PersistentFlags().BoolVar(&f.AllowCtxDelete, "allow-context-delete", false, "Allow an R3 context deletion")
+	cmd.PersistentFlags().BoolVar(&f.AllowRoleChange, "allow-role-change", false, "Allow an R3 context role assignment or removal")
+	cmd.PersistentFlags().BoolVar(&f.AllowAuditPrune, "allow-audit-prune", false, "Allow an R3 audit evidence pruning operation")
+	cmd.PersistentFlags().BoolVar(&f.AllowAuditRepair, "allow-audit-repair", false, "Allow an R3 audit evidence repair operation")
 	cmd.PersistentFlags().StringVar(&f.K8sKubeconfig, "k8s-kubeconfig", "", "Kubernetes kubeconfig path")
 	cmd.PersistentFlags().StringVar(&f.K8sContext, "k8s-context", "", "Kubernetes kubeconfig context")
 	cmd.PersistentFlags().StringVar(&f.OTLPEnd, "otel-endpoint", "", "OTLP trace endpoint")
@@ -245,8 +282,9 @@ func Execute() {
 	err := cmd.ExecuteContext(ctx)
 	if f.activeSpan != nil {
 		if err != nil {
-			f.activeSpan.RecordError(err)
-			f.activeSpan.SetStatus(codes.Error, err.Error())
+			errorCode := string(apperrors.AsAppError(err).Code)
+			f.activeSpan.SetAttributes(attribute.String("cfgov.error_code", errorCode))
+			f.activeSpan.SetStatus(codes.Error, errorCode)
 		} else {
 			f.activeSpan.SetStatus(codes.Ok, "")
 		}
@@ -269,10 +307,15 @@ func Execute() {
 		}
 		cancel()
 	}
-	if err == nil || errors.Is(err, context.Canceled) {
+	if err == nil {
 		stop()
 		return
 	}
+	stop()
+	exitWithCommandError(err)
+}
+
+func exitWithCommandError(err error) {
 	code := apperrors.ExitCode(err)
 	if outputFlagFromArgs(os.Args[1:]) == "json" {
 		_ = apperrors.WriteJSON(os.Stderr, err)
@@ -283,7 +326,6 @@ func Execute() {
 			_, _ = fmt.Fprintf(os.Stderr, "\nSuggestion:\n  %s\n", appErr.Suggestion)
 		}
 	}
-	stop()
 	os.Exit(code)
 }
 
@@ -517,6 +559,20 @@ func resolvedContext(f *cliFlags) (cfgovctx.Context, string, error) {
 }
 
 func authorize(f *cliFlags, base safety.Risk, meta cfgovctx.Context, required safety.AllowFlag) error {
+	return authorizeForContext(f, base, meta, required, f.contextName())
+}
+
+func authorizeForContext(f *cliFlags, base safety.Risk, meta cfgovctx.Context, required safety.AllowFlag, contextName string) error {
+	operator, operatorErr := trustedOperator(f)
+	if operatorErr != nil {
+		return operatorErr
+	}
+	if meta.RolesSource != "" && meta.RolesSource != "inline" || strings.TrimSpace(meta.RolesURL) != "" {
+		err := apperrors.New(apperrors.CodeAuthorizationRequired, "authorization denied because remote role sources are not implemented; use inline roles", nil)
+		telemetry.RecordAuthorizationDenied(commandContext(f), "authorization", nil)
+		appendAuditWarnForContext(f, audit.EventAuthorizationDenied, contextName, meta, audit.EventTarget{ResourceType: "context", Resource: contextName}, audit.StatusDenied, "", err)
+		return err
+	}
 	risk := safety.EffectiveRisk(base, safety.ContextMeta{
 		Env:             meta.Env,
 		Protected:       meta.Protected,
@@ -529,22 +585,28 @@ func authorize(f *cliFlags, base safety.Risk, meta cfgovctx.Context, required sa
 		NonInteractive:     f.NonInter,
 		Ticket:             f.Ticket,
 		TicketPattern:      meta.TicketPattern,
-		Validator:          ticketValidator(meta.TicketValidator, f.contextName(), currentOperator(f)),
+		Validator:          ticketValidator(meta.TicketValidator, contextName, operator),
 		RequiredAllowFlags: requiredAllow(required),
 		GrantedAllowFlags: map[safety.AllowFlag]bool{
 			allowProductionConfigDelete: f.AllowDel,
+			allowProductionReconcile:    f.AllowReconcile,
 			allowProductionPrune:        f.AllowPrune,
 			allowProductionNamespaceDel: f.AllowNSDel,
 			allowProductionServiceDereg: f.AllowSvcDereg,
 			allowProductionRuleDelete:   f.AllowRuleDel,
 			allowProductionFlagDelete:   f.AllowFlagDel,
+			allowContextChange:          f.AllowCtxChange,
+			allowContextDelete:          f.AllowCtxDelete,
+			allowRoleChange:             f.AllowRoleChange,
+			allowAuditPrune:             f.AllowAuditPrune,
+			allowAuditRepair:            f.AllowAuditRepair,
 		},
 		Roles:    meta.Roles,
-		Operator: currentOperator(f),
+		Operator: operator,
 	})
 	if err != nil {
 		telemetry.RecordAuthorizationDenied(commandContext(f), "authorization", nil)
-		appendAuditWarn(f, audit.EventAuthorizationDenied, meta, audit.EventTarget{ResourceType: "config"}, audit.StatusDenied, "", err)
+		appendAuditWarnForContext(f, audit.EventAuthorizationDenied, contextName, meta, audit.EventTarget{ResourceType: "context", Resource: contextName}, audit.StatusDenied, "", err)
 	}
 	return err
 }
@@ -567,8 +629,47 @@ func isStrictNoChange(f *cliFlags) bool {
 	return f.StrictNoChange
 }
 
+func isPlanOnly(f *cliFlags) bool {
+	return f.DryRun || f.Plan
+}
+
+func runBeforeContextUpdate(f *cliFlags) {
+	if f.beforeContextUpdate != nil {
+		f.beforeContextUpdate()
+	}
+}
+
+func markPreview(f *cliFlags) {
+	f.preview = true
+}
+
+func isPreview(f *cliFlags) bool {
+	return f.preview
+}
+
+func printLocalChangePlan(f *cliFlags, resourceType, action, target string, details map[string]any) error {
+	markPreview(f)
+	data := map[string]any{
+		"resourceType": resourceType,
+		"action":       action,
+		"target":       target,
+		"dryRun":       true,
+	}
+	for key, value := range details {
+		data[key] = value
+	}
+	return newPrinter(f).JSONData("ChangePlan", data)
+}
+
 func appendAuditWarn(f *cliFlags, typ audit.EventType, ctx cfgovctx.Context, target audit.EventTarget, status, diff string, err error) {
-	path, pathErr := audit.DefaultPath()
+	appendAuditWarnForContext(f, typ, f.contextName(), ctx, target, status, diff, err)
+}
+
+func appendAuditWarnForContext(f *cliFlags, typ audit.EventType, contextName string, ctx cfgovctx.Context, target audit.EventTarget, status, diff string, err error) {
+	if err == nil && status == audit.StatusSuccess && isPreview(f) {
+		return
+	}
+	path, pathErr := configuredAuditPath(f)
 	if pathErr != nil {
 		_, _ = fmt.Fprintf(os.Stderr, "warning: audit path failed: %v\n", pathErr)
 		return
@@ -576,20 +677,75 @@ func appendAuditWarn(f *cliFlags, typ audit.EventType, ctx cfgovctx.Context, tar
 	evt := audit.Event{
 		EventType: typ,
 		Operator:  currentOperator(f),
-		Context:   audit.EventContext{Name: f.contextName(), Env: ctx.Env, Protected: ctx.Protected},
-		Ticket:    f.Ticket,
-		Reason:    f.Reason,
+		Context:   audit.EventContext{Name: contextName, Env: ctx.Env, Protected: ctx.Protected},
 		Target:    target,
 		Status:    status,
-		Diff:      redact.String(diff),
+		Diff:      sanitizedAuditSummary(f, typ, diff),
 	}
 	if err != nil {
 		appErr := apperrors.AsAppError(err)
-		evt.Error = &audit.EventError{Code: string(appErr.Code), Message: appErr.Message}
+		evt.Error = &audit.EventError{Code: string(appErr.Code)}
 	}
-	if appendErr := audit.AppendWithOptions(path, evt, auditOptions(f)); appendErr != nil {
+	if appendErr := appendQueuedAuditEvent(f, path, evt); appendErr != nil {
 		_, _ = fmt.Fprintf(os.Stderr, "warning: audit write failed: %v\n", appendErr)
 	}
+}
+
+type previewAuditRecord struct {
+	audit.Event
+	Preview bool `json:"preview"`
+	DryRun  bool `json:"dryRun"`
+}
+
+func appendPreviewAudit(f *cliFlags) error {
+	if !isPreview(f) {
+		return nil
+	}
+	path, err := configuredAuditPath(f)
+	if err != nil {
+		return apperrors.New(apperrors.CodeLocalIOError, "failed to resolve preview audit path", err)
+	}
+	meta, _, _ := resolvedContext(f)
+	command := f.commandName
+	record := previewAuditRecord{
+		Event: audit.Event{
+			EventType: audit.EventType("command.preview"),
+			Operator:  currentOperator(f),
+			Context:   audit.EventContext{Name: f.contextName(), Env: meta.Env, Protected: meta.Protected},
+			Target:    audit.EventTarget{ResourceType: "command", Resource: command},
+			Status:    auditStatusSkipped,
+			Diff: "preview=true dryRun=true " +
+				sanitizedAuditSummary(f, audit.EventType("command.preview"), "command="+command),
+		},
+		Preview: true,
+		DryRun:  true,
+	}
+	if err := appendQueuedAuditRecord(f, path, func(timestamp time.Time) any {
+		record.Timestamp = timestamp
+		return record
+	}); err != nil {
+		return err
+	}
+	return nil
+}
+
+func sanitizedAuditSummary(f *cliFlags, eventType audit.EventType, detail string) string {
+	parts := make([]string, 0, 6)
+	if ticketFingerprint, ticketBytes := sensitiveAuditFingerprint("audit:ticket", f.Ticket); ticketFingerprint != "" {
+		parts = append(parts, "ticketFingerprint="+ticketFingerprint, fmt.Sprintf("ticketBytes=%d", ticketBytes))
+	}
+	if reasonFingerprint, reasonBytes := sensitiveAuditFingerprint("audit:reason", f.Reason); reasonFingerprint != "" {
+		parts = append(parts, "reasonFingerprint="+reasonFingerprint, fmt.Sprintf("reasonBytes=%d", reasonBytes))
+	}
+	if detail != "" {
+		detail = redact.String(detail)
+		parts = append(
+			parts,
+			"detailFingerprint="+mutationAuditFingerprint("audit:detail:"+string(eventType), []byte(detail)),
+			fmt.Sprintf("detailBytes=%d", len([]byte(detail))),
+		)
+	}
+	return strings.Join(parts, " ")
 }
 
 func auditOptions(f *cliFlags) audit.Options {
@@ -634,19 +790,47 @@ func (f *cliFlags) contextName() string {
 }
 
 func currentOperator(f *cliFlags) string {
-	if f.Operator != "" {
-		return f.Operator
+	operator, _ := trustedOperator(f)
+	return operator
+}
+
+func trustedOperator(f *cliFlags) (string, error) {
+	if strings.TrimSpace(f.trustedOperator) != "" {
+		return f.trustedOperator, nil
 	}
-	if env := envWithDeprecatedAlias(cfgovOperatorEnv, deprecatedCfgovOperatorEnv); env != "" {
-		return env
+	resolver := f.resolveOperator
+	if resolver == nil {
+		resolver = resolveOSOperator
 	}
-	if u, err := osuser.Current(); err == nil && u != nil && u.Username != "" {
-		if host, herr := os.Hostname(); herr == nil && host != "" {
-			return u.Username + "@" + host
-		}
-		return u.Username
+	operator, err := resolver()
+	if err != nil {
+		return "", apperrors.New(apperrors.CodeAuthorizationRequired, "trusted local operator identity is unavailable", err)
 	}
-	return "unknown"
+	operator = strings.TrimSpace(operator)
+	if operator == "" {
+		return "", apperrors.New(apperrors.CodeAuthorizationRequired, "trusted local operator identity is unavailable", nil)
+	}
+	f.trustedOperator = operator
+	return operator, nil
+}
+
+func resolveOSOperator() (string, error) {
+	user, err := osuser.Current()
+	if err != nil {
+		return "", err
+	}
+	if user == nil || strings.TrimSpace(user.Username) == "" {
+		return "", apperrors.New(apperrors.CodeAuthorizationRequired, "local OS username is unavailable", nil)
+	}
+	host, err := os.Hostname()
+	if err != nil {
+		return "", err
+	}
+	host = strings.TrimSpace(host)
+	if host == "" {
+		return "", apperrors.New(apperrors.CodeAuthorizationRequired, "local hostname is unavailable", nil)
+	}
+	return strings.TrimSpace(user.Username) + "@" + host, nil
 }
 
 func firstNonEmpty(values ...string) string {

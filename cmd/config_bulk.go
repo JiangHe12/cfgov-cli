@@ -11,9 +11,9 @@ import (
 
 	"github.com/spf13/cobra"
 
-	"github.com/JiangHe12/opskit-core/apperrors"
-	"github.com/JiangHe12/opskit-core/audit"
-	"github.com/JiangHe12/opskit-core/safety"
+	"github.com/JiangHe12/opskit-core/v2/apperrors"
+	"github.com/JiangHe12/opskit-core/v2/audit"
+	"github.com/JiangHe12/opskit-core/v2/safety"
 
 	"github.com/JiangHe12/cfgov-cli/internal/api"
 	apolloBackend "github.com/JiangHe12/cfgov-cli/internal/backend/apollo"
@@ -75,13 +75,16 @@ type planItem struct {
 	Key          string `json:"key"`
 	LocalSHA256  string `json:"localSha256,omitempty"`
 	RemoteSHA256 string `json:"remoteSha256,omitempty"`
+	Revision     string `json:"revision,omitempty"`
 	Bytes        int    `json:"bytes,omitempty"`
 }
 
 type localConfig struct {
-	Key     string
-	Content []byte
-	Type    string
+	Key              string
+	Content          []byte
+	Type             string
+	ExpectedRevision string
+	RequireAbsent    bool
 }
 
 type upsertPlanOptions struct {
@@ -114,7 +117,11 @@ func configExportCmd(f *cliFlags) *cobra.Command {
 				appendAuditWarn(f, audit.EventType("config.export"), ctxMeta, audit.EventTarget{ResourceType: "config"}, audit.StatusFailed, "", err)
 				return err
 			}
+			planOnly := isPlanOnly(f)
 			archive := configArchive{APIVersion: apiVersion, Kind: "ConfigExport"}
+			exportFiles := make(map[string][]byte, len(items)+1)
+			exportNames := make([]string, 0, len(items)+1)
+			seenExportNames := make(map[string]string, len(items)+1)
 			for _, item := range items {
 				blob, err := backend.Get(cmd.Context(), item.Coordinate)
 				if err != nil {
@@ -122,9 +129,12 @@ func configExportCmd(f *cliFlags) *cobra.Command {
 					return err
 				}
 				file := archiveFileName(item.Coordinate.Key)
-				if err := writeLocalFile(filepath.Join(dir, file), blob.Content); err != nil {
+				if err := registerExportFileName(seenExportNames, file); err != nil {
+					appendAuditWarn(f, audit.EventType("config.export"), ctxMeta, audit.EventTarget{ResourceType: "config"}, audit.StatusFailed, "", err)
 					return err
 				}
+				exportFiles[file] = blob.Content
+				exportNames = append(exportNames, file)
 				archive.Items = append(archive.Items, configArchiveEntry{
 					Key:      item.Coordinate.Key,
 					File:     file,
@@ -134,7 +144,58 @@ func configExportCmd(f *cliFlags) *cobra.Command {
 					Revision: blob.Revision,
 				})
 			}
-			if err := writeManifest(dir, archive); err != nil {
+			manifest, err := json.MarshalIndent(archive, "", "  ")
+			if err != nil {
+				return apperrors.New(apperrors.CodeLocalIOError, "failed to marshal export manifest", err)
+			}
+			if err := registerExportFileName(seenExportNames, exportManifestName); err != nil {
+				return err
+			}
+			exportFiles[exportManifestName] = append(manifest, '\n')
+			exportNames = append(exportNames, exportManifestName)
+			sort.Strings(exportNames)
+			if err := preflightNewLocalFiles(dir, exportNames); err != nil {
+				appendAuditWarn(f, audit.EventType("config.export"), ctxMeta, audit.EventTarget{ResourceType: "file", Resource: dir}, audit.StatusFailed, "", err)
+				return err
+			}
+			if planOnly {
+				appendAuditWarn(f, audit.EventType("config.export"), ctxMeta, audit.EventTarget{ResourceType: "config"}, audit.StatusSuccess, archiveAuditSummary(archive.Items), nil)
+				markPreview(f)
+				return targetJSONData(f, "ChangePlan", map[string]any{
+					"resourceType": "file",
+					"action":       "config export",
+					"dir":          dir,
+					"count":        len(archive.Items),
+					"items":        archive.Items,
+					"dryRun":       true,
+				}, operationTargetFromBackend(f, backend), operationTargetRead)
+			}
+			metadata := mutationValueMetadata("config.export", archive)
+			metadata.Items = len(exportFiles)
+			metadata.Creates = len(exportFiles)
+			mutation, err := beginMutationAudit(f, mutationAuditSpec{
+				Action:   "config.export",
+				Context:  ctxMeta,
+				Target:   audit.EventTarget{ResourceType: "file", Resource: dir},
+				Metadata: metadata,
+			})
+			if err != nil {
+				return err
+			}
+			succeeded := 0
+			for _, name := range exportNames {
+				writeErr := writeNewLocalFile(filepath.Join(dir, name), exportFiles[name])
+				if writeErr != nil {
+					return finishMutationAudit(mutation, mutationAuditOutcome{
+						Status:    audit.StatusPartialFailed,
+						Succeeded: succeeded,
+						Failed:    1,
+						Skipped:   len(exportNames) - succeeded - 1,
+					}, writeErr)
+				}
+				succeeded++
+			}
+			if err := finishMutationAudit(mutation, mutationAuditOutcome{Succeeded: succeeded}, nil); err != nil {
 				return err
 			}
 			appendAuditWarn(f, audit.EventType("config.export"), ctxMeta, audit.EventTarget{ResourceType: "config"}, audit.StatusSuccess, archiveAuditSummary(archive.Items), nil)
@@ -183,7 +244,8 @@ func configImportCmd(f *cliFlags) *cobra.Command { //nolint:gocyclo // Cobra wir
 			if !configPlanHasChanges(plan) && isStrictNoChange(f) {
 				return apperrors.New(apperrors.CodeNoChangeRequired, "no changes to apply", nil)
 			}
-			if f.DryRun || f.Plan {
+			if isPlanOnly(f) {
+				markPreview(f)
 				plan.DryRun = true
 				return targetJSONData(f, "ChangePlan", plan, operationTargetFromBackend(f, backend), operationTargetWrite)
 			}
@@ -193,24 +255,60 @@ func configImportCmd(f *cliFlags) *cobra.Command { //nolint:gocyclo // Cobra wir
 			if err := validateBackupPolicy(f, ctxMeta); err != nil {
 				return err
 			}
-			appendConfigSkippedAudits(f, ctxMeta, audit.EventType("config.import"), plan.Skip)
-			for _, item := range localsForItems(locals, append(plan.Create, plan.Update...)) {
-				if err := cmd.Context().Err(); err != nil {
+			if err := requireAtomicConfigPlan(backend, plan); err != nil {
+				return err
+			}
+			changes := localsForPlannedItems(locals, plan.Create, plan.Update)
+			if len(changes) > 0 {
+				if err := authorize(f, configUpsertRisk(changes), ctxMeta, ""); err != nil {
 					return err
 				}
-				class := cfgclass.Classify(cfgclass.OperationPush, item.Content, item.Type)
-				if err := authorize(f, class.Risk, ctxMeta, ""); err != nil {
-					return err
+			}
+			appendConfigSkippedAudits(f, ctxMeta, audit.EventType("config.import"), plan.Skip)
+			if len(changes) == 0 {
+				return targetJSONData(f, "ChangeResult", map[string]any{"action": "config import", "summary": plan.Summary}, operationTargetFromBackend(f, backend), operationTargetWrite)
+			}
+			metadata := mutationValueMetadata("config.import", plan)
+			metadata.Items = len(changes) + len(plan.Skip)
+			metadata.Creates = len(plan.Create)
+			metadata.Updates = len(plan.Update)
+			mutation, err := beginMutationAudit(f, mutationAuditSpec{
+				Action:  "config.import",
+				Context: ctxMeta,
+				Target: audit.EventTarget{
+					ResourceType: "config",
+					Resource:     backend.Describe().Namespace,
+				},
+				Metadata: metadata,
+			})
+			if err != nil {
+				return err
+			}
+			succeeded := 0
+			total := len(changes) + len(plan.Skip)
+			for _, item := range changes {
+				if err := cmd.Context().Err(); err != nil {
+					return finishBatchMutationAudit(mutation, total, succeeded, len(plan.Skip), err)
 				}
 				coord := cfgov.Coordinate{Namespace: backend.Describe().Namespace, Key: item.Key}
 				if _, err := maybeBackupConfig(cmd.Context(), f, backend, ctxMeta, coord); err != nil {
-					return err
+					return finishBatchMutationAudit(mutation, total, succeeded, len(plan.Skip), err)
 				}
-				if _, err := backend.Put(cmd.Context(), cfgov.PutRequest{Coordinate: coord, Content: item.Content, ContentType: item.Type}); err != nil {
+				if _, err := backend.Put(cmd.Context(), cfgov.PutRequest{
+					Coordinate:       coord,
+					Content:          item.Content,
+					ContentType:      item.Type,
+					ExpectedRevision: item.ExpectedRevision,
+					RequireAbsent:    item.RequireAbsent,
+				}); err != nil {
 					appendAuditWarn(f, audit.EventType("config.import"), ctxMeta, audit.EventTarget{ResourceType: "config", Resource: item.Key}, audit.StatusFailed, itemAudit(item), err)
-					return err
+					return finishBatchMutationAudit(mutation, total, succeeded, len(plan.Skip), err)
 				}
+				succeeded++
 				appendAuditWarn(f, audit.EventType("config.import"), ctxMeta, audit.EventTarget{ResourceType: "config", Resource: item.Key}, audit.StatusSuccess, itemAudit(item), nil)
+			}
+			if err := finishBatchMutationAudit(mutation, total, succeeded, len(plan.Skip), nil); err != nil {
+				return err
 			}
 			return targetJSONData(f, "ChangeResult", map[string]any{"action": "config import", "summary": plan.Summary}, operationTargetFromBackend(f, backend), operationTargetWrite)
 		},
@@ -262,8 +360,10 @@ func configPromoteCmd(f *cliFlags) *cobra.Command { //nolint:gocyclo // Cobra wi
 			if !configPlanHasChanges(plan) && isStrictNoChange(f) {
 				return apperrors.New(apperrors.CodeNoChangeRequired, "no changes to promote", nil)
 			}
-			if f.DryRun || f.Plan || f.Diff {
-				plan.DryRun = f.DryRun || f.Plan
+			planOnly := isPlanOnly(f)
+			if planOnly || f.Diff {
+				markPreview(f)
+				plan.DryRun = planOnly
 				return targetJSONData(f, "ChangePlan", plan, operationTargetFromBackend(f, target), operationTargetWrite)
 			}
 			if err := validateBackupPolicy(f, ctxMeta); err != nil {
@@ -272,8 +372,43 @@ func configPromoteCmd(f *cliFlags) *cobra.Command { //nolint:gocyclo // Cobra wi
 			if len(plan.Conflict) > 0 {
 				return apperrors.New(apperrors.CodeConflict, fmt.Sprintf("%d config(s) conflict; use --overwrite", len(plan.Conflict)), nil)
 			}
+			if err := requireAtomicConfigPlan(target, plan); err != nil {
+				return err
+			}
+			changes := localsForPlannedItems(locals, plan.Create, plan.Update)
+			if len(changes) > 0 {
+				if err := authorize(f, configUpsertRisk(changes), ctxMeta, ""); err != nil {
+					return err
+				}
+			}
 			appendConfigSkippedAudits(f, ctxMeta, audit.EventType("config.promote"), plan.Skip)
-			if err := applyUpserts(cmd.Context(), f, target, ctxMeta, localsForItems(locals, append(plan.Create, plan.Update...)), "config.promote"); err != nil {
+			if len(changes) == 0 {
+				return targetJSONData(f, "ChangeResult", map[string]any{"action": "config promote", "summary": plan.Summary}, operationTargetFromBackend(f, target), operationTargetWrite)
+			}
+			metadata := mutationValueMetadata("config.promote", plan)
+			metadata.Items = len(changes) + len(plan.Skip)
+			metadata.Creates = len(plan.Create)
+			metadata.Updates = len(plan.Update)
+			mutation, err := beginMutationAudit(f, mutationAuditSpec{
+				Action:  "config.promote",
+				Context: ctxMeta,
+				Target: audit.EventTarget{
+					ResourceType: "config",
+					Resource:     target.Describe().Namespace,
+				},
+				Metadata: metadata,
+			})
+			if err != nil {
+				return err
+			}
+			succeeded, operationErr := applyUpserts(cmd.Context(), f, target, ctxMeta, changes, "config.promote")
+			if err := finishBatchMutationAudit(
+				mutation,
+				len(changes)+len(plan.Skip),
+				succeeded,
+				len(plan.Skip),
+				operationErr,
+			); err != nil {
 				return err
 			}
 			return targetJSONData(f, "ChangeResult", map[string]any{"action": "config promote", "summary": plan.Summary}, operationTargetFromBackend(f, target), operationTargetWrite)
@@ -327,14 +462,32 @@ func configRollbackCmd(f *cliFlags) *cobra.Command {
 			if sha256Bytes(remote.Content) == sha256Bytes(content) && isStrictNoChange(f) {
 				return apperrors.New(apperrors.CodeNoChangeRequired, "remote already matches rollback target", nil)
 			}
-			if f.DryRun || f.Plan || f.Diff {
-				plan.DryRun = f.DryRun || f.Plan
+			planOnly := isPlanOnly(f)
+			if planOnly || f.Diff {
+				markPreview(f)
+				plan.DryRun = planOnly
 				return targetJSONData(f, "ChangePlan", plan, operationTargetFromBackend(f, backend), operationTargetWrite)
 			}
 			if err := validateBackupPolicy(f, ctxMeta); err != nil {
 				return err
 			}
-			if err := applyUpserts(cmd.Context(), f, backend, ctxMeta, []localConfig{local}, "config.rollback"); err != nil {
+			if err := authorize(f, configUpsertRisk([]localConfig{local}), ctxMeta, ""); err != nil {
+				return err
+			}
+			metadata := mutationPayloadMetadata("config.rollback", content)
+			metadata.Items = 1
+			metadata.Updates = 1
+			mutation, err := beginMutationAudit(f, mutationAuditSpec{
+				Action:   "config.rollback",
+				Context:  ctxMeta,
+				Target:   audit.EventTarget{ResourceType: "config", Resource: key},
+				Metadata: metadata,
+			})
+			if err != nil {
+				return err
+			}
+			succeeded, operationErr := applyUpserts(cmd.Context(), f, backend, ctxMeta, []localConfig{local}, "config.rollback")
+			if err := finishBatchMutationAudit(mutation, 1, succeeded, 0, operationErr); err != nil {
 				return err
 			}
 			return targetJSONData(f, "ChangeResult", map[string]any{"action": "config rollback", "summary": plan.Summary}, operationTargetFromBackend(f, backend), operationTargetWrite)
@@ -349,7 +502,7 @@ func configRollbackCmd(f *cliFlags) *cobra.Command {
 	return cmd
 }
 
-func configReconcileCmd(f *cliFlags) *cobra.Command {
+func configReconcileCmd(f *cliFlags) *cobra.Command { //nolint:gocyclo // Planning, authorization, one batch audit pair, and ordered apply share one Cobra flow.
 	var dir string
 	var prune, overwrite, forceLarge bool
 	var pruneScopes []string
@@ -377,7 +530,8 @@ func configReconcileCmd(f *cliFlags) *cobra.Command {
 			if err := enforceReconcilePlanGates(f, plan, forceLarge); err != nil {
 				return err
 			}
-			if f.DryRun || f.Plan {
+			if isPlanOnly(f) {
+				markPreview(f)
 				plan.DryRun = true
 				return targetJSONData(f, "ChangePlan", plan, operationTargetFromBackend(f, backend), operationTargetWrite)
 			}
@@ -391,23 +545,62 @@ func configReconcileCmd(f *cliFlags) *cobra.Command {
 			if len(plan.Prune) > 0 {
 				required = allowProductionPrune
 			}
-			if err := authorizeReconcile(f, plan.Risk, ctxMeta, required); err != nil {
+			if err := requireAtomicConfigPlan(backend, plan); err != nil {
+				return err
+			}
+			upserts := localsForPlannedItems(locals, plan.Create, plan.Update)
+			risk := plan.Risk
+			if upsertRisk := configUpsertRisk(upserts); upsertRisk > risk {
+				risk = upsertRisk
+			}
+			if err := authorizeReconcile(f, risk, ctxMeta, required); err != nil {
 				return err
 			}
 			appendConfigSkippedAudits(f, ctxMeta, audit.EventType("config.reconcile"), plan.Skip)
-			if err := applyUpserts(cmd.Context(), f, backend, ctxMeta, localsForItems(locals, append(plan.Create, plan.Update...)), "config.reconcile"); err != nil {
+			deletes := append(append([]planItem(nil), plan.Delete...), plan.Prune...)
+			changeCount := len(upserts) + len(deletes)
+			if changeCount == 0 {
+				return targetJSONData(f, "ChangeResult", map[string]any{"action": "config reconcile", "summary": plan.Summary}, operationTargetFromBackend(f, backend), operationTargetWrite)
+			}
+			metadata := mutationValueMetadata("config.reconcile", plan)
+			metadata.Items = changeCount + len(plan.Skip)
+			metadata.Creates = len(plan.Create)
+			metadata.Updates = len(plan.Update)
+			metadata.Deletes = len(deletes)
+			mutation, err := beginMutationAudit(f, mutationAuditSpec{
+				Action:  "config.reconcile",
+				Context: ctxMeta,
+				Target: audit.EventTarget{
+					ResourceType: "config",
+					Resource:     backend.Describe().Namespace,
+				},
+				Metadata: metadata,
+			})
+			if err != nil {
 				return err
 			}
-			for _, item := range append(plan.Delete, plan.Prune...) {
+			total := changeCount + len(plan.Skip)
+			succeeded, operationErr := applyUpserts(cmd.Context(), f, backend, ctxMeta, upserts, "config.reconcile")
+			if operationErr != nil {
+				return finishBatchMutationAudit(mutation, total, succeeded, len(plan.Skip), operationErr)
+			}
+			for _, item := range deletes {
 				coord := cfgov.Coordinate{Namespace: backend.Describe().Namespace, Key: item.Key}
 				if _, err := maybeBackupConfig(cmd.Context(), f, backend, ctxMeta, coord); err != nil {
-					return err
+					return finishBatchMutationAudit(mutation, total, succeeded, len(plan.Skip), err)
 				}
-				if err := backend.Delete(cmd.Context(), cfgov.DeleteRequest{Coordinate: coord}); err != nil {
+				if err := backend.Delete(cmd.Context(), cfgov.DeleteRequest{
+					Coordinate:       coord,
+					ExpectedRevision: item.Revision,
+				}); err != nil {
 					appendAuditWarn(f, audit.EventType("config.reconcile"), ctxMeta, audit.EventTarget{ResourceType: "config", Resource: item.Key}, audit.StatusFailed, "delete sha256="+item.RemoteSHA256, err)
-					return err
+					return finishBatchMutationAudit(mutation, total, succeeded, len(plan.Skip), err)
 				}
+				succeeded++
 				appendAuditWarn(f, audit.EventType("config.reconcile"), ctxMeta, audit.EventTarget{ResourceType: "config", Resource: item.Key}, audit.StatusSuccess, "delete sha256="+item.RemoteSHA256, nil)
+			}
+			if err := finishBatchMutationAudit(mutation, total, succeeded, len(plan.Skip), nil); err != nil {
+				return err
 			}
 			return targetJSONData(f, "ChangeResult", map[string]any{"action": "config reconcile", "summary": plan.Summary}, operationTargetFromBackend(f, backend), operationTargetWrite)
 		},
@@ -422,53 +615,61 @@ func configReconcileCmd(f *cliFlags) *cobra.Command {
 }
 
 func authorizeReconcile(f *cliFlags, base safety.Risk, meta cfgovctx.Context, required safety.AllowFlag) error {
-	if required != "" {
-		return authorize(f, base, meta, required)
+	if required == "" && meta.Protected {
+		required = allowProductionReconcile
 	}
-	effective := safety.EffectiveRisk(base, safety.ContextMeta{Protected: meta.Protected})
-	if effective == safety.R3 {
-		err := safety.Authorize(safety.R2, safety.Options{
-			Yes:            f.Yes,
-			NonInteractive: f.NonInter,
-			Ticket:         f.Ticket,
-			TicketPattern:  meta.TicketPattern,
-			Validator:      ticketValidator(meta.TicketValidator, f.contextName(), currentOperator(f)),
-			Roles:          meta.Roles,
-			Operator:       currentOperator(f),
-		})
-		if err != nil {
-			appendAuditWarn(f, audit.EventAuthorizationDenied, meta, audit.EventTarget{ResourceType: "config"}, audit.StatusDenied, "", err)
-		}
-		return err
-	}
-	return authorize(f, base, meta, "")
+	return authorize(f, base, meta, required)
 }
 
-func applyUpserts(ctx context.Context, f *cliFlags, backend cfgov.Backend, meta cfgovctx.Context, items []localConfig, eventType audit.EventType) error {
+func applyUpserts(ctx context.Context, f *cliFlags, backend cfgov.Backend, meta cfgovctx.Context, items []localConfig, eventType audit.EventType) (int, error) {
+	for _, item := range items {
+		precondition := cfgov.PutRequest{ExpectedRevision: item.ExpectedRevision, RequireAbsent: item.RequireAbsent}
+		if err := precondition.ValidatePreconditions(); err != nil {
+			return 0, err
+		}
+		if (item.RequireAbsent || item.ExpectedRevision != "") && !backend.Capabilities().SupportsCAS {
+			return 0, apperrors.New(apperrors.CodeNotImplemented, "backend does not support atomic config preconditions", nil)
+		}
+	}
+	succeeded := 0
 	for _, item := range orderedLocals(items) {
 		if err := ctx.Err(); err != nil {
-			return err
+			return succeeded, err
 		}
 		key, err := validateConfigKey(backend, item.Key)
 		if err != nil {
-			return err
+			return succeeded, err
 		}
 		item.Key = key
-		class := cfgclass.Classify(cfgclass.OperationPush, item.Content, item.Type)
-		if err := authorize(f, class.Risk, meta, ""); err != nil {
-			return err
-		}
 		coord := cfgov.Coordinate{Namespace: backend.Describe().Namespace, Key: item.Key}
 		if _, err := maybeBackupConfig(ctx, f, backend, meta, coord); err != nil {
-			return err
+			return succeeded, err
 		}
-		if _, err := backend.Put(ctx, cfgov.PutRequest{Coordinate: coord, Content: item.Content, ContentType: item.Type}); err != nil {
+		if _, err := backend.Put(ctx, cfgov.PutRequest{
+			Coordinate:       coord,
+			Content:          item.Content,
+			ContentType:      item.Type,
+			ExpectedRevision: item.ExpectedRevision,
+			RequireAbsent:    item.RequireAbsent,
+		}); err != nil {
 			appendAuditWarn(f, eventType, meta, audit.EventTarget{ResourceType: "config", Resource: item.Key}, audit.StatusFailed, itemAudit(item), err)
-			return err
+			return succeeded, err
 		}
+		succeeded++
 		appendAuditWarn(f, eventType, meta, audit.EventTarget{ResourceType: "config", Resource: item.Key}, audit.StatusSuccess, itemAudit(item), nil)
 	}
-	return nil
+	return succeeded, nil
+}
+
+func configUpsertRisk(items []localConfig) safety.Risk {
+	risk := safety.R0
+	for _, item := range items {
+		class := cfgclass.Classify(cfgclass.OperationPush, item.Content, item.Type)
+		if class.Risk > risk {
+			risk = class.Risk
+		}
+	}
+	return risk
 }
 
 func appendConfigSkippedAudits(f *cliFlags, meta cfgovctx.Context, eventType audit.EventType, items []planItem) {
@@ -573,6 +774,7 @@ func buildUpsertPlan(ctx context.Context, backend cfgov.Backend, namespace strin
 			return plan, err
 		}
 		entry.RemoteSHA256 = sha256Bytes(remote.Content)
+		entry.Revision = remote.Revision
 		switch {
 		case entry.RemoteSHA256 == entry.LocalSHA256:
 			plan.Skip = append(plan.Skip, entry)
@@ -625,7 +827,7 @@ func appendPruneItems(ctx context.Context, backend cfgov.Backend, namespace stri
 			continue
 		}
 		if !localSet[item.Coordinate.Key] {
-			plan.Prune = append(plan.Prune, planItem{Key: item.Coordinate.Key, RemoteSHA256: item.Revision})
+			plan.Prune = append(plan.Prune, planItem{Key: item.Coordinate.Key, RemoteSHA256: item.Revision, Revision: item.Revision})
 		}
 	}
 	if len(plan.Prune) > 0 {
@@ -791,14 +993,6 @@ func buildBackendFromNamedContext(parent context.Context, f *cliFlags, name stri
 	return nacos.New(client, server), nil
 }
 
-func writeManifest(dir string, archive configArchive) error {
-	data, err := json.MarshalIndent(archive, "", "  ")
-	if err != nil {
-		return apperrors.New(apperrors.CodeLocalIOError, "failed to marshal export manifest", err)
-	}
-	return writeLocalFile(filepath.Join(dir, exportManifestName), append(data, '\n'))
-}
-
 func archiveFileName(key string) string {
 	return strings.NewReplacer("/", "__", "\\", "__", ":", "_").Replace(key) + ".cfg"
 }
@@ -809,14 +1003,20 @@ func orderedLocals(items []localConfig) []localConfig {
 	return out
 }
 
-func localsForItems(locals []localConfig, items []planItem) []localConfig {
-	needed := map[string]bool{}
-	for _, item := range items {
-		needed[item.Key] = true
+func localsForPlannedItems(locals []localConfig, creates, updates []planItem) []localConfig {
+	preconditions := make(map[string]localConfig, len(creates)+len(updates))
+	for _, item := range creates {
+		preconditions[item.Key] = localConfig{RequireAbsent: true}
 	}
-	out := make([]localConfig, 0, len(items))
+	for _, item := range updates {
+		preconditions[item.Key] = localConfig{ExpectedRevision: item.Revision}
+	}
+	out := make([]localConfig, 0, len(preconditions))
 	for _, local := range locals {
-		if needed[local.Key] {
+		precondition, ok := preconditions[local.Key]
+		if ok {
+			local.ExpectedRevision = precondition.ExpectedRevision
+			local.RequireAbsent = precondition.RequireAbsent
 			out = append(out, local)
 		}
 	}
@@ -837,6 +1037,27 @@ func summarizePlan(plan configPlan) planSummary {
 
 func configPlanHasChanges(plan configPlan) bool {
 	return len(plan.Create)+len(plan.Update)+len(plan.Delete)+len(plan.Prune) > 0
+}
+
+func requireAtomicConfigPlan(backend cfgov.Backend, plan configPlan) error {
+	if !configPlanHasChanges(plan) {
+		return nil
+	}
+	capabilities := backend.Capabilities()
+	if !capabilities.SupportsCAS {
+		return apperrors.New(apperrors.CodeNotImplemented, "backend does not support atomic config preconditions", nil)
+	}
+	revisionBound := append(append([]planItem(nil), plan.Update...), plan.Delete...)
+	revisionBound = append(revisionBound, plan.Prune...)
+	if len(revisionBound) > 0 && !capabilities.SupportsRevision {
+		return apperrors.New(apperrors.CodeNotImplemented, "backend does not expose revisions required for atomic config changes", nil)
+	}
+	for _, item := range revisionBound {
+		if item.Revision == "" {
+			return apperrors.New(apperrors.CodeNotImplemented, "backend did not provide a revision required for atomic config changes", nil)
+		}
+	}
+	return nil
 }
 
 func strictNoChangeReconcile(f *cliFlags, plan configPlan) error {

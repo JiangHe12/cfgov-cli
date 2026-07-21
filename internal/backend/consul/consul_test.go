@@ -6,7 +6,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/JiangHe12/opskit-core/apperrors"
+	"github.com/JiangHe12/opskit-core/v2/apperrors"
 	capi "github.com/hashicorp/consul/api"
 
 	"github.com/JiangHe12/cfgov-cli/internal/cfgov"
@@ -188,6 +188,17 @@ func TestCASConflictMapsToAppConflict(t *testing.T) {
 	err = backend.Delete(context.Background(), cfgov.DeleteRequest{Coordinate: cfgov.Coordinate{Namespace: "prod", Key: "app"}, ExpectedRevision: "7"})
 	if got := apperrors.AsAppError(err).Code; got != apperrors.CodeConflict {
 		t.Fatalf("Delete() code = %s, want %s (err=%v)", got, apperrors.CodeConflict, err)
+	}
+	_, err = backend.Put(context.Background(), cfgov.PutRequest{
+		Coordinate:    cfgov.Coordinate{Namespace: "prod", Key: "new"},
+		Content:       []byte("x"),
+		RequireAbsent: true,
+	})
+	if got := apperrors.AsAppError(err).Code; got != apperrors.CodeConflict {
+		t.Fatalf("Put(require absent) code = %s, want %s (err=%v)", got, apperrors.CodeConflict, err)
+	}
+	if fake.lastCASModifyIndex != 0 {
+		t.Fatalf("Put(require absent) CAS index = %d, want 0", fake.lastCASModifyIndex)
 	}
 }
 
@@ -593,23 +604,24 @@ func newServiceTestBackend(catalog *fakeCatalog, health *fakeHealth, agent *fake
 }
 
 type fakeKV struct {
-	calls             int
-	keysCalls         int
-	pair              *capi.KVPair
-	pairs             capi.KVPairs
-	getErr            error
-	listErr           error
-	putErr            error
-	casErr            error
-	deleteErr         error
-	deleteCASErr      error
-	casOK             bool
-	deleteCASOK       bool
-	lastGetKey        string
-	lastListPrefix    string
-	lastKeysPrefix    string
-	lastKeysSeparator string
-	lastQuery         *capi.QueryOptions
+	calls              int
+	keysCalls          int
+	pair               *capi.KVPair
+	pairs              capi.KVPairs
+	getErr             error
+	listErr            error
+	putErr             error
+	casErr             error
+	deleteErr          error
+	deleteCASErr       error
+	casOK              bool
+	deleteCASOK        bool
+	lastGetKey         string
+	lastListPrefix     string
+	lastKeysPrefix     string
+	lastKeysSeparator  string
+	lastQuery          *capi.QueryOptions
+	lastCASModifyIndex uint64
 }
 
 func (f *fakeKV) Get(key string, q *capi.QueryOptions) (*capi.KVPair, *capi.QueryMeta, error) {
@@ -643,8 +655,9 @@ func (f *fakeKV) Put(*capi.KVPair, *capi.WriteOptions) (*capi.WriteMeta, error) 
 	return &capi.WriteMeta{}, f.putErr
 }
 
-func (f *fakeKV) CAS(*capi.KVPair, *capi.WriteOptions) (bool, *capi.WriteMeta, error) {
+func (f *fakeKV) CAS(pair *capi.KVPair, _ *capi.WriteOptions) (bool, *capi.WriteMeta, error) {
 	f.calls++
+	f.lastCASModifyIndex = pair.ModifyIndex
 	return f.casOK, &capi.WriteMeta{}, f.casErr
 }
 

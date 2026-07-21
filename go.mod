@@ -3,7 +3,6 @@ module github.com/JiangHe12/cfgov-cli
 go 1.26.0
 
 require (
-	github.com/JiangHe12/opskit-core v1.1.4
 	github.com/fatih/color v1.19.0
 	github.com/hashicorp/consul/api v1.34.3
 	github.com/mattn/go-isatty v0.0.22
@@ -12,6 +11,7 @@ require (
 	go.etcd.io/etcd/client/v3 v3.6.12
 	go.opentelemetry.io/otel v1.44.0
 	go.opentelemetry.io/otel/trace v1.44.0
+	golang.org/x/sys v0.45.0
 	gopkg.in/yaml.v3 v3.0.1
 	k8s.io/api v0.36.2
 	k8s.io/apimachinery v0.36.2
@@ -21,6 +21,7 @@ require (
 require (
 	filippo.io/age v1.3.1 // indirect
 	filippo.io/hpke v0.4.0 // indirect
+	github.com/JiangHe12/opskit-core/v2 v2.0.0
 	github.com/armon/go-metrics v0.4.1 // indirect
 	github.com/cenkalti/backoff/v5 v5.0.3 // indirect
 	github.com/cespare/xxhash/v2 v2.3.0 // indirect
@@ -81,7 +82,6 @@ require (
 	golang.org/x/exp v0.0.0-20260218203240-3dfff04db8fa // indirect
 	golang.org/x/net v0.55.0 // indirect
 	golang.org/x/oauth2 v0.36.0 // indirect
-	golang.org/x/sys v0.45.0 // indirect
 	golang.org/x/term v0.43.0 // indirect
 	golang.org/x/text v0.37.0 // indirect
 	golang.org/x/time v0.14.0 // indirect

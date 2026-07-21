@@ -9,9 +9,9 @@ import (
 
 	"github.com/spf13/cobra"
 
-	"github.com/JiangHe12/opskit-core/apperrors"
-	"github.com/JiangHe12/opskit-core/audit"
-	"github.com/JiangHe12/opskit-core/safety"
+	"github.com/JiangHe12/opskit-core/v2/apperrors"
+	"github.com/JiangHe12/opskit-core/v2/audit"
+	"github.com/JiangHe12/opskit-core/v2/safety"
 
 	"github.com/JiangHe12/cfgov-cli/internal/cfgov"
 	"github.com/JiangHe12/cfgov-cli/internal/cfgovctx"
@@ -57,13 +57,14 @@ func serviceListCmd(f *cliFlags) *cobra.Command {
 			if f.Output == "json" {
 				return targetJSONData(f, "ServiceList", result, target, operationTargetRead)
 			}
-			printOperationTarget(p, target, operationTargetRead)
+			if err := printOperationTarget(p, target, operationTargetRead); err != nil {
+				return err
+			}
 			rows := make([][]string, 0, len(result.Names))
 			for _, name := range result.Names {
 				rows = append(rows, []string{name})
 			}
-			p.Table([]string{"SERVICE"}, rows)
-			return nil
+			return p.Table([]string{"SERVICE"}, rows)
 		},
 	}
 	cmd.Flags().IntVar(&page, "page", 1, "Page number")
@@ -122,13 +123,14 @@ func serviceInstancesCmd(f *cliFlags) *cobra.Command {
 			if f.Output == "json" {
 				return targetJSONList(f, "ServiceInstanceList", items, len(items), 1, len(items), target)
 			}
-			printOperationTarget(p, target, operationTargetRead)
+			if err := printOperationTarget(p, target, operationTargetRead); err != nil {
+				return err
+			}
 			rows := make([][]string, 0, len(items))
 			for _, item := range items {
 				rows = append(rows, []string{item.IP, strconv.Itoa(item.Port), fmt.Sprint(item.Healthy), fmt.Sprint(item.Enabled), fmt.Sprint(item.Weight)})
 			}
-			p.Table([]string{"IP", "PORT", "HEALTHY", "ENABLED", "WEIGHT"}, rows)
-			return nil
+			return p.Table([]string{"IP", "PORT", "HEALTHY", "ENABLED", "WEIGHT"}, rows)
 		},
 	}
 	cmd.Flags().StringVarP(&service, "service", "s", "", "Service name")
@@ -148,7 +150,8 @@ func serviceRegisterCmd(f *cliFlags) *cobra.Command {
 			if err != nil {
 				return err
 			}
-			if f.DryRun || f.Plan {
+			if isPlanOnly(f) {
+				markPreview(f)
 				plan.DryRun = true
 				return targetJSONData(f, "ChangePlan", plan, operationTargetFromContext(f, ctxMeta), operationTargetWrite)
 			}
@@ -158,11 +161,23 @@ func serviceRegisterCmd(f *cliFlags) *cobra.Command {
 			if err := authorize(f, safety.R1, ctxMeta, ""); err != nil {
 				return err
 			}
+			metadata := mutationValueMetadata("service.register", plan)
+			metadata.Items = 1
+			metadata.Creates = 1
+			mutation, err := beginMutationAudit(f, mutationAuditSpec{
+				Action:   "service.register",
+				Context:  ctxMeta,
+				Target:   audit.EventTarget{ResourceType: "service", Resource: plan.Service},
+				Metadata: metadata,
+			})
+			if err != nil {
+				return err
+			}
 			warnEphemeralServiceRegister(plan.Options)
 			err = registry.RegisterInstance(cmd.Context(), plan.Service, plan.IP, plan.Port, plan.Options)
 			appendServiceAudit(f, ctxMeta, "register", plan.Service, auditStatus(err), plan.Impact, err)
-			if err != nil {
-				return err
+			if auditErr := finishMutationAudit(mutation, mutationAuditOutcome{}, err); auditErr != nil {
+				return auditErr
 			}
 			return targetJSONData(f, "ChangeResult", map[string]any{"resourceType": "service", "action": "register", "service": plan.Service, "ip": plan.IP, "port": plan.Port}, operationTargetFromContext(f, ctxMeta), operationTargetWrite)
 		},
@@ -182,7 +197,8 @@ func serviceDeregisterCmd(f *cliFlags) *cobra.Command {
 			if err != nil {
 				return err
 			}
-			if f.DryRun || f.Plan {
+			if isPlanOnly(f) {
+				markPreview(f)
 				plan.DryRun = true
 				return targetJSONData(f, "ChangePlan", plan, operationTargetFromContext(f, ctxMeta), operationTargetWrite)
 			}
@@ -192,10 +208,22 @@ func serviceDeregisterCmd(f *cliFlags) *cobra.Command {
 			if err := authorizeServiceDeregister(f, ctxMeta); err != nil {
 				return err
 			}
-			err = registry.DeregisterInstance(cmd.Context(), plan.Service, plan.IP, plan.Port, plan.Options)
-			appendServiceAudit(f, ctxMeta, "deregister", plan.Service, auditStatus(err), plan.Impact, err)
+			metadata := mutationValueMetadata("service.deregister", plan)
+			metadata.Items = 1
+			metadata.Deletes = 1
+			mutation, err := beginMutationAudit(f, mutationAuditSpec{
+				Action:   "service.deregister",
+				Context:  ctxMeta,
+				Target:   audit.EventTarget{ResourceType: "service", Resource: plan.Service},
+				Metadata: metadata,
+			})
 			if err != nil {
 				return err
+			}
+			err = registry.DeregisterInstance(cmd.Context(), plan.Service, plan.IP, plan.Port, plan.Options)
+			appendServiceAudit(f, ctxMeta, "deregister", plan.Service, auditStatus(err), plan.Impact, err)
+			if auditErr := finishMutationAudit(mutation, mutationAuditOutcome{}, err); auditErr != nil {
+				return auditErr
 			}
 			return targetJSONData(f, "ChangeResult", map[string]any{"resourceType": "service", "action": "deregister", "service": plan.Service, "ip": plan.IP, "port": plan.Port}, operationTargetFromContext(f, ctxMeta), operationTargetWrite)
 		},

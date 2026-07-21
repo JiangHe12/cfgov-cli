@@ -4,14 +4,15 @@ import (
 	"fmt"
 	"io/fs"
 	"os"
-	"path"
 	"path/filepath"
+	"sort"
 	"strings"
 	"time"
 
 	"github.com/spf13/cobra"
 
-	"github.com/JiangHe12/opskit-core/apperrors"
+	"github.com/JiangHe12/opskit-core/v2/apperrors"
+	"github.com/JiangHe12/opskit-core/v2/audit"
 )
 
 var agentPaths = map[string]string{
@@ -83,14 +84,46 @@ func installSkills(f *cliFlags, target string) error {
 
 	dstDir := filepath.Join(installDir, "cfgov-cli")
 	overwriting := skillInstallExists(dstDir)
-	if err := copyEmbeddedSkill(skillFS, "skills/cfgov-cli", dstDir); err != nil {
+	if isPlanOnly(f) {
+		if skillFS == nil {
+			return apperrors.New(apperrors.CodeLocalIOError, "embedded skill filesystem is not initialized", nil)
+		}
+		if _, err := fs.Stat(skillFS, "skills/cfgov-cli/SKILL.md"); err != nil {
+			return apperrors.New(apperrors.CodeLocalIOError, "failed to read embedded skill", err)
+		}
+		return printLocalChangePlan(f, "skill", "install", dstDir, map[string]any{"overwrite": overwriting})
+	}
+	snapshot, err := readEmbeddedSkillSnapshot(skillFS, "skills/cfgov-cli")
+	if err != nil {
 		return err
 	}
-	if err := verifyInstalledSkill(dstDir); err != nil {
+	metadata := mutationValueMetadata("skill.install", snapshot)
+	metadata.Items = len(snapshot) + 1
+	if overwriting {
+		metadata.Updates = metadata.Items
+	} else {
+		metadata.Creates = metadata.Items
+	}
+	mutation, err := beginMutationAudit(f, mutationAuditSpec{
+		Action:   "skill.install",
+		Target:   audit.EventTarget{ResourceType: "skill", Resource: dstDir},
+		Metadata: metadata,
+	})
+	if err != nil {
 		return err
 	}
-	if err := writeInstallManifest(dstDir); err != nil {
-		return err
+	succeeded, operationErr := writeEmbeddedSkillSnapshot(snapshot, dstDir)
+	if operationErr == nil {
+		operationErr = verifyInstalledSkill(dstDir)
+	}
+	if operationErr == nil {
+		operationErr = writeInstallManifest(dstDir)
+		if operationErr == nil {
+			succeeded++
+		}
+	}
+	if auditErr := finishBatchMutationAudit(mutation, len(snapshot)+1, succeeded, 0, operationErr); auditErr != nil {
+		return auditErr
 	}
 
 	p := newPrinter(f)
@@ -98,11 +131,9 @@ func installSkills(f *cliFlags, target string) error {
 		return p.JSONData("InstallResult", map[string]string{"path": dstDir})
 	}
 	if overwriting {
-		p.Info(fmt.Sprintf("overwriting existing skill at %s", dstDir))
-		return nil
+		return p.Info(fmt.Sprintf("overwriting existing skill at %s", dstDir))
 	}
-	p.Success(fmt.Sprintf("skill installed to %s", dstDir))
-	return nil
+	return p.Success(fmt.Sprintf("skill installed to %s", dstDir))
 }
 
 func writeInstallManifest(dstDir string) error {
@@ -141,39 +172,51 @@ func resolveInstallDir(target string) (string, error) {
 	return target, nil
 }
 
-func copyEmbeddedSkill(fsys fs.FS, srcDir, dstDir string) error {
+func readEmbeddedSkillSnapshot(fsys fs.FS, srcDir string) (map[string][]byte, error) {
 	if fsys == nil {
-		return apperrors.New(apperrors.CodeLocalIOError, "embedded skill filesystem is not initialized", nil)
+		return nil, apperrors.New(apperrors.CodeLocalIOError, "embedded skill filesystem is not initialized", nil)
 	}
-	if err := os.MkdirAll(dstDir, 0o750); err != nil {
-		return apperrors.New(apperrors.CodeLocalIOError, "failed to create skill directory", err)
-	}
-	entries, err := fs.ReadDir(fsys, srcDir)
-	if err != nil {
-		return apperrors.New(apperrors.CodeLocalIOError, "failed to read embedded skill", err)
-	}
-
-	for _, entry := range entries {
-		if !entry.IsDir() && strings.HasSuffix(entry.Name(), "_test.go") {
-			continue
+	snapshot := map[string][]byte{}
+	err := fs.WalkDir(fsys, srcDir, func(sourcePath string, entry fs.DirEntry, walkErr error) error {
+		if walkErr != nil {
+			return walkErr
 		}
-
-		srcPath := path.Join(srcDir, entry.Name())
-		dstPath := filepath.Join(dstDir, entry.Name())
-		if entry.IsDir() {
-			if err := copyEmbeddedSkill(fsys, srcPath, dstPath); err != nil {
-				return err
-			}
-			continue
+		if entry.IsDir() || strings.HasSuffix(entry.Name(), "_test.go") {
+			return nil
 		}
-		data, err := fs.ReadFile(fsys, srcPath)
+		data, err := fs.ReadFile(fsys, sourcePath)
 		if err != nil {
-			return apperrors.New(apperrors.CodeLocalIOError, "failed to read embedded skill file", err)
+			return err
 		}
-		if err := os.WriteFile(dstPath, data, 0o600); err != nil { //nolint:gosec // dstPath is the user-selected install destination.
-			return apperrors.New(apperrors.CodeLocalIOError, "failed to write skill file", err)
-		}
+		relative := strings.TrimPrefix(sourcePath, strings.TrimSuffix(srcDir, "/")+"/")
+		snapshot[relative] = data
+		return nil
+	})
+	if err != nil {
+		return nil, apperrors.New(apperrors.CodeLocalIOError, "failed to read embedded skill", err)
 	}
+	if len(snapshot) == 0 {
+		return nil, apperrors.New(apperrors.CodeLocalIOError, "embedded skill is empty", nil)
+	}
+	return snapshot, nil
+}
 
-	return nil
+func writeEmbeddedSkillSnapshot(snapshot map[string][]byte, dstDir string) (int, error) {
+	names := make([]string, 0, len(snapshot))
+	for name := range snapshot {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	succeeded := 0
+	for _, name := range names {
+		dstPath := filepath.Join(dstDir, filepath.FromSlash(name))
+		if err := os.MkdirAll(filepath.Dir(dstPath), 0o750); err != nil {
+			return succeeded, apperrors.New(apperrors.CodeLocalIOError, "failed to create skill directory", err)
+		}
+		if err := os.WriteFile(dstPath, snapshot[name], 0o600); err != nil { //nolint:gosec // dstPath is the user-selected install destination.
+			return succeeded, apperrors.New(apperrors.CodeLocalIOError, "failed to write skill file", err)
+		}
+		succeeded++
+	}
+	return succeeded, nil
 }

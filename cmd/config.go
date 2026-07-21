@@ -19,9 +19,9 @@ import (
 	"github.com/spf13/cobra"
 	"gopkg.in/yaml.v3"
 
-	"github.com/JiangHe12/opskit-core/apperrors"
-	"github.com/JiangHe12/opskit-core/audit"
-	"github.com/JiangHe12/opskit-core/safety"
+	"github.com/JiangHe12/opskit-core/v2/apperrors"
+	"github.com/JiangHe12/opskit-core/v2/audit"
+	"github.com/JiangHe12/opskit-core/v2/safety"
 
 	"github.com/JiangHe12/cfgov-cli/internal/backup"
 	"github.com/JiangHe12/cfgov-cli/internal/cfgclass"
@@ -74,9 +74,10 @@ func configGetCmd(f *cliFlags) *cobra.Command {
 			target := operationTargetFromBackend(f, backend)
 			p := newPrinter(f)
 			if f.Output == "plain" {
-				printOperationTarget(p, target, operationTargetRead)
-				p.Content(key, string(blob.Content))
-				return nil
+				if err := printOperationTarget(p, target, operationTargetRead); err != nil {
+					return err
+				}
+				return p.Content(key, string(blob.Content))
 			}
 			return targetJSONData(f, "ConfigItem", map[string]any{
 				"namespace": coord.Namespace,
@@ -133,13 +134,14 @@ func configListCmd(f *cliFlags) *cobra.Command {
 			if f.Output == "json" {
 				return targetJSONList(f, "ConfigList", items, len(items), normalizedPage(page), normalizedPageSize(pageSize, len(items)), target)
 			}
-			printOperationTarget(p, target, operationTargetRead)
+			if err := printOperationTarget(p, target, operationTargetRead); err != nil {
+				return err
+			}
 			rows := make([][]string, 0, len(items))
 			for _, item := range items {
 				rows = append(rows, []string{item.Coordinate.Namespace, item.Coordinate.Key, item.Revision, item.Type})
 			}
-			p.Table([]string{"NAMESPACE", "KEY", "REVISION", "TYPE"}, rows)
-			return nil
+			return p.Table([]string{"NAMESPACE", "KEY", "REVISION", "TYPE"}, rows)
 		},
 	}
 	cmd.Flags().StringVarP(&group, "group", "g", "", "Nacos group filter")
@@ -185,10 +187,16 @@ func configDiffCmd(f *cliFlags) *cobra.Command {
 			}
 			if f.Output == "plain" {
 				p := newPrinter(f)
-				printOperationTarget(p, operationTargetFromBackend(f, backend), operationTargetRead)
-				p.Info(summary.Summary)
+				if err := printOperationTarget(p, operationTargetFromBackend(f, backend), operationTargetRead); err != nil {
+					return err
+				}
+				if err := p.Info(summary.Summary); err != nil {
+					return err
+				}
 				for _, line := range summary.Lines {
-					p.Info(line)
+					if err := p.Info(line); err != nil {
+						return err
+					}
 				}
 				return nil
 			}
@@ -264,8 +272,41 @@ func configPullCmd(f *cliFlags) *cobra.Command {
 			if err != nil {
 				return err
 			}
-			if err := writeLocalFile(file, blob.Content); err != nil {
+			if isPlanOnly(f) {
+				markPreview(f)
+				return targetJSONData(f, "ChangePlan", map[string]any{
+					"resourceType": "file",
+					"action":       "config pull",
+					"file":         file,
+					"key":          key,
+					"revision":     blob.Revision,
+					"sha256":       sha256Bytes(blob.Content),
+					"bytes":        len(blob.Content),
+					"dryRun":       true,
+				}, operationTargetFromBackend(f, backend), operationTargetRead)
+			}
+			mutation, err := beginMutationAudit(f, mutationAuditSpec{
+				Action:  "config.pull",
+				Context: ctxMeta,
+				Target:  audit.EventTarget{ResourceType: "file", Resource: file},
+				Metadata: mutationAuditMetadata{
+					PayloadFingerprint: mutationAuditFingerprint("payload:config.pull", blob.Content),
+					PayloadBytes:       len(blob.Content),
+					Revision:           blob.Revision,
+					Items:              1,
+					Creates:            1,
+				},
+			})
+			if err != nil {
 				return err
+			}
+			writeErr := writeLocalFile(file, blob.Content)
+			if auditErr := finishMutationAudit(
+				mutation,
+				mutationAuditOutcome{Revision: blob.Revision},
+				writeErr,
+			); auditErr != nil {
+				return auditErr
 			}
 			return targetJSONData(f, "ConfigItem", map[string]any{
 				"namespace": coord.Namespace,
@@ -317,13 +358,14 @@ func configHistoryCmd(f *cliFlags) *cobra.Command {
 			if f.Output == "json" {
 				return targetJSONList(f, "HistoryList", items, total, normalizedPage(page), normalizedPageSize(pageSize, len(items)), target)
 			}
-			printOperationTarget(p, target, operationTargetRead)
+			if err := printOperationTarget(p, target, operationTargetRead); err != nil {
+				return err
+			}
 			rows := make([][]string, 0, len(items))
 			for _, item := range items {
 				rows = append(rows, []string{item.ID, item.OpType, item.ModifiedTime, item.Operator, item.DataID, item.Group})
 			}
-			p.Table([]string{"ID", "OP", "MODIFIED", "OPERATOR", "DATA ID", "GROUP"}, rows)
-			return nil
+			return p.Table([]string{"ID", "OP", "MODIFIED", "OPERATOR", "DATA ID", "GROUP"}, rows)
 		},
 	}
 	cmd.Flags().StringVar(&key, "key", "", "Config key: dataId or group/dataId")
@@ -394,9 +436,13 @@ func configListenCmd(f *cliFlags) *cobra.Command { //nolint:gocyclo // Cobra han
 				return targetJSONList(f, "ConfigListenEvent", events, len(events), 1, len(events), operationTargetFromBackend(f, backend))
 			}
 			p := newPrinter(f)
-			printOperationTarget(p, operationTargetFromBackend(f, backend), operationTargetRead)
+			if err := printOperationTarget(p, operationTargetFromBackend(f, backend), operationTargetRead); err != nil {
+				return err
+			}
 			for _, event := range events {
-				p.Info(fmt.Sprintf("changed %s revision=%s", event.Coordinate.Key, event.Revision))
+				if err := p.Info(fmt.Sprintf("changed %s revision=%s", event.Coordinate.Key, event.Revision)); err != nil {
+					return err
+				}
 			}
 			return nil
 		},
@@ -485,7 +531,8 @@ func configPushCmd(f *cliFlags) *cobra.Command { //nolint:gocyclo // Cobra handl
 				return err
 			}
 			plan.TargetExists = &exists
-			if f.DryRun {
+			if isPlanOnly(f) {
+				markPreview(f)
 				if err := validateConfigPushMode(createOnly, updateOnly, exists); err != nil {
 					return err
 				}
@@ -504,9 +551,26 @@ func configPushCmd(f *cliFlags) *cobra.Command { //nolint:gocyclo // Cobra handl
 			if done, err := finishIdempotentConfigPush(f, ctxMeta, coord, content, plan, remote, exists); done || err != nil {
 				return err
 			}
-			backupResult, err := maybeBackupConfig(cmd.Context(), f, backend, ctxMeta, coord)
+			metadata := mutationPayloadMetadata("config.write", content)
+			metadata.Revision = expectedRevision
+			metadata.Items = 1
+			if exists {
+				metadata.Updates = 1
+			} else {
+				metadata.Creates = 1
+			}
+			mutation, err := beginMutationAudit(f, mutationAuditSpec{
+				Action:   "config.write",
+				Context:  ctxMeta,
+				Target:   audit.EventTarget{ResourceType: "config", Resource: key},
+				Metadata: metadata,
+			})
 			if err != nil {
 				return err
+			}
+			backupResult, err := maybeBackupConfig(cmd.Context(), f, backend, ctxMeta, coord)
+			if err != nil {
+				return finishMutationAudit(mutation, mutationAuditOutcome{}, err)
 			}
 			req := cfgov.PutRequest{Coordinate: coord, Content: content, ContentType: contentType, ExpectedRevision: expectedRevision}
 			blob, err := backend.Put(cmd.Context(), req)
@@ -515,8 +579,12 @@ func configPushCmd(f *cliFlags) *cobra.Command { //nolint:gocyclo // Cobra handl
 				status = audit.StatusFailed
 			}
 			appendAuditWarn(f, audit.EventType("config.write"), ctxMeta, audit.EventTarget{ResourceType: "config", Resource: key}, status, plan.Impact, err)
-			if err != nil {
-				return err
+			if auditErr := finishMutationAudit(
+				mutation,
+				mutationAuditOutcome{Revision: blob.Revision},
+				err,
+			); auditErr != nil {
+				return auditErr
 			}
 			return targetJSONData(f, "ChangeResult", map[string]any{
 				"resourceType": "config",
@@ -557,7 +625,8 @@ func configDeleteCmd(f *cliFlags) *cobra.Command {
 				return err
 			}
 			class := cfgclass.Classify(cfgclass.OperationDelete, nil, "")
-			if f.DryRun {
+			if isPlanOnly(f) {
+				markPreview(f)
 				plan := map[string]any{"resourceType": "config", "key": key, "baseRisk": class.Risk, "impact": "delete one config blob"}
 				return targetJSONData(f, "ChangePlan", plan, operationTargetFromBackend(f, backend), operationTargetWrite)
 			}
@@ -568,9 +637,22 @@ func configDeleteCmd(f *cliFlags) *cobra.Command {
 				return err
 			}
 			coord := cfgov.Coordinate{Namespace: backend.Describe().Namespace, Key: key}
-			backupResult, err := maybeBackupConfig(cmd.Context(), f, backend, ctxMeta, coord)
+			mutation, err := beginMutationAudit(f, mutationAuditSpec{
+				Action:  "config.delete",
+				Context: ctxMeta,
+				Target:  audit.EventTarget{ResourceType: "config", Resource: key},
+				Metadata: mutationAuditMetadata{
+					Revision: expectedRevision,
+					Items:    1,
+					Deletes:  1,
+				},
+			})
 			if err != nil {
 				return err
+			}
+			backupResult, err := maybeBackupConfig(cmd.Context(), f, backend, ctxMeta, coord)
+			if err != nil {
+				return finishMutationAudit(mutation, mutationAuditOutcome{}, err)
 			}
 			err = backend.Delete(cmd.Context(), cfgov.DeleteRequest{Coordinate: coord, ExpectedRevision: expectedRevision})
 			status := audit.StatusSuccess
@@ -578,8 +660,8 @@ func configDeleteCmd(f *cliFlags) *cobra.Command {
 				status = audit.StatusFailed
 			}
 			appendAuditWarn(f, audit.EventType("config.delete"), ctxMeta, audit.EventTarget{ResourceType: "config", Resource: key}, status, "delete one config blob", err)
-			if err != nil {
-				return err
+			if auditErr := finishMutationAudit(mutation, mutationAuditOutcome{}, err); auditErr != nil {
+				return auditErr
 			}
 			return targetJSONData(f, "ChangeResult", map[string]any{"resourceType": "config", "namespace": coord.Namespace, "key": key, "deleted": true, "backup": backupResult}, operationTargetFromBackend(f, backend), operationTargetWrite)
 		},
@@ -948,7 +1030,7 @@ func diffSummary(remote, local []byte) diffResult {
 	}
 }
 
-func configContextDiff(ctx context.Context, f *cliFlags, key, sourceContext, targetContext string) error {
+func configContextDiff(ctx context.Context, f *cliFlags, key, sourceContext, targetContext string) error { //nolint:gocyclo // Validation, two reads, audit, and output errors are one command flow.
 	if sourceContext == "" || targetContext == "" {
 		return apperrors.New(apperrors.CodeUsageError, "--source-context and --target-context must both be specified", nil)
 	}
@@ -1000,10 +1082,16 @@ func configContextDiff(ctx context.Context, f *cliFlags, key, sourceContext, tar
 	)
 	if f.Output == "plain" {
 		p := newPrinter(f)
-		printOperationTarget(p, operationTargetFromDescription(targetContext, target.Describe()), operationTargetRead)
-		p.Info(result.Summary)
+		if err := printOperationTarget(p, operationTargetFromDescription(targetContext, target.Describe()), operationTargetRead); err != nil {
+			return err
+		}
+		if err := p.Info(result.Summary); err != nil {
+			return err
+		}
 		for _, line := range result.Lines {
-			p.Info(line)
+			if err := p.Info(line); err != nil {
+				return err
+			}
 		}
 		return nil
 	}
@@ -1109,6 +1197,78 @@ func writeLocalFile(path string, content []byte) error {
 	if err := os.WriteFile(path, content, 0o600); err != nil {
 		return apperrors.New(apperrors.CodeLocalIOError, "failed to write output file", err)
 	}
+	return nil
+}
+
+func registerExportFileName(seen map[string]string, name string) error {
+	clean := filepath.Clean(name)
+	if name == "" ||
+		filepath.IsAbs(clean) ||
+		clean == "." ||
+		clean == ".." ||
+		filepath.Base(clean) != clean ||
+		clean != name {
+		return apperrors.New(apperrors.CodeValidationFailed, "export contains an unsafe file name", nil)
+	}
+	canonical := strings.ToLower(clean)
+	if previous, exists := seen[canonical]; exists {
+		return apperrors.New(
+			apperrors.CodeConflict,
+			fmt.Sprintf("export file name collision between %q and %q", previous, name),
+			nil,
+		)
+	}
+	seen[canonical] = name
+	return nil
+}
+
+func preflightNewLocalFiles(dir string, names []string) error {
+	seen := make(map[string]string, len(names))
+	for _, name := range names {
+		if err := registerExportFileName(seen, name); err != nil {
+			return err
+		}
+	}
+	for _, name := range names {
+		path := filepath.Join(dir, name)
+		if _, err := os.Lstat(path); err == nil {
+			return apperrors.New(apperrors.CodeResourceAlreadyExists, "export target already exists: "+path, nil)
+		} else if !os.IsNotExist(err) {
+			return apperrors.New(apperrors.CodeLocalIOError, "failed to inspect export target", err)
+		}
+	}
+	return nil
+}
+
+func writeNewLocalFile(path string, content []byte) (retErr error) {
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		return apperrors.New(apperrors.CodeLocalIOError, "failed to create output directory", err)
+	}
+	file, err := os.OpenFile(path, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600) //nolint:gosec // The operator-selected export target is preflighted and O_EXCL prevents overwrite races.
+	if err != nil {
+		if errors.Is(err, os.ErrExist) {
+			return apperrors.New(apperrors.CodeResourceAlreadyExists, "export target already exists: "+path, nil)
+		}
+		return apperrors.New(apperrors.CodeLocalIOError, "failed to create export target", err)
+	}
+	removeOnError := true
+	defer func() {
+		if removeOnError {
+			_ = file.Close()
+			_ = os.Remove(path)
+		}
+	}()
+	written, err := file.Write(content)
+	if err != nil {
+		return apperrors.New(apperrors.CodeLocalIOError, "failed to write export target", err)
+	}
+	if written != len(content) {
+		return apperrors.New(apperrors.CodeLocalIOError, "failed to write export target", io.ErrShortWrite)
+	}
+	if err := file.Close(); err != nil {
+		return apperrors.New(apperrors.CodeLocalIOError, "failed to close export target", err)
+	}
+	removeOnError = false
 	return nil
 }
 

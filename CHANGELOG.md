@@ -2,6 +2,30 @@
 
 All notable changes to this project are documented in this file.
 
+## v0.6.0
+
+### Added
+
+- Added two-phase mutation auditing for backend, context, credential, RBAC, and local-file changes, with intent-before-effect, correlated outcomes, and commit-aware replay of definitely uncommitted outcomes.
+
+### Changed
+
+- **BREAKING**: Context and role changes, confirmed audit pruning, and audit repair are fixed R3 governance operations with command-specific `--allow-*` authorization. `--plan` now guarantees no target mutation while still recording a governed preview event.
+- Updated to `opskit-core/v2` v2.0.0. Confirmed audit pruning now verifies and locks the exact authenticated history, advances its checkpoint before deletion, and writes control evidence to a sibling log.
+
+### Fixed
+
+- Bulk config mutations now require genuine backend revision preconditions; Nacos and Apollo fail closed instead of presenting check-then-write as atomic CAS.
+- Exports are create-only and refuse collisions. Failed context commits compensate rollback-safe local credential writes under the configuration lock; Vault rollback fails closed as `uncertain/not-safe` because the backend has no atomic compare-and-swap.
+
+### Removed
+
+- Removed the non-functional global `--backup-keep` flag and `capabilities.data.domain.limits.backupKeep`; use `backup clean --keep-last <n>` for explicit retention.
+
+### Security
+
+- Authorization identity now comes from the local OS user and hostname. Audit and telemetry records redact raw tickets, reasons, configuration bodies, diffs, and backend error text in favor of fingerprints and bounded metadata.
+
 ## v0.5.13
 
 ### Changed

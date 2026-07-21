@@ -9,7 +9,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/JiangHe12/opskit-core/apperrors"
+	"github.com/JiangHe12/opskit-core/v2/apperrors"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -157,6 +157,14 @@ func TestCASConflictAndGetMissing(t *testing.T) {
 	_, err = backend.Get(context.Background(), cfgov.Coordinate{Namespace: "default", Key: "secret/missing/key"})
 	if got := apperrors.AsAppError(err).Code; got != apperrors.CodeResourceNotFound {
 		t.Fatalf("Get missing code = %s, want %s (err=%v)", got, apperrors.CodeResourceNotFound, err)
+	}
+	_, err = backend.Put(context.Background(), cfgov.PutRequest{
+		Coordinate:    cfgov.Coordinate{Namespace: "default", Key: "configmap/app/application.yaml"},
+		Content:       []byte("occupied"),
+		RequireAbsent: true,
+	})
+	if got := apperrors.AsAppError(err).Code; got != apperrors.CodeConflict {
+		t.Fatalf("Put(require absent existing key) code = %s, want %s (err=%v)", got, apperrors.CodeConflict, err)
 	}
 }
 

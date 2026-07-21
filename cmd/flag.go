@@ -8,8 +8,8 @@ import (
 
 	"github.com/spf13/cobra"
 
-	"github.com/JiangHe12/opskit-core/apperrors"
-	"github.com/JiangHe12/opskit-core/audit"
+	"github.com/JiangHe12/opskit-core/v2/apperrors"
+	"github.com/JiangHe12/opskit-core/v2/audit"
 
 	"github.com/JiangHe12/cfgov-cli/internal/cfgov"
 	"github.com/JiangHe12/cfgov-cli/internal/cfgovctx"
@@ -86,9 +86,10 @@ func flagListCmd(f *cliFlags) *cobra.Command {
 				return targetJSONList(f, "FlagList", items, len(items), 1, len(items), target)
 			}
 			p := newPrinter(f)
-			printOperationTarget(p, target, operationTargetRead)
-			p.Table([]string{"KEY", "REVISION", "SHA256", "COUNT"}, [][]string{{result.Key, result.Revision, result.SHA256, intString(result.Count)}})
-			return nil
+			if err := printOperationTarget(p, target, operationTargetRead); err != nil {
+				return err
+			}
+			return p.Table([]string{"KEY", "REVISION", "SHA256", "COUNT"}, [][]string{{result.Key, result.Revision, result.SHA256, intString(result.Count)}})
 		},
 	}
 	cmd.Flags().StringVar(&app, "app", "", "Application name")
@@ -136,18 +137,61 @@ func flagExportCmd(f *cliFlags) *cobra.Command {
 				return err
 			}
 			result, err := readFlagSet(cmd.Context(), backend, store, app)
-			appendFlagAudit(f, ctxMeta, "export", app, auditStatus(err), flagSetAudit(result), err)
 			if err != nil {
+				appendFlagAudit(f, ctxMeta, "export", app, auditStatus(err), flagSetAudit(result), err)
 				return err
 			}
+			planOnly := isPlanOnly(f)
 			content, err := json.MarshalIndent(result.Flags, "", "  ")
 			if err != nil {
 				return apperrors.New(apperrors.CodeLocalIOError, "failed to encode flags", err)
 			}
-			if err := writeLocalFile(filepath.Join(dir, "flags.json"), append(content, '\n')); err != nil {
+			result.Flags = nil
+			payload := make([]byte, len(content)+1)
+			copy(payload, content)
+			payload[len(content)] = '\n'
+			if err := preflightNewLocalFiles(dir, []string{"flags.json"}); err != nil {
+				appendFlagAudit(f, ctxMeta, "export", app, audit.StatusFailed, flagSetAudit(result), err)
 				return err
 			}
-			result.Flags = nil
+			if planOnly {
+				appendFlagAudit(f, ctxMeta, "export", app, audit.StatusSuccess, flagSetAudit(result), nil)
+				markPreview(f)
+				return targetJSONData(f, "ChangePlan", map[string]any{
+					"resourceType": "file",
+					"action":       "flag export",
+					"app":          app,
+					"dir":          dir,
+					"items":        []flagSetResult{result},
+					"dryRun":       true,
+				}, operationTargetFromBackend(f, backend), operationTargetRead)
+			}
+			metadata := mutationPayloadMetadata("flag.export", payload)
+			metadata.Items = 1
+			metadata.Creates = 1
+			metadata.Revision = result.Revision
+			mutation, err := beginMutationAudit(f, mutationAuditSpec{
+				Action:  "flag.export",
+				Context: ctxMeta,
+				Target: audit.EventTarget{
+					App:          app,
+					ResourceType: "file",
+					Resource:     filepath.Join(dir, "flags.json"),
+				},
+				Metadata: metadata,
+			})
+			if err != nil {
+				return err
+			}
+			writeErr := writeNewLocalFile(filepath.Join(dir, "flags.json"), payload)
+			if auditErr := finishMutationAudit(
+				mutation,
+				mutationAuditOutcome{Revision: result.Revision},
+				writeErr,
+			); auditErr != nil {
+				return auditErr
+			}
+			appendFlagAudit(f, ctxMeta, "export", app, audit.StatusSuccess, flagSetAudit(result), nil)
 			return targetJSONData(f, "FlagExport", map[string]any{"app": app, "dir": dir, "items": []flagSetResult{result}}, operationTargetFromBackend(f, backend), operationTargetRead)
 		},
 	}

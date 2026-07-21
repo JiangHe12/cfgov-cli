@@ -8,7 +8,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/JiangHe12/opskit-core/apperrors"
+	"github.com/JiangHe12/opskit-core/v2/apperrors"
 
 	"github.com/JiangHe12/cfgov-cli/internal/api"
 	"github.com/JiangHe12/cfgov-cli/internal/cfgov"
@@ -58,11 +58,14 @@ func (b *Backend) Get(ctx context.Context, coord cfgov.Coordinate) (cfgov.Blob, 
 }
 
 func (b *Backend) Put(ctx context.Context, req cfgov.PutRequest) (cfgov.Blob, error) {
+	if err := req.ValidatePreconditions(); err != nil {
+		return cfgov.Blob{}, err
+	}
 	if err := b.requireNamespace(req.Coordinate.Namespace); err != nil {
 		return cfgov.Blob{}, err
 	}
-	if err := b.checkCAS(ctx, req.Coordinate, req.ExpectedRevision); err != nil {
-		return cfgov.Blob{}, err
+	if req.RequireAbsent || req.ExpectedRevision != "" {
+		return cfgov.Blob{}, unsupportedCASErr()
 	}
 	key, err := cfgov.ParseNacosKey(req.Coordinate.Key)
 	if err != nil {
@@ -78,8 +81,8 @@ func (b *Backend) Delete(ctx context.Context, req cfgov.DeleteRequest) error {
 	if err := b.requireNamespace(req.Coordinate.Namespace); err != nil {
 		return err
 	}
-	if err := b.checkCAS(ctx, req.Coordinate, req.ExpectedRevision); err != nil {
-		return err
+	if req.ExpectedRevision != "" {
+		return unsupportedCASErr()
 	}
 	key, err := cfgov.ParseNacosKey(req.Coordinate.Key)
 	if err != nil {
@@ -223,7 +226,7 @@ func (b *Backend) Capabilities() cfgov.Capabilities {
 		Backend:          "nacos",
 		ResourceTypes:    []string{"config", "namespace", "service", "rule", "flag"},
 		Verbs:            []string{"get", "list", "diff", "validate", "pull", "history", "listen", "push", "delete"},
-		SupportsCAS:      true,
+		SupportsCAS:      false,
 		SupportsRevision: true,
 		SupportsHistory:  true,
 		SupportsWatch:    true,
@@ -365,18 +368,8 @@ func normalizePublicNamespace(namespace string) string {
 	return namespace
 }
 
-func (b *Backend) checkCAS(ctx context.Context, coord cfgov.Coordinate, expected string) error {
-	if expected == "" {
-		return nil
-	}
-	current, err := b.CurrentRevision(ctx, coord)
-	if err != nil {
-		return err
-	}
-	if current != expected {
-		return apperrors.New(apperrors.CodeConflict, "config revision changed", nil)
-	}
-	return nil
+func unsupportedCASErr() error {
+	return apperrors.New(apperrors.CodeNotImplemented, "nacos does not support atomic config preconditions", nil)
 }
 
 func md5Hex(content []byte) string {

@@ -26,7 +26,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/JiangHe12/opskit-core/apperrors"
+	"github.com/JiangHe12/opskit-core/v2/apperrors"
 	capi "github.com/hashicorp/consul/api"
 
 	"github.com/JiangHe12/cfgov-cli/internal/cfgov"
@@ -208,33 +208,48 @@ func (b *Backend) Get(ctx context.Context, coord cfgov.Coordinate) (cfgov.Blob, 
 }
 
 func (b *Backend) Put(ctx context.Context, req cfgov.PutRequest) (cfgov.Blob, error) {
+	if err := req.ValidatePreconditions(); err != nil {
+		return cfgov.Blob{}, err
+	}
 	ns, key, fullKey, err := b.resolve(req.Coordinate)
 	if err != nil {
 		return cfgov.Blob{}, err
 	}
-	pair := &capi.KVPair{Key: fullKey, Value: req.Content}
 	writeOpts := b.writeOptions(ctx)
-	if req.ExpectedRevision != "" {
-		rev, err := parseRevision(req.ExpectedRevision)
+	if req.RequireAbsent || req.ExpectedRevision != "" {
+		pair, err := consulConditionalPutPair(fullKey, req)
 		if err != nil {
 			return cfgov.Blob{}, err
 		}
-		pair.ModifyIndex = rev
 		b.tracef("[trace] >>> consul cas %s value=<redacted:%d>\n", redactKey(fullKey), len(req.Content))
 		ok, _, err := b.kv.CAS(pair, writeOpts)
 		if err != nil {
 			return cfgov.Blob{}, backendErr("consul cas failed", err)
 		}
 		if !ok {
-			return cfgov.Blob{}, apperrors.New(apperrors.CodeConflict, "config revision changed", nil)
+			return cfgov.Blob{}, apperrors.New(apperrors.CodeConflict, "config precondition failed", nil)
 		}
 		return b.Get(ctx, cfgov.Coordinate{Namespace: ns, Key: key})
 	}
+	pair := &capi.KVPair{Key: fullKey, Value: req.Content}
 	b.tracef("[trace] >>> consul put %s value=<redacted:%d>\n", redactKey(fullKey), len(req.Content))
 	if _, err := b.kv.Put(pair, writeOpts); err != nil {
 		return cfgov.Blob{}, backendErr("consul put failed", err)
 	}
 	return b.Get(ctx, cfgov.Coordinate{Namespace: ns, Key: key})
+}
+
+func consulConditionalPutPair(fullKey string, req cfgov.PutRequest) (*capi.KVPair, error) {
+	pair := &capi.KVPair{Key: fullKey, Value: req.Content}
+	if req.ExpectedRevision == "" {
+		return pair, nil
+	}
+	revision, err := parseRevision(req.ExpectedRevision)
+	if err != nil {
+		return nil, err
+	}
+	pair.ModifyIndex = revision
+	return pair, nil
 }
 
 func (b *Backend) Delete(ctx context.Context, req cfgov.DeleteRequest) error {

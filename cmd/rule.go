@@ -11,8 +11,8 @@ import (
 
 	"github.com/spf13/cobra"
 
-	"github.com/JiangHe12/opskit-core/apperrors"
-	"github.com/JiangHe12/opskit-core/audit"
+	"github.com/JiangHe12/opskit-core/v2/apperrors"
+	"github.com/JiangHe12/opskit-core/v2/audit"
 
 	"github.com/JiangHe12/cfgov-cli/internal/cfgov"
 	"github.com/JiangHe12/cfgov-cli/internal/cfgovctx"
@@ -105,9 +105,10 @@ func ruleListCmd(f *cliFlags) *cobra.Command {
 				rows = append(rows, []string{string(item.Type), item.Key, item.Revision, item.SHA256, intString(item.Count)})
 			}
 			p := newPrinter(f)
-			printOperationTarget(p, target, operationTargetRead)
-			p.Table([]string{"TYPE", "KEY", "REVISION", "SHA256", "COUNT"}, rows)
-			return nil
+			if err := printOperationTarget(p, target, operationTargetRead); err != nil {
+				return err
+			}
+			return p.Table([]string{"TYPE", "KEY", "REVISION", "SHA256", "COUNT"}, rows)
 		},
 	}
 	cmd.Flags().StringVar(&app, "app", "", "Sentinel app")
@@ -161,7 +162,10 @@ func ruleExportCmd(f *cliFlags) *cobra.Command {
 			if err != nil {
 				return err
 			}
+			planOnly := isPlanOnly(f)
 			items := make([]ruleSetResult, 0, len(rule.AllTypes))
+			exportFiles := make(map[string][]byte, len(rule.AllTypes))
+			exportNames := make([]string, 0, len(rule.AllTypes))
 			for _, ruleType := range rule.AllTypes {
 				result, err := readRuleSet(cmd.Context(), backend, store, app, ruleType)
 				if err != nil {
@@ -172,11 +176,59 @@ func ruleExportCmd(f *cliFlags) *cobra.Command {
 				if err != nil {
 					return apperrors.New(apperrors.CodeLocalIOError, "failed to encode rules", err)
 				}
-				if err := writeLocalFile(filepath.Join(dir, string(ruleType)+".json"), append(content, '\n')); err != nil {
-					return err
-				}
+				name := string(ruleType) + ".json"
+				exportFiles[name] = append(content, '\n')
+				exportNames = append(exportNames, name)
 				result.Rules = nil
 				items = append(items, result)
+			}
+			if err := preflightNewLocalFiles(dir, exportNames); err != nil {
+				appendRuleAudit(f, ctxMeta, "export", app, "", audit.StatusFailed, "", err)
+				return err
+			}
+			if planOnly {
+				appendRuleAudit(f, ctxMeta, "export", app, "", audit.StatusSuccess, ruleAuditSummary(items), nil)
+				markPreview(f)
+				return targetJSONData(f, "ChangePlan", map[string]any{
+					"resourceType": "file",
+					"action":       "rule export",
+					"app":          app,
+					"dir":          dir,
+					"items":        items,
+					"dryRun":       true,
+				}, operationTargetFromBackend(f, backend), operationTargetRead)
+			}
+			metadata := mutationValueMetadata("rule.export", items)
+			metadata.Items = len(exportFiles)
+			metadata.Creates = len(exportFiles)
+			mutation, err := beginMutationAudit(f, mutationAuditSpec{
+				Action:  "rule.export",
+				Context: ctxMeta,
+				Target: audit.EventTarget{
+					App:          app,
+					ResourceType: "file",
+					Resource:     dir,
+				},
+				Metadata: metadata,
+			})
+			if err != nil {
+				return err
+			}
+			succeeded := 0
+			for _, name := range exportNames {
+				writeErr := writeNewLocalFile(filepath.Join(dir, name), exportFiles[name])
+				if writeErr != nil {
+					return finishMutationAudit(mutation, mutationAuditOutcome{
+						Status:    audit.StatusPartialFailed,
+						Succeeded: succeeded,
+						Failed:    1,
+						Skipped:   len(exportFiles) - succeeded - 1,
+					}, writeErr)
+				}
+				succeeded++
+			}
+			if err := finishMutationAudit(mutation, mutationAuditOutcome{Succeeded: succeeded}, nil); err != nil {
+				return err
 			}
 			appendRuleAudit(f, ctxMeta, "export", app, "", audit.StatusSuccess, ruleAuditSummary(items), nil)
 			return targetJSONData(f, "RuleExport", map[string]any{"app": app, "dir": dir, "items": items}, operationTargetFromBackend(f, backend), operationTargetRead)

@@ -5,8 +5,8 @@ import (
 	"os"
 	"strings"
 
-	"github.com/JiangHe12/opskit-core/printer"
-	"github.com/JiangHe12/opskit-core/redact"
+	"github.com/JiangHe12/opskit-core/v2/printer"
+	"github.com/JiangHe12/opskit-core/v2/redact"
 
 	"github.com/JiangHe12/cfgov-cli/internal/cfgov"
 	"github.com/JiangHe12/cfgov-cli/internal/cfgovctx"
@@ -49,12 +49,12 @@ func operationTargetFromContext(f *cliFlags, meta cfgovctx.Context) operationTar
 	}
 }
 
-func printOperationTarget(p *printer.Printer, target operationTarget, mode operationTargetMode) {
+func printOperationTarget(p *printer.Printer, target operationTarget, mode operationTargetMode) error {
 	label := "TARGET"
 	if mode == operationTargetWrite {
 		label = "WRITE TARGET"
 	}
-	p.TargetHeader(label, [][2]string{
+	return p.TargetHeader(label, [][2]string{
 		{"context", target.Context},
 		{"backend", target.Backend},
 		{"server", target.Server},
@@ -71,7 +71,9 @@ func targetDataForOutput(f *cliFlags, data any, target operationTarget) any {
 
 func targetJSONData(f *cliFlags, kind string, data any, target operationTarget, mode operationTargetMode) error {
 	p := newPrinter(f)
-	printOperationTarget(p, target, mode)
+	if err := printOperationTarget(p, target, mode); err != nil {
+		return err
+	}
 	return p.JSONData(kind, targetDataForOutput(f, data, target))
 }
 

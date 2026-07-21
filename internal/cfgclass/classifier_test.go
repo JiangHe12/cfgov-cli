@@ -3,7 +3,7 @@ package cfgclass
 import (
 	"testing"
 
-	"github.com/JiangHe12/opskit-core/safety"
+	"github.com/JiangHe12/opskit-core/v2/safety"
 )
 
 func TestClassifyPushStructuredPayloads(t *testing.T) {

@@ -1,6 +1,7 @@
 package backup
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -116,6 +117,100 @@ func TestCleanBeforeApplies(t *testing.T) {
 	}
 	if len(items) != 0 {
 		t.Fatalf("items after clean = %#v, want none", items)
+	}
+}
+
+func TestCleanDeleteFailureReturnsOnlyCompletedDeletions(t *testing.T) {
+	root := secureTempBackupRoot(t)
+	first, err := Write(root, Request{
+		Context: "prod", Namespace: "public", Group: "DEFAULT_GROUP",
+		DataID: "first.yaml", Content: []byte("first"), Operator: "tester",
+	})
+	if err != nil {
+		t.Fatalf("Write(first) error = %v", err)
+	}
+	second, err := Write(root, Request{
+		Context: "prod", Namespace: "public", Group: "DEFAULT_GROUP",
+		DataID: "second.yaml", Content: []byte("second"), Operator: "tester",
+	})
+	if err != nil {
+		t.Fatalf("Write(second) error = %v", err)
+	}
+	keepLast := 0
+	writeCalled := false
+	result, err := cleanLockedWithOperations(
+		root,
+		CleanOptions{KeepLast: &keepLast, Apply: true},
+		func(path string) error {
+			if path == second.Path {
+				return errors.New("injected remove failure")
+			}
+			return os.Remove(path)
+		},
+		func(root string, items []Metadata) error {
+			writeCalled = true
+			return writeIndex(root, items)
+		},
+	)
+	if err == nil {
+		t.Fatal("cleanLockedWithOperations() error = nil, want remove failure")
+	}
+	if len(result.Deleted) != 1 || result.Deleted[0].Path != first.Path {
+		t.Fatalf("deleted = %#v, want only completed deletion %s", result.Deleted, first.Path)
+	}
+	if len(result.Removed) != 0 {
+		t.Fatalf("removed = %#v, want none before index commit", result.Removed)
+	}
+	if writeCalled {
+		t.Fatal("index write ran after deletion failure")
+	}
+	if _, statErr := os.Stat(first.Path); !os.IsNotExist(statErr) {
+		t.Fatalf("first backup still exists after successful deletion: %v", statErr)
+	}
+	if _, statErr := os.Stat(second.Path); statErr != nil {
+		t.Fatalf("failed deletion removed second backup: %v", statErr)
+	}
+}
+
+func TestCleanIndexFailureReturnsDeletedFilesButNotUncommittedRemovals(t *testing.T) {
+	root := secureTempBackupRoot(t)
+	deleted, err := Write(root, Request{
+		Context: "prod", Namespace: "public", Group: "DEFAULT_GROUP",
+		DataID: "deleted.yaml", Content: []byte("deleted"), Operator: "tester",
+	})
+	if err != nil {
+		t.Fatalf("Write(deleted) error = %v", err)
+	}
+	missing, err := Write(root, Request{
+		Context: "prod", Namespace: "public", Group: "DEFAULT_GROUP",
+		DataID: "missing.yaml", Content: []byte("missing"), Operator: "tester",
+	})
+	if err != nil {
+		t.Fatalf("Write(missing) error = %v", err)
+	}
+	if err := os.Remove(missing.Path); err != nil {
+		t.Fatalf("Remove(missing) error = %v", err)
+	}
+	keepLast := 0
+	result, err := cleanLockedWithOperations(
+		root,
+		CleanOptions{KeepLast: &keepLast, Apply: true},
+		os.Remove,
+		func(string, []Metadata) error {
+			return errors.New("injected index write failure")
+		},
+	)
+	if err == nil {
+		t.Fatal("cleanLockedWithOperations() error = nil, want index write failure")
+	}
+	if len(result.Deleted) != 1 || result.Deleted[0].Path != deleted.Path {
+		t.Fatalf("deleted = %#v, want completed deletion %s", result.Deleted, deleted.Path)
+	}
+	if len(result.Removed) != 0 {
+		t.Fatalf("removed = %#v, want no uncommitted index removals", result.Removed)
+	}
+	if _, statErr := os.Stat(deleted.Path); !os.IsNotExist(statErr) {
+		t.Fatalf("deleted backup still exists after index failure: %v", statErr)
 	}
 }
 

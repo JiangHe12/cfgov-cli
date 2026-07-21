@@ -3,7 +3,7 @@ package flag
 import (
 	"testing"
 
-	"github.com/JiangHe12/opskit-core/apperrors"
+	"github.com/JiangHe12/opskit-core/v2/apperrors"
 )
 
 func TestNacosKeyMatchesFeatureFlagConvention(t *testing.T) {

@@ -3,10 +3,11 @@ package cmd
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"strings"
 	"testing"
 
-	"github.com/JiangHe12/opskit-core/printer"
+	"github.com/JiangHe12/opskit-core/v2/printer"
 
 	"github.com/JiangHe12/cfgov-cli/internal/cfgovctx"
 )
@@ -26,12 +27,28 @@ func TestPrintOperationTargetTableHeader(t *testing.T) {
 	p := printer.NewWithWriters(printer.FormatTable, &out, &bytes.Buffer{})
 	target := operationTarget{Context: "dev", Backend: "nacos", Server: "http://127.0.0.1:8848", Namespace: "public"}
 
-	printOperationTarget(p, target, operationTargetWrite)
+	if err := printOperationTarget(p, target, operationTargetWrite); err != nil {
+		t.Fatalf("printOperationTarget() error = %v", err)
+	}
 
 	want := "WRITE TARGET\tcontext=dev | backend=nacos | server=http://127.0.0.1:8848 | namespace=public\n\n"
 	if got := out.String(); got != want {
 		t.Fatalf("header = %q, want %q", got, want)
 	}
+}
+
+func TestPrintOperationTargetPropagatesWriteFailure(t *testing.T) {
+	p := printer.NewWithWriters(printer.FormatPlain, failingOutputWriter{}, &bytes.Buffer{})
+	err := printOperationTarget(p, operationTarget{Context: "dev"}, operationTargetRead)
+	if err == nil {
+		t.Fatal("printOperationTarget() error = nil, want output write failure")
+	}
+}
+
+type failingOutputWriter struct{}
+
+func (failingOutputWriter) Write([]byte) (int, error) {
+	return 0, errors.New("injected output failure")
 }
 
 func TestTargetDataForJSONOutput(t *testing.T) {

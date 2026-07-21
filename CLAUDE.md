@@ -64,9 +64,36 @@ CGO_ENABLED=1 go test -race -count=1 ./...
   fails; protected contexts require an explicit `--backup`/`--no-backup`.
 - AI agents never auto-fill `--ticket`, `--allow-*`, or a high-risk `--yes`.
   Blast radius comes from `--dry-run`/`--plan`/`--diff`, never a model guess.
+- Authorization and audit identity comes from the local OS user plus hostname;
+  legacy root `--operator` and operator environment inputs are ignored. Context
+  create/replace/switch/import/credential migration, context deletion, and role
+  changes are R3 and require their exact `--allow-context-change`,
+  `--allow-context-delete`, or `--allow-role-change` flag. Apply paths re-read
+  and authorize pre-change policy while holding the context-file lock.
+- Confirmed audit pruning and repair are fixed R3 evidence mutations requiring
+  `--confirm`, `--yes`, a ticket, and the exact `--allow-audit-prune` or
+  `--allow-audit-repair`. They use the persisted current-context policy, and
+  previews return before authorization without changing audit evidence. Confirmed
+  mutation delegates locking and exact preview-set rechecks to core v2. Pruning
+  verifies the complete history and safely advances authenticated checkpoints;
+  repair remains limited to legacy history. Both operations write control
+  intent/outcome to the sibling `.<audit-base>-control` log so the target is not
+  converted or polluted by control-log rotations.
 - Audit stores only metadata, sha256 fingerprints, and counts — never raw config
   or rule bodies, tickets, or reasons. Redaction applies before caller output and
   before audit persistence.
+- Every actual target mutation persists one `MutationAuditRecord` intent after
+  authorization/final validation and before its first target write, then one
+  outcome before ordinary success. A batch uses one pair with aggregate counts.
+  Core v2 commit state is authoritative: only a known-not-committed outcome is
+  atomically fsynced to the owner-only `<audit.log>.outcome-spool`.
+  Committed-post-commit-error and indeterminate outcomes are not blindly queued.
+  An indeterminate replay is renamed with `.indeterminate` and blocks later
+  automatic replay until manual reconciliation by `mutationId + phase`.
+- New audit and telemetry records never contain raw tickets, reasons, payload
+  bodies, or full error text. Use domain-separated SHA-256 fingerprints,
+  byte/item/revision metadata, and error codes. Audit query must blank legacy
+  raw ticket/reason/diff/error-message fields before output.
 - Backend-specific addressing (Nacos group/dataId; Apollo app/env/cluster/item;
   etcd key-prefix/namespace segments; K8s `configmap|secret/<name>/<dataKey>`;
   Consul key-prefix/namespace segments + catalog/agent services) stays inside the

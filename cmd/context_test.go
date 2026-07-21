@@ -9,25 +9,69 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 
-	"github.com/JiangHe12/opskit-core/apperrors"
-	"github.com/JiangHe12/opskit-core/credstore"
-	corectx "github.com/JiangHe12/opskit-core/ctx"
-	"github.com/JiangHe12/opskit-core/safety"
+	"github.com/JiangHe12/opskit-core/v2/apperrors"
+	"github.com/JiangHe12/opskit-core/v2/credstore"
+	corectx "github.com/JiangHe12/opskit-core/v2/ctx"
+	"github.com/JiangHe12/opskit-core/v2/safety"
 	"gopkg.in/yaml.v3"
 
 	"github.com/JiangHe12/cfgov-cli/internal/cfgovctx"
 )
 
-func TestValidateRolesURLRejectsHTTPByDefault(t *testing.T) {
+func TestValidateRolesURLRejectsUnimplementedRemoteSource(t *testing.T) {
 	t.Parallel()
-	err := validateRolesURL("url", "http://roles.example/roles.yaml", false)
-	if apperrors.AsAppError(err).Code != apperrors.CodeUsageError {
-		t.Fatalf("error = %v, want usage error", err)
+	for _, rawURL := range []string{"https://roles.example/roles.yaml", "http://roles.example/roles.yaml"} {
+		err := validateRolesURL("url", rawURL, true)
+		if apperrors.AsAppError(err).Code != apperrors.CodeNotImplemented {
+			t.Fatalf("validateRolesURL(%q) error = %v, want not implemented", rawURL, err)
+		}
 	}
-	if err := validateRolesURL("url", "http://roles.example/roles.yaml", true); err != nil {
-		t.Fatalf("allow insecure roles URL error = %v", err)
+	if err := validateRolesURL("inline", "", false); err != nil {
+		t.Fatalf("inline roles error = %v", err)
+	}
+}
+
+func TestVaultCredentialBackendPrevalidationRequiresCleanHTTPSURL(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name    string
+		addr    string
+		wantErr bool
+	}{
+		{name: "https", addr: "https://vault.example:8200"},
+		{name: "https base path", addr: "https://vault.example/base"},
+		{name: "http", addr: "http://vault.example:8200", wantErr: true},
+		{name: "relative", addr: "vault.example:8200", wantErr: true},
+		{name: "userinfo", addr: "https://user:secret@vault.example", wantErr: true},
+		{name: "query", addr: "https://vault.example?token=secret", wantErr: true},
+		{name: "empty query", addr: "https://vault.example?", wantErr: true},
+		{name: "fragment", addr: "https://vault.example/#secret", wantErr: true},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+			item := cfgovctx.Context{
+				Base: corectx.Base{
+					CredentialBackend: "vault",
+					VaultAddr:         test.addr,
+					VaultPath:         "service/prod",
+					VaultRoleID:       "role-id",
+				},
+			}
+			err := validateCredentialBackendAvailableWithFactory(item, "secret-id", func(cfgovctx.Context) (credstore.Backend, error) {
+				t.Fatal("backend factory must not be called when a process secret id is supplied")
+				return nil, nil
+			})
+			if test.wantErr && apperrors.AsAppError(err).Code != apperrors.CodeCredentialStoreError {
+				t.Fatalf("validation error = %v, want credential store error", err)
+			}
+			if !test.wantErr && err != nil {
+				t.Fatalf("validation error = %v", err)
+			}
+		})
 	}
 }
 
@@ -57,6 +101,9 @@ func TestCtxSetStoresPasswordCredentialReference(t *testing.T) {
 	out, err := runCommandForTest(t,
 		"--config", configPath,
 		"-o", "json",
+		"--yes",
+		"--ticket", "TEST-1",
+		"--allow-context-change",
 		"--backend", "nacos",
 		"--server", "http://127.0.0.1:8848",
 		"--username", "nacos",
@@ -301,14 +348,327 @@ func TestCtxMigrateCredentialsDryRun(t *testing.T) {
 	}
 }
 
-func TestCtxRoleLifecycleAndRBAC(t *testing.T) {
-	dir := t.TempDir()
-	cfgovctx.SetConfigPath(filepath.Join(dir, "config.yaml"))
-	if err := cfgovctx.Set("dev", cfgovctx.Context{Base: corectx.Base{Server: "http://127.0.0.1:8848"}, Backend: "nacos"}); err != nil {
+func TestPlanPreventsContextAndCredentialMutations(t *testing.T) {
+	home := t.TempDir()
+	configPath := filepath.Join(home, "config.yaml")
+	cfgovctx.SetConfigPath(configPath)
+	t.Cleanup(func() { cfgovctx.SetConfigPath("") })
+	t.Setenv("CFGOV_CREDENTIAL_PASSPHRASE", "test-passphrase")
+	if err := cfgovctx.Set("dev", cfgovctx.Context{
+		Base: corectx.Base{
+			Server:   "http://127.0.0.1:8848",
+			Password: "literal-secret",
+			Roles:    map[string]string{"alice": safety.RoleReader},
+		},
+		Backend: "nacos",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := cfgovctx.Set("prod", cfgovctx.Context{
+		Base:    corectx.Base{Server: "http://127.0.0.1:8848"},
+		Backend: "nacos",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := cfgovctx.Use("dev"); err != nil {
 		t.Fatal(err)
 	}
 
+	doc := contextExportDocument{
+		APIVersion: ctxExportAPIVersion,
+		Name:       "imported",
+		Context: cfgovctx.Context{
+			Base: corectx.Base{
+				Server:            "http://127.0.0.1:8848",
+				Password:          "import-secret",
+				CredentialBackend: "encrypted-file",
+			},
+			Backend: "nacos",
+		},
+	}
+	data, err := yaml.Marshal(doc)
+	if err != nil {
+		t.Fatal(err)
+	}
+	importPath := filepath.Join(home, "import.yaml")
+	if err := os.WriteFile(importPath, data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	baseline, err := os.ReadFile(configPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	tests := []struct {
+		name string
+		args []string
+	}{
+		{
+			name: "set with credential",
+			args: []string{
+				"--backend", "nacos", "--server", "http://127.0.0.1:8848",
+				"ctx", "set", "planned", "--password", "planned-secret", "--credential-backend", "encrypted-file",
+			},
+		},
+		{name: "use", args: []string{"ctx", "use", "prod"}},
+		{name: "delete", args: []string{"ctx", "delete", "prod"}},
+		{name: "import", args: []string{"ctx", "import", "-f", importPath}},
+		{name: "role set", args: []string{"ctx", "role", "set", "dev", "--target-operator", "bob", "--role", "admin"}},
+		{name: "role unset", args: []string{"ctx", "role", "unset", "dev", "--target-operator", "alice"}},
+		{name: "migrate credentials", args: []string{"--yes", "ctx", "migrate-credentials", "--to", "encrypted-file", "--dry-run"}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			args := []string{"--config", configPath, "--plan", "-o", "json"}
+			out, err := runCommandForTestAtHome(t, home, append(args, tt.args...)...)
+			if err != nil {
+				t.Fatalf("planned command error = %v; out=%s", err, out)
+			}
+			if !strings.Contains(out, `"dryRun": true`) {
+				t.Fatalf("planned command output missing dryRun=true: %s", out)
+			}
+			after, err := os.ReadFile(configPath)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !bytes.Equal(after, baseline) {
+				t.Fatalf("planned command changed context config:\n%s", after)
+			}
+		})
+	}
+	if _, err := os.Stat(filepath.Join(home, ".cfgov-cli", "credentials.enc")); !os.IsNotExist(err) {
+		t.Fatalf("planned context operations created credential file: %v", err)
+	}
+}
+
+func TestCtxSetPlanRunsReadOnlyConfigAndCredentialValidation(t *testing.T) {
+	t.Run("invalid config", func(t *testing.T) {
+		home := t.TempDir()
+		configPath := filepath.Join(home, "config.yaml")
+		original := []byte("contexts: [\n")
+		if err := os.WriteFile(configPath, original, 0o600); err != nil {
+			t.Fatal(err)
+		}
+		out, err := runCommandForTestAtHome(t, home,
+			"--config", configPath,
+			"--backend", "nacos",
+			"--server", "http://127.0.0.1:8848",
+			"--plan",
+			"-o", "json",
+			"ctx", "set", "planned",
+		)
+		if err == nil {
+			t.Fatalf("ctx set plan accepted invalid config; out=%s", out)
+		}
+		after, readErr := os.ReadFile(configPath)
+		if readErr != nil {
+			t.Fatal(readErr)
+		}
+		if !bytes.Equal(after, original) {
+			t.Fatalf("ctx set plan changed invalid config: %q", after)
+		}
+	})
+
+	t.Run("invalid credential backend matches apply failure", func(t *testing.T) {
+		planHome := t.TempDir()
+		planPath := filepath.Join(planHome, "config.yaml")
+		_, planErr := runCommandForTestAtHome(t, planHome,
+			"--config", planPath,
+			"--backend", "nacos",
+			"--server", "http://127.0.0.1:8848",
+			"--plan",
+			"ctx", "set", "planned",
+			"--credential-backend", "does-not-exist",
+		)
+		if planErr == nil {
+			t.Fatal("ctx set plan accepted invalid credential backend")
+		}
+
+		applyHome := t.TempDir()
+		applyPath := filepath.Join(applyHome, "config.yaml")
+		_, applyErr := runCommandForTestAtHome(t, applyHome,
+			"--config", applyPath,
+			"--backend", "nacos",
+			"--server", "http://127.0.0.1:8848",
+			"ctx", "set", "planned",
+			"--credential-backend", "does-not-exist",
+		)
+		if applyErr == nil {
+			t.Fatal("ctx set apply accepted invalid credential backend")
+		}
+		if got, want := apperrors.AsAppError(planErr).Code, apperrors.AsAppError(applyErr).Code; got != want {
+			t.Fatalf("plan error code = %s, apply error code = %s", got, want)
+		}
+		if _, err := os.Stat(planPath); !os.IsNotExist(err) {
+			t.Fatalf("ctx set plan created config: %v", err)
+		}
+		if _, err := os.Stat(filepath.Join(planHome, ".cfgov-cli", "credentials.enc")); !os.IsNotExist(err) {
+			t.Fatalf("ctx set plan created credential file: %v", err)
+		}
+	})
+
+	t.Run("unavailable credential backend", func(t *testing.T) {
+		home := t.TempDir()
+		configPath := filepath.Join(home, "config.yaml")
+		t.Setenv("CFGOV_CREDENTIAL_PASSPHRASE", "")
+		_, err := runCommandForTestAtHome(t, home,
+			"--config", configPath,
+			"--backend", "nacos",
+			"--server", "http://127.0.0.1:8848",
+			"--plan",
+			"ctx", "set", "planned",
+			"--credential-backend", "encrypted-file",
+		)
+		if err == nil {
+			t.Fatal("ctx set plan accepted unavailable encrypted-file backend")
+		}
+		if _, statErr := os.Stat(configPath); !os.IsNotExist(statErr) {
+			t.Fatalf("ctx set plan created config: %v", statErr)
+		}
+		if _, statErr := os.Stat(filepath.Join(home, ".cfgov-cli", "credentials.enc")); !os.IsNotExist(statErr) {
+			t.Fatalf("ctx set plan created credential file: %v", statErr)
+		}
+	})
+	t.Cleanup(func() { cfgovctx.SetConfigPath("") })
+}
+
+func TestCtxSetVaultPlanAndApplyParity(t *testing.T) {
+	tests := []struct {
+		name              string
+		appRole           bool
+		expectedRequests  int32
+		expectedAuthToken string
+	}{
+		{name: "token", expectedRequests: 2, expectedAuthToken: "vault-token"},
+		{name: "app role flag", appRole: true, expectedRequests: 3, expectedAuthToken: "client-token"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var requests atomic.Int32
+			server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				requests.Add(1)
+				switch r.URL.Path {
+				case "/v1/auth/approle/login":
+					if !tt.appRole || r.Method != http.MethodPost {
+						t.Errorf("unexpected AppRole request: %s %s", r.Method, r.URL.Path)
+						http.Error(w, "unexpected", http.StatusBadRequest)
+						return
+					}
+					_, _ = w.Write([]byte(`{"auth":{"client_token":"client-token"}}`))
+				case "/v1/secret/data/team/app":
+					if r.Method == http.MethodGet {
+						http.NotFound(w, r)
+						return
+					}
+					if r.Method != http.MethodPost {
+						t.Errorf("secret method = %s, want GET or POST", r.Method)
+						http.Error(w, "unexpected", http.StatusBadRequest)
+						return
+					}
+					if got := r.Header.Get("X-Vault-Token"); got != tt.expectedAuthToken {
+						t.Errorf("X-Vault-Token = %q, want %q", got, tt.expectedAuthToken)
+						http.Error(w, "unauthorized", http.StatusUnauthorized)
+						return
+					}
+					_, _ = w.Write([]byte(`{}`))
+				default:
+					t.Errorf("unexpected Vault path: %s", r.URL.Path)
+					http.NotFound(w, r)
+				}
+			}))
+			defer server.Close()
+			defaultTransport := http.DefaultTransport
+			http.DefaultTransport = server.Client().Transport
+			defer func() { http.DefaultTransport = defaultTransport }()
+
+			home := t.TempDir()
+			configPath := filepath.Join(home, "config.yaml")
+			t.Setenv("VAULT_TOKEN", "")
+			t.Setenv("VAULT_SECRET_ID", "")
+			if !tt.appRole {
+				t.Setenv("VAULT_TOKEN", "vault-token")
+			}
+			common := []string{
+				"--config", configPath,
+				"--yes",
+				"--ticket", "TEST-1",
+				"--allow-context-change",
+				"--backend", "nacos",
+				"--server", "http://127.0.0.1:8848",
+				"-o", "json",
+				"ctx", "set", "vault-context",
+				"--password", "stored-secret",
+				"--credential-backend", "vault",
+				"--vault-addr", server.URL,
+				"--vault-path", "team/app",
+			}
+			if tt.appRole {
+				common = append(common, "--vault-role-id", "role-id", "--vault-secret-id", "flag-secret-id")
+			}
+
+			planArgs := append([]string{"--plan"}, common...)
+			out, err := runCommandForTestAtHome(t, home, planArgs...)
+			if err != nil {
+				t.Fatalf("ctx set Vault plan error = %v; out=%s", err, out)
+			}
+			if requests.Load() != 0 {
+				t.Fatalf("Vault plan requests = %d, want 0", requests.Load())
+			}
+			if _, err := os.Stat(configPath); !os.IsNotExist(err) {
+				t.Fatalf("Vault plan created context config: %v", err)
+			}
+			if tt.appRole && os.Getenv("VAULT_SECRET_ID") != "" {
+				t.Fatalf("Vault AppRole plan polluted VAULT_SECRET_ID: %q", os.Getenv("VAULT_SECRET_ID"))
+			}
+
+			out, err = runCommandForTestAtHome(t, home, common...)
+			if err != nil {
+				t.Fatalf("ctx set Vault apply error = %v; out=%s", err, out)
+			}
+			if requests.Load() != tt.expectedRequests {
+				t.Fatalf("Vault apply requests = %d, want %d", requests.Load(), tt.expectedRequests)
+			}
+			if tt.appRole && os.Getenv("VAULT_SECRET_ID") != "flag-secret-id" {
+				t.Fatalf("Vault AppRole apply VAULT_SECRET_ID = %q", os.Getenv("VAULT_SECRET_ID"))
+			}
+			cfgovctx.SetConfigPath(configPath)
+			cfg, err := cfgovctx.Load()
+			if err != nil {
+				t.Fatal(err)
+			}
+			item := cfg.Contexts["vault-context"]
+			ref := credstore.ParseRef(item.Password)
+			if item.CredentialBackend != "vault" || !ref.IsRef || ref.BackendName != "vault" {
+				t.Fatalf("stored Vault credential reference = %#v, context=%+v", ref, item)
+			}
+			t.Cleanup(func() { cfgovctx.SetConfigPath("") })
+		})
+	}
+}
+
+func TestCtxRoleLifecycleAndRBAC(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("HOME", dir)
+	t.Setenv("USERPROFILE", dir)
+	cfgovctx.SetConfigPath(filepath.Join(dir, "config.yaml"))
 	f := newDefaultFlags()
+	operator, err := trustedOperator(f)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := cfgovctx.Set("dev", cfgovctx.Context{
+		Base: corectx.Base{
+			Server: "http://127.0.0.1:8848",
+			Roles:  map[string]string{operator: safety.RoleAdmin},
+		},
+		Backend: "nacos",
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	f.Yes = true
+	f.Ticket = "TEST-1"
+	f.AllowRoleChange = true
 	if err := runCtxRoleSet(f, "dev", roleOptions{targetOperator: "alice", role: safety.RoleReader}); err != nil {
 		t.Fatalf("runCtxRoleSet error = %v", err)
 	}
@@ -320,14 +680,19 @@ func TestCtxRoleLifecycleAndRBAC(t *testing.T) {
 		t.Fatalf("roles = %#v", cfg.Contexts["dev"].Roles)
 	}
 	roles := roleItems(cfg.Contexts["dev"].Roles)
-	if len(roles) != 1 || roles[0].Operator != "alice" || roles[0].Role != safety.RoleReader {
+	if len(roles) != 2 {
 		t.Fatalf("role items = %#v", roles)
 	}
 
 	writer := newDefaultFlags()
 	writer.Operator = "alice"
 	writer.Yes = true
-	if err := authorize(writer, safety.R1, cfg.Contexts["dev"], ""); apperrors.AsAppError(err).Code != apperrors.CodeAuthorizationRequired {
+	spoofedMeta := cfg.Contexts["dev"]
+	spoofedMeta.Roles = map[string]string{
+		"alice":  safety.RoleAdmin,
+		operator: safety.RoleReader,
+	}
+	if err := authorize(writer, safety.R1, spoofedMeta, ""); apperrors.AsAppError(err).Code != apperrors.CodeAuthorizationRequired {
 		t.Fatalf("reader write authorize error = %v, want authorization required", err)
 	}
 
@@ -338,8 +703,8 @@ func TestCtxRoleLifecycleAndRBAC(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if cfg.Contexts["dev"].Roles != nil {
-		t.Fatalf("roles after unset = %#v, want nil", cfg.Contexts["dev"].Roles)
+	if _, exists := cfg.Contexts["dev"].Roles["alice"]; exists {
+		t.Fatalf("roles after unset = %#v, want alice removed", cfg.Contexts["dev"].Roles)
 	}
 }
 
@@ -397,8 +762,14 @@ func serverURLWithUserInfo(t *testing.T, rawURL, username, password string) stri
 
 func runCommandForTest(t *testing.T, args ...string) (string, error) {
 	t.Helper()
-	t.Setenv("NO_COLOR", "1")
 	home := t.TempDir()
+	return runCommandForTestAtHome(t, home, args...)
+}
+
+func runCommandForTestAtHome(t *testing.T, home string, args ...string) (string, error) {
+	t.Helper()
+	prepareMutationAuditTestParent(t, home)
+	t.Setenv("NO_COLOR", "1")
 	t.Setenv("HOME", home)
 	t.Setenv("USERPROFILE", home)
 	cmd := NewRootCmd()
@@ -409,13 +780,18 @@ func runCommandForTest(t *testing.T, args ...string) (string, error) {
 		t.Fatalf("Pipe() error = %v", err)
 	}
 	os.Stdout = writer
+	var buf bytes.Buffer
+	readDone := make(chan error, 1)
+	go func() {
+		_, readErr := buf.ReadFrom(reader)
+		readDone <- readErr
+	}()
 	runErr := cmd.Execute()
 	if closeErr := writer.Close(); closeErr != nil {
 		t.Fatalf("Close(writer) error = %v", closeErr)
 	}
 	os.Stdout = oldStdout
-	var buf bytes.Buffer
-	if _, err := buf.ReadFrom(reader); err != nil {
+	if err := <-readDone; err != nil {
 		t.Fatalf("ReadFrom(stdout) error = %v", err)
 	}
 	if err := reader.Close(); err != nil {

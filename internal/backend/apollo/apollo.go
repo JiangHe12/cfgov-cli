@@ -29,7 +29,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/JiangHe12/opskit-core/apperrors"
+	"github.com/JiangHe12/opskit-core/v2/apperrors"
 
 	"github.com/JiangHe12/cfgov-cli/internal/cfgov"
 	"github.com/JiangHe12/cfgov-cli/internal/flag"
@@ -184,18 +184,21 @@ func (b *Backend) ValidateKey(key string) error {
 }
 
 func (b *Backend) Put(ctx context.Context, req cfgov.PutRequest) (cfgov.Blob, error) {
+	if err := req.ValidatePreconditions(); err != nil {
+		return cfgov.Blob{}, err
+	}
 	ns, key, err := b.resolve(req.Coordinate)
 	if err != nil {
 		return cfgov.Blob{}, err
 	}
-	item, status, err := b.getItem(ctx, ns, key)
+	if req.RequireAbsent || req.ExpectedRevision != "" {
+		return cfgov.Blob{}, unsupportedCASErr()
+	}
+	_, status, err := b.getItem(ctx, ns, key)
 	if err != nil {
 		return cfgov.Blob{}, err
 	}
 	exists := status != http.StatusNotFound
-	if req.ExpectedRevision != "" && itemRevision(item, []byte(item.Value)) != req.ExpectedRevision {
-		return cfgov.Blob{}, apperrors.New(apperrors.CodeConflict, "config revision changed", nil)
-	}
 	if exists {
 		err = b.updateItem(ctx, ns, key, req.Content)
 	} else {
@@ -216,13 +219,7 @@ func (b *Backend) Delete(ctx context.Context, req cfgov.DeleteRequest) error {
 		return err
 	}
 	if req.ExpectedRevision != "" {
-		current, err := b.CurrentRevision(ctx, cfgov.Coordinate{Namespace: ns, Key: key})
-		if err != nil {
-			return err
-		}
-		if current != req.ExpectedRevision {
-			return apperrors.New(apperrors.CodeConflict, "config revision changed", nil)
-		}
+		return unsupportedCASErr()
 	}
 	params := url.Values{}
 	params.Set("operator", b.operator)
@@ -344,13 +341,17 @@ func (b *Backend) Capabilities() cfgov.Capabilities {
 		Backend:          "apollo",
 		ResourceTypes:    []string{"config", "rule", "flag"},
 		Verbs:            []string{"get", "list", "diff", "validate", "pull", "push", "delete"},
-		SupportsCAS:      true,
+		SupportsCAS:      false,
 		SupportsRevision: true,
 		SupportsHistory:  false,
 		SupportsWatch:    false,
 		SupportsRules:    true,
 		SupportsFlags:    true,
 	}
+}
+
+func unsupportedCASErr() error {
+	return apperrors.New(apperrors.CodeNotImplemented, "apollo does not support atomic config preconditions", nil)
 }
 
 func (b *Backend) RuleCoordinate(app, ruleType string) (cfgov.Coordinate, error) {

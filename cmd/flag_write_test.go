@@ -1,13 +1,18 @@
 package cmd
 
 import (
+	"bytes"
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
+	"time"
 
-	"github.com/JiangHe12/opskit-core/apperrors"
-	"github.com/JiangHe12/opskit-core/safety"
+	"github.com/JiangHe12/opskit-core/v2/apperrors"
+	"github.com/JiangHe12/opskit-core/v2/audit"
+	"github.com/JiangHe12/opskit-core/v2/safety"
 
 	"github.com/JiangHe12/cfgov-cli/internal/cfgov"
 	"github.com/JiangHe12/cfgov-cli/internal/cfgovctx"
@@ -107,7 +112,7 @@ func TestMandatoryFlagBackupRejectsNoBackup(t *testing.T) {
 }
 
 func TestApplyFlagWritesCASConflict(t *testing.T) {
-	backend := newFlagWriteBackend([]byte(`[{"key":"checkout","enabled":true}]`), "rev1")
+	backend := newFlagWriteBackend([]byte(`[{"key":"checkout","enabled":true}]`))
 	current := flagSetResult{App: "app", Count: 1, Key: "FEATURE_FLAG_GROUP/app-flags", Revision: "rev1", SHA256: sha256Bytes(backend.content), Flags: []flag.FeatureFlag{{Key: "checkout", Enabled: true}}}
 	next := []flag.FeatureFlag{{Key: "checkout", Enabled: false}}
 	write, plan, err := plannedFlagSetWrite(backend, "app", safety.R1, "update", current, next)
@@ -123,9 +128,151 @@ func TestApplyFlagWritesCASConflict(t *testing.T) {
 	}
 }
 
+func TestApplyFlagWritesIntentFailureDoesNotCallBackend(t *testing.T) {
+	backend := newFlagWriteBackend([]byte(`[{"key":"checkout","enabled":true}]`))
+	current := flagSetResult{
+		App:      "app",
+		Count:    1,
+		Key:      "FEATURE_FLAG_GROUP/app-flags",
+		Revision: "rev1",
+		SHA256:   sha256Bytes(backend.content),
+		Flags:    []flag.FeatureFlag{{Key: "checkout", Enabled: true}},
+	}
+	next := []flag.FeatureFlag{{Key: "checkout", Enabled: false}}
+	write, plan, err := plannedFlagSetWrite(backend, "app", safety.R1, "update", current, next)
+	if err != nil {
+		t.Fatalf("plannedFlagSetWrite() error = %v", err)
+	}
+	f := mutationAuditTestFlags()
+	f.Yes = true
+	auditRoot := t.TempDir()
+	prepareMutationAuditTestParent(t, auditRoot)
+	f.mutationAuditPath = filepath.Join(auditRoot, "audit.log")
+	f.mutationAudit = &mutationAuditRuntime{
+		appendRecord: func(string, mutationAuditRecord, audit.Options) (audit.AppendResult, error) {
+			return audit.AppendResult{State: audit.AppendCommitNotCommitted}, errors.New("injected intent failure")
+		},
+		now:    func() time.Time { return time.Unix(1_700_000_000, 0).UTC() },
+		random: bytes.NewReader(bytes.Repeat([]byte{0x51}, 16)),
+	}
+	err = applyFlagWrites(context.Background(), f, backend, cfgovctx.Context{}, plan, []plannedFlagWrite{write}, safety.R1, "")
+	if err == nil {
+		t.Fatal("applyFlagWrites() error = nil, want intent persistence failure")
+	}
+	if backend.puts != 0 || backend.deletes != 0 {
+		t.Fatalf("backend calls after intent failure = put %d delete %d, want zero", backend.puts, backend.deletes)
+	}
+}
+
+func TestApplyFlagWritesOrdersIntentTargetOutcome(t *testing.T) {
+	backend := newFlagWriteBackend([]byte(`[{"key":"checkout","enabled":true}]`))
+	current := flagSetResult{
+		App:      "app",
+		Count:    1,
+		Key:      "FEATURE_FLAG_GROUP/app-flags",
+		Revision: "rev1",
+		SHA256:   sha256Bytes(backend.content),
+		Flags:    []flag.FeatureFlag{{Key: "checkout", Enabled: true}},
+	}
+	next := []flag.FeatureFlag{{Key: "checkout", Enabled: false}}
+	write, plan, err := plannedFlagSetWrite(backend, "app", safety.R1, "update", current, next)
+	if err != nil {
+		t.Fatalf("plannedFlagSetWrite() error = %v", err)
+	}
+	var order []string
+	backend.onPut = func() { order = append(order, "target") }
+	f := mutationAuditTestFlags()
+	f.Yes = true
+	auditRoot := t.TempDir()
+	prepareMutationAuditTestParent(t, auditRoot)
+	f.mutationAuditPath = filepath.Join(auditRoot, "audit.log")
+	f.mutationAudit = &mutationAuditRuntime{
+		appendRecord: func(_ string, record mutationAuditRecord, _ audit.Options) (audit.AppendResult, error) {
+			order = append(order, record.Phase)
+			return audit.AppendResult{State: audit.AppendCommitCommitted}, nil
+		},
+		now:    func() time.Time { return time.Unix(1_700_000_000, 0).UTC() },
+		random: bytes.NewReader(bytes.Repeat([]byte{0x61}, 16)),
+	}
+	if err := applyFlagWrites(context.Background(), f, backend, cfgovctx.Context{}, plan, []plannedFlagWrite{write}, safety.R1, ""); err != nil {
+		t.Fatalf("applyFlagWrites() error = %v", err)
+	}
+	if got := strings.Join(order, ","); got != "intent,target,outcome" {
+		t.Fatalf("mutation order = %q, want intent,target,outcome", got)
+	}
+}
+
+func TestApplyFlagWritesPreviewAndDenialEmitNoMutationIntent(t *testing.T) {
+	newWrite := func(t *testing.T) (*flagWriteBackend, plannedFlagWrite, flagWritePlan) {
+		t.Helper()
+		backend := newFlagWriteBackend([]byte(`[{"key":"checkout","enabled":true}]`))
+		current := flagSetResult{
+			App:      "app",
+			Count:    1,
+			Key:      "FEATURE_FLAG_GROUP/app-flags",
+			Revision: "rev1",
+			SHA256:   sha256Bytes(backend.content),
+			Flags:    []flag.FeatureFlag{{Key: "checkout", Enabled: true}},
+		}
+		write, plan, err := plannedFlagSetWrite(
+			backend,
+			"app",
+			safety.R1,
+			"update",
+			current,
+			[]flag.FeatureFlag{{Key: "checkout", Enabled: false}},
+		)
+		if err != nil {
+			t.Fatalf("plannedFlagSetWrite() error = %v", err)
+		}
+		return backend, write, plan
+	}
+	for _, test := range []struct {
+		name    string
+		prepare func(*cliFlags)
+	}{
+		{name: "preview", prepare: func(f *cliFlags) { f.Plan = true }},
+		{name: "denial", prepare: func(f *cliFlags) {
+			f.NonInter = true
+			f.NoBackup = true
+		}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			backend, write, plan := newWrite(t)
+			appendCalls := 0
+			f := mutationAuditTestFlags()
+			auditRoot := t.TempDir()
+			prepareMutationAuditTestParent(t, auditRoot)
+			f.mutationAuditPath = filepath.Join(auditRoot, "audit.log")
+			f.mutationAudit = &mutationAuditRuntime{
+				appendRecord: func(string, mutationAuditRecord, audit.Options) (audit.AppendResult, error) {
+					appendCalls++
+					return audit.AppendResult{State: audit.AppendCommitCommitted}, nil
+				},
+				now:    func() time.Time { return time.Unix(1_700_000_000, 0).UTC() },
+				random: bytes.NewReader(bytes.Repeat([]byte{0x71}, 16)),
+			}
+			test.prepare(f)
+			err := applyFlagWrites(context.Background(), f, backend, cfgovctx.Context{}, plan, []plannedFlagWrite{write}, safety.R1, "")
+			if test.name == "preview" && err != nil {
+				t.Fatalf("preview applyFlagWrites() error = %v", err)
+			}
+			if test.name == "denial" && apperrors.AsAppError(err).Code != apperrors.CodeAuthorizationRequired {
+				t.Fatalf("denial applyFlagWrites() error = %v, want authorization required", err)
+			}
+			if appendCalls != 0 {
+				t.Fatalf("mutation audit append calls = %d, want 0", appendCalls)
+			}
+			if backend.puts != 0 || backend.deletes != 0 {
+				t.Fatalf("backend calls = put %d delete %d, want zero", backend.puts, backend.deletes)
+			}
+		})
+	}
+}
+
 func TestApplyFlagWritesSkipsIdempotentWrite(t *testing.T) {
 	payload := []byte(`[{"key":"checkout","enabled":true}]`)
-	backend := newFlagWriteBackend(payload, "rev1")
+	backend := newFlagWriteBackend(payload)
 	current := flagSetResult{App: "app", Count: 1, Key: "FEATURE_FLAG_GROUP/app-flags", Revision: "rev1", SHA256: sha256Bytes(payload), Flags: []flag.FeatureFlag{{Key: "checkout", Enabled: true}}}
 	write, plan, err := plannedFlagSetWrite(backend, "app", safety.R1, "update", current, current.Flags)
 	if err != nil {
@@ -169,10 +316,11 @@ type flagWriteBackend struct {
 	revision string
 	puts     int
 	deletes  int
+	onPut    func()
 }
 
-func newFlagWriteBackend(content []byte, revision string) *flagWriteBackend {
-	return &flagWriteBackend{content: append([]byte(nil), content...), revision: revision}
+func newFlagWriteBackend(content []byte) *flagWriteBackend {
+	return &flagWriteBackend{content: append([]byte(nil), content...), revision: "rev1"}
 }
 
 func (b *flagWriteBackend) FlagCoordinate(app string) (cfgov.Coordinate, error) {
@@ -191,6 +339,9 @@ func (b *flagWriteBackend) Get(context.Context, cfgov.Coordinate) (cfgov.Blob, e
 func (b *flagWriteBackend) Put(_ context.Context, req cfgov.PutRequest) (cfgov.Blob, error) {
 	if req.ExpectedRevision != "" && req.ExpectedRevision != b.revision {
 		return cfgov.Blob{}, apperrors.New(apperrors.CodeConflict, "config revision changed", nil)
+	}
+	if b.onPut != nil {
+		b.onPut()
 	}
 	b.puts++
 	b.content = append([]byte(nil), req.Content...)

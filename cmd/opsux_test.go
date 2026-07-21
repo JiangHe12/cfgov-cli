@@ -7,7 +7,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/JiangHe12/opskit-core/apperrors"
+	"github.com/JiangHe12/opskit-core/v2/apperrors"
 
 	"github.com/JiangHe12/cfgov-cli/internal/rule"
 )

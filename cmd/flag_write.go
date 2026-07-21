@@ -9,9 +9,9 @@ import (
 
 	"github.com/spf13/cobra"
 
-	"github.com/JiangHe12/opskit-core/apperrors"
-	"github.com/JiangHe12/opskit-core/audit"
-	"github.com/JiangHe12/opskit-core/safety"
+	"github.com/JiangHe12/opskit-core/v2/apperrors"
+	"github.com/JiangHe12/opskit-core/v2/audit"
+	"github.com/JiangHe12/opskit-core/v2/safety"
 
 	"github.com/JiangHe12/cfgov-cli/internal/backup"
 	"github.com/JiangHe12/cfgov-cli/internal/cfgov"
@@ -337,9 +337,10 @@ func plannedFlagSetWrite(store cfgov.FlagStore, app string, risk safety.Risk, ac
 	return plannedFlagWrite{coord: coord, current: current, next: next, payload: payload, planItem: item}, plan, nil
 }
 
-func applyFlagWrites(ctx context.Context, f *cliFlags, backend cfgov.Backend, ctxMeta cfgovctx.Context, plan flagWritePlan, writes []plannedFlagWrite, risk safety.Risk, required safety.AllowFlag) error {
-	plan.DryRun = f.DryRun || f.Plan
+func applyFlagWrites(ctx context.Context, f *cliFlags, backend cfgov.Backend, ctxMeta cfgovctx.Context, plan flagWritePlan, writes []plannedFlagWrite, risk safety.Risk, required safety.AllowFlag) error { //nolint:gocyclo // Preview, policy, backup, intent/outcome, and ordered writes are one governed transaction flow.
+	plan.DryRun = isPlanOnly(f)
 	if plan.DryRun {
+		markPreview(f)
 		appendFlagAudit(f, ctxMeta, plan.Action, plan.App, audit.StatusSuccess, flagWriteAudit(plan), nil)
 		return targetJSONData(f, "ChangePlan", plan, operationTargetFromBackend(f, backend), operationTargetWrite)
 	}
@@ -352,7 +353,23 @@ func applyFlagWrites(ctx context.Context, f *cliFlags, backend cfgov.Backend, ct
 	if err := authorize(f, risk, ctxMeta, required); err != nil {
 		return err
 	}
+	mutation, err := beginSchemaMutationAudit(
+		f,
+		ctxMeta,
+		"flag",
+		plan.Action,
+		plan.App,
+		plan.Items,
+		plan.Summary.Total,
+		plan.Summary.Create,
+		plan.Summary.Update,
+		plan.Summary.Delete,
+	)
+	if err != nil {
+		return err
+	}
 	backups := make([]any, 0, len(writes))
+	succeeded := 0
 	for _, write := range writes {
 		if write.planItem.Action == "skip" {
 			appendFlagAudit(f, ctxMeta, plan.Action, plan.App, auditStatusSkipped, flagWriteItemAudit(plan.App, plan.Action, write.planItem), nil)
@@ -361,7 +378,7 @@ func applyFlagWrites(ctx context.Context, f *cliFlags, backend cfgov.Backend, ct
 		if write.backupBefore {
 			result, err := backupFlagCurrent(ctx, f, backend, ctxMeta, write.coord)
 			if err != nil {
-				return err
+				return finishBatchMutationAudit(mutation, plan.Summary.Total, succeeded, plan.Summary.Skip, err)
 			}
 			if result != nil {
 				backups = append(backups, result)
@@ -370,12 +387,19 @@ func applyFlagWrites(ctx context.Context, f *cliFlags, backend cfgov.Backend, ct
 		if write.deleteBlob {
 			if err := backend.Delete(ctx, cfgov.DeleteRequest{Coordinate: write.coord, ExpectedRevision: write.current.Revision}); err != nil {
 				appendFlagAudit(f, ctxMeta, plan.Action, plan.App, audit.StatusFailed, flagWriteAudit(plan), err)
-				return err
+				return finishBatchMutationAudit(mutation, plan.Summary.Total, succeeded, plan.Summary.Skip, err)
 			}
+			succeeded++
 			continue
 		}
 		if _, err := backend.Put(ctx, cfgov.PutRequest{Coordinate: write.coord, Content: write.payload, ContentType: "json", ExpectedRevision: write.current.Revision}); err != nil {
 			appendFlagAudit(f, ctxMeta, plan.Action, plan.App, audit.StatusFailed, flagWriteAudit(plan), err)
+			return finishBatchMutationAudit(mutation, plan.Summary.Total, succeeded, plan.Summary.Skip, err)
+		}
+		succeeded++
+	}
+	if mutation != nil {
+		if err := finishBatchMutationAudit(mutation, plan.Summary.Total, succeeded, plan.Summary.Skip, nil); err != nil {
 			return err
 		}
 	}

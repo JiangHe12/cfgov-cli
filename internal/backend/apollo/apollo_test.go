@@ -8,7 +8,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/JiangHe12/opskit-core/apperrors"
+	"github.com/JiangHe12/opskit-core/v2/apperrors"
 
 	"github.com/JiangHe12/cfgov-cli/internal/cfgov"
 )
@@ -191,6 +191,35 @@ func TestFlagCoordinateRejectsInjectedApp(t *testing.T) {
 				t.Fatalf("FlagCoordinate(%q) error = nil, want fail-closed", app)
 			}
 		})
+	}
+}
+
+func TestCapabilitiesAndRevisionPreconditionsAreHonest(t *testing.T) {
+	t.Parallel()
+	backend, err := New(Options{Server: "http://apollo.example", AppID: "cfgov"})
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+	if backend.Capabilities().SupportsCAS {
+		t.Fatal("Apollo check-then-write must not be reported as atomic CAS")
+	}
+	coord := cfgov.Coordinate{Namespace: "application", Key: "app.key"}
+	for name, request := range map[string]cfgov.PutRequest{
+		"expected revision": {Coordinate: coord, Content: []byte("x"), ExpectedRevision: "stale"},
+		"require absent":    {Coordinate: coord, Content: []byte("x"), RequireAbsent: true},
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			if _, err := backend.Put(context.Background(), request); apperrors.AsAppError(err).Code != apperrors.CodeNotImplemented {
+				t.Fatalf("Put() error = %v, want NOT_IMPLEMENTED", err)
+			}
+		})
+	}
+	if err := backend.Delete(context.Background(), cfgov.DeleteRequest{
+		Coordinate:       coord,
+		ExpectedRevision: "stale",
+	}); apperrors.AsAppError(err).Code != apperrors.CodeNotImplemented {
+		t.Fatalf("Delete() error = %v, want NOT_IMPLEMENTED", err)
 	}
 }
 

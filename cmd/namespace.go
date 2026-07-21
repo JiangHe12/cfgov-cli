@@ -11,9 +11,9 @@ import (
 
 	"github.com/spf13/cobra"
 
-	"github.com/JiangHe12/opskit-core/apperrors"
-	"github.com/JiangHe12/opskit-core/audit"
-	"github.com/JiangHe12/opskit-core/safety"
+	"github.com/JiangHe12/opskit-core/v2/apperrors"
+	"github.com/JiangHe12/opskit-core/v2/audit"
+	"github.com/JiangHe12/opskit-core/v2/safety"
 
 	"github.com/JiangHe12/cfgov-cli/internal/cfgov"
 	"github.com/JiangHe12/cfgov-cli/internal/cfgovctx"
@@ -58,13 +58,14 @@ func namespaceListCmd(f *cliFlags) *cobra.Command {
 			if f.Output == "json" {
 				return targetJSONList(f, "NamespaceList", items, len(items), 1, len(items), target)
 			}
-			printOperationTarget(p, target, operationTargetRead)
+			if err := printOperationTarget(p, target, operationTargetRead); err != nil {
+				return err
+			}
 			rows := make([][]string, 0, len(items))
 			for _, item := range items {
 				rows = append(rows, []string{item.ID, item.Name, fmt.Sprint(item.ConfigCount), item.Description})
 			}
-			p.Table([]string{"ID", "NAME", "CONFIGS", "DESCRIPTION"}, rows)
-			return nil
+			return p.Table([]string{"ID", "NAME", "CONFIGS", "DESCRIPTION"}, rows)
 		},
 	}
 }
@@ -100,17 +101,34 @@ func namespaceMutateCmd(
 			if err != nil {
 				return err
 			}
-			plan := namespacePlan{ResourceType: "namespace", Action: action, ID: id, Name: name, Description: desc, Risk: safety.R1, Impact: action + " one namespace", DryRun: f.DryRun || f.Plan}
-			if f.DryRun || f.Plan {
+			plan := namespacePlan{ResourceType: "namespace", Action: action, ID: id, Name: name, Description: desc, Risk: safety.R1, Impact: action + " one namespace", DryRun: isPlanOnly(f)}
+			if plan.DryRun {
+				markPreview(f)
 				return targetJSONData(f, "ChangePlan", plan, operationTargetFromContext(f, ctxMeta), operationTargetWrite)
 			}
 			if err := authorize(f, safety.R1, ctxMeta, ""); err != nil {
 				return err
 			}
-			err = mutate(cmd.Context(), manager, id, name, desc)
-			appendNamespaceAudit(f, ctxMeta, action, id, auditStatus(err), plan.Impact, err)
+			metadata := mutationValueMetadata("namespace."+action, plan)
+			metadata.Items = 1
+			if action == "create" {
+				metadata.Creates = 1
+			} else {
+				metadata.Updates = 1
+			}
+			mutation, err := beginMutationAudit(f, mutationAuditSpec{
+				Action:   "namespace." + action,
+				Context:  ctxMeta,
+				Target:   audit.EventTarget{ResourceType: "namespace", Resource: id},
+				Metadata: metadata,
+			})
 			if err != nil {
 				return err
+			}
+			err = mutate(cmd.Context(), manager, id, name, desc)
+			appendNamespaceAudit(f, ctxMeta, action, id, auditStatus(err), plan.Impact, err)
+			if auditErr := finishMutationAudit(mutation, mutationAuditOutcome{}, err); auditErr != nil {
+				return auditErr
 			}
 			return targetJSONData(f, "ChangeResult", map[string]any{"resourceType": "namespace", "action": action, "id": id, "name": name}, operationTargetFromContext(f, ctxMeta), operationTargetWrite)
 		},
@@ -144,8 +162,9 @@ func namespaceDeleteCmd(f *cliFlags) *cobra.Command {
 				return err
 			}
 			impact := fmt.Sprintf("delete namespace %s; configCount=%d", id, count)
-			plan := namespacePlan{ResourceType: "namespace", Action: "delete", ID: id, Risk: safety.R2, ConfigCount: count, Impact: impact, DryRun: f.DryRun || f.Plan}
-			if f.DryRun || f.Plan {
+			plan := namespacePlan{ResourceType: "namespace", Action: "delete", ID: id, Risk: safety.R2, ConfigCount: count, Impact: impact, DryRun: isPlanOnly(f)}
+			if plan.DryRun {
+				markPreview(f)
 				return targetJSONData(f, "ChangePlan", plan, operationTargetFromContext(f, ctxMeta), operationTargetWrite)
 			}
 			if err := authorizeNamespaceDelete(f, ctxMeta); err != nil {
@@ -154,10 +173,22 @@ func namespaceDeleteCmd(f *cliFlags) *cobra.Command {
 			if err := confirmNamespaceDelete(f, id); err != nil {
 				return err
 			}
-			err = manager.DeleteNamespace(cmd.Context(), id)
-			appendNamespaceAudit(f, ctxMeta, "delete", id, auditStatus(err), impact, err)
+			mutation, err := beginMutationAudit(f, mutationAuditSpec{
+				Action:  "namespace.delete",
+				Context: ctxMeta,
+				Target:  audit.EventTarget{ResourceType: "namespace", Resource: id},
+				Metadata: mutationAuditMetadata{
+					Items:   1,
+					Deletes: 1,
+				},
+			})
 			if err != nil {
 				return err
+			}
+			err = manager.DeleteNamespace(cmd.Context(), id)
+			appendNamespaceAudit(f, ctxMeta, "delete", id, auditStatus(err), impact, err)
+			if auditErr := finishMutationAudit(mutation, mutationAuditOutcome{}, err); auditErr != nil {
+				return auditErr
 			}
 			return targetJSONData(f, "ChangeResult", map[string]any{"resourceType": "namespace", "action": "delete", "id": id, "configCount": count}, operationTargetFromContext(f, ctxMeta), operationTargetWrite)
 		},

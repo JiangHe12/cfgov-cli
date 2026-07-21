@@ -4,8 +4,8 @@ import (
 	"context"
 	"fmt"
 
-	"github.com/JiangHe12/opskit-core/credstore"
-	corectx "github.com/JiangHe12/opskit-core/ctx"
+	"github.com/JiangHe12/opskit-core/v2/credstore"
+	corectx "github.com/JiangHe12/opskit-core/v2/ctx"
 )
 
 const SupportedContextAPIVersion = "cfgov-cli.io/context/v1"
@@ -57,6 +57,8 @@ func Configure() {
 func SetConfigPath(path string) { corectx.SetConfigPath(path) }
 
 func Load() (*corectx.Config[Context], error) { return store.Load() }
+
+func Update(fn func(*corectx.Config[Context]) error) error { return store.Update(fn) }
 
 func Current() (*Context, string, error) { return store.Current() }
 

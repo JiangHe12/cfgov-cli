@@ -8,8 +8,8 @@ import (
 
 	"github.com/spf13/cobra"
 
-	"github.com/JiangHe12/opskit-core/apperrors"
-	"github.com/JiangHe12/opskit-core/audit"
+	"github.com/JiangHe12/opskit-core/v2/apperrors"
+	"github.com/JiangHe12/opskit-core/v2/audit"
 
 	"github.com/JiangHe12/cfgov-cli/internal/backup"
 )
@@ -82,7 +82,45 @@ func runBackupClean(f *cliFlags, opts backupCleanOptions) error {
 	if err != nil {
 		return err
 	}
-	cleanOpts.Apply = opts.confirm && !f.DryRun
+	cleanOpts.Apply = opts.confirm && !isPlanOnly(f)
+	if !cleanOpts.Apply {
+		result, err := backup.Clean(root, cleanOpts)
+		if err != nil {
+			result.DryRun = true
+		}
+		status := audit.StatusSuccess
+		if err != nil {
+			status = audit.StatusFailed
+		}
+		appendBackupCleanAudit(f, result, status, err)
+		if err != nil {
+			return apperrors.New(apperrors.CodeLocalIOError, "failed to clean backups", err)
+		}
+		return printBackupClean(f, result)
+	}
+	previewOptions := cleanOpts
+	previewOptions.Apply = false
+	preview, err := backup.Clean(root, previewOptions)
+	if err != nil {
+		return apperrors.New(apperrors.CodeLocalIOError, "failed to plan backup cleanup", err)
+	}
+	total := len(preview.Deleted) + len(preview.Removed)
+	if total == 0 {
+		result := backup.CleanResult{DryRun: false}
+		appendBackupCleanAudit(f, result, audit.StatusSuccess, nil)
+		return printBackupClean(f, result)
+	}
+	metadata := mutationValueMetadata("backup.prune", preview)
+	metadata.Items = total
+	metadata.Deletes = total
+	mutation, err := beginMutationAudit(f, mutationAuditSpec{
+		Action:   string(audit.EventBackupPrune),
+		Target:   audit.EventTarget{ResourceType: "backup", Resource: root},
+		Metadata: metadata,
+	})
+	if err != nil {
+		return err
+	}
 	result, err := backup.Clean(root, cleanOpts)
 	if err != nil {
 		result.DryRun = !cleanOpts.Apply
@@ -92,8 +130,13 @@ func runBackupClean(f *cliFlags, opts backupCleanOptions) error {
 		status = audit.StatusFailed
 	}
 	appendBackupCleanAudit(f, result, status, err)
-	if err != nil {
-		return apperrors.New(apperrors.CodeLocalIOError, "failed to clean backups", err)
+	operationErr := err
+	if operationErr != nil {
+		operationErr = apperrors.New(apperrors.CodeLocalIOError, "failed to clean backups", operationErr)
+	}
+	succeeded := len(result.Deleted) + len(result.Removed)
+	if auditErr := finishBatchMutationAudit(mutation, total, succeeded, 0, operationErr); auditErr != nil {
+		return auditErr
 	}
 	return printBackupClean(f, result)
 }
@@ -142,23 +185,26 @@ func printBackupList(f *cliFlags, items []backup.Metadata) error {
 	for _, item := range items {
 		rows = append(rows, []string{item.BackupID, item.Context, item.Namespace, item.Group, item.DataID, item.SHA256, item.CreatedAt, item.Status, item.Path})
 	}
-	p.Table([]string{"BACKUP ID", "CONTEXT", "NAMESPACE", "GROUP", "DATA ID", "SHA256", "CREATED AT", "STATUS", "PATH"}, rows)
-	return nil
+	return p.Table([]string{"BACKUP ID", "CONTEXT", "NAMESPACE", "GROUP", "DATA ID", "SHA256", "CREATED AT", "STATUS", "PATH"}, rows)
 }
 
 func printBackupClean(f *cliFlags, result backup.CleanResult) error {
+	if result.DryRun {
+		markPreview(f)
+	}
 	p := newPrinter(f)
 	if f.Output == "json" {
 		return p.JSONData("BackupCleanResult", result)
 	}
 	files := backupCleanPaths(result)
 	if len(files) == 0 {
-		p.Info("(no backups matched)")
-		return nil
+		return p.Info("(no backups matched)")
 	}
 	if f.Output == "plain" {
 		for _, file := range files {
-			p.Info(file)
+			if err := p.Info(file); err != nil {
+				return err
+			}
 		}
 		return nil
 	}
@@ -170,9 +216,11 @@ func printBackupClean(f *cliFlags, result backup.CleanResult) error {
 	for _, file := range files {
 		rows = append(rows, []string{action, filepath.Base(file), file})
 	}
-	p.Table([]string{"ACTION", "FILE", "PATH"}, rows)
+	if err := p.Table([]string{"ACTION", "FILE", "PATH"}, rows); err != nil {
+		return err
+	}
 	if result.DryRun {
-		p.Info(fmt.Sprintf("(dry-run: pass --confirm to delete %d backup file(s))", len(result.Deleted)))
+		return p.Info(fmt.Sprintf("(dry-run: pass --confirm to delete %d backup file(s))", len(result.Deleted)))
 	}
 	return nil
 }
@@ -190,8 +238,11 @@ func backupCleanPaths(result backup.CleanResult) []string {
 }
 
 func appendBackupCleanAudit(f *cliFlags, result backup.CleanResult, status string, err error) {
+	if err == nil && result.DryRun {
+		return
+	}
 	deleted := backupCleanPaths(result)
-	path, pathErr := audit.DefaultPath()
+	path, pathErr := configuredAuditPath(f)
 	if pathErr != nil {
 		return
 	}
@@ -205,7 +256,7 @@ func appendBackupCleanAudit(f *cliFlags, result backup.CleanResult, status strin
 	}
 	if err != nil {
 		appErr := apperrors.AsAppError(err)
-		evt.Error = &audit.EventError{Code: string(appErr.Code), Message: appErr.Message}
+		evt.Error = &audit.EventError{Code: string(appErr.Code)}
 	}
-	_ = audit.AppendWithOptions(path, evt, auditOptions(f))
+	_ = appendQueuedAuditEvent(f, path, evt)
 }

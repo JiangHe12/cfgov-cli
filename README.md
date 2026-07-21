@@ -79,9 +79,11 @@ cfgov doctor          # checks context, backend reachability, and audit-log writ
 ## 🚀 Quick start (60 seconds)
 
 ```bash
-# 1. Point cfgov at your config center (stored as a reusable "context")
-cfgov ctx set dev --backend nacos --server http://127.0.0.1:8848 --namespace public
-cfgov ctx use dev
+# 1. Preview, then apply the fixed-R3 context changes with human approval
+cfgov ctx set dev --backend nacos --server http://127.0.0.1:8848 --namespace public --plan -o json
+cfgov ctx set dev --backend nacos --server http://127.0.0.1:8848 --namespace public --yes --ticket <human-ticket> --allow-context-change
+cfgov ctx use dev --plan -o json
+cfgov ctx use dev --yes --ticket <human-ticket> --allow-context-change
 # For authenticated Nacos, add --username <user> and set CFGOV_PASSWORD when running commands.
 
 # 2. Read something — reads are always free (R0), no flags needed
@@ -111,15 +113,25 @@ Every command is sorted into one of four **risk tiers**. The higher the tier, th
 | **R0** | Reads & local inspection (`get`, `list`, `diff`, `validate`, `doctor`, …) | Nothing — but it's still audited |
 | **R1** | Ordinary writes (`config push`, `rule create/update`, `flag create/update`, `service register`, `namespace create`) | `--yes` (or an interactive confirmation) |
 | **R2** | Destructive / elevated (`config delete`, `rule delete`, `flag delete`, `service deregister`, `namespace delete`, `reconcile`) | `--yes` **and** a non-empty `--ticket` |
-| **R3** | Protected destructive operations | The above **plus** the exact `--allow-*` flag for that command |
+| **R3** | Governance-control changes and protected destructive operations | The above **plus** the exact `--allow-*` flag for that command |
 
-**Protected contexts raise every operation by one tier.** For example, `config delete` is normally R2, but in a `--protected` context it becomes R3 and additionally requires `--allow-production-config-delete`.
+**Protected contexts raise every operation by one tier.** For example, `config delete` is normally R2, but in a `--protected` context it becomes R3 and additionally requires `--allow-production-config-delete`. A non-pruning `config reconcile` similarly requires `--allow-production-reconcile` after protected-context escalation; pruning always uses the narrower `--allow-production-prune`.
 
 Three rules keep this safe — especially for automation:
 
 1. **Blast radius comes from the tool, not a guess.** Use `--dry-run` / `--plan` / `--diff` to see the exact impact. Never estimate it by reasoning.
 2. **Destructive writes are backed up first.** Protected contexts require an explicit `--backup` / `--no-backup` decision, and the write aborts if the backup fails.
 3. **🤖 AI agents must never invent `--ticket`, `--allow-*`, or a high-risk `--yes`.** Those are *human* authorization inputs. An agent should surface "this needs approval X" to its operator and stop.
+
+cfgov derives the authorization and audit operator from the local OS username plus hostname. The legacy root `--operator` flag and `CFGOV_OPERATOR` / `CFGOV_CLI_OPERATOR` environment variables are deprecated compatibility inputs and are ignored; `audit query --operator` remains only an audit filter. This closes flag/environment identity spoofing, but it does **not** separate an AI process from a human running under the same OS account. That boundary still requires an externally verified approval mechanism or a separate OS identity.
+
+`--plan` is a hard target no-mutation override for backend writes and local mutations, including contexts/RBAC/credentials, pull/export, audit repair/prune, backup cleanup, and skill installation. It takes precedence over `--confirm`; command-local `--dry-run` flags remain supported, and write-command `--diff` paths that return a `ChangePlan` are previews too. Every successfully completed preview writes exactly one `command.preview` audit record with `status=skipped` and explicit `preview=true` / `dryRun=true` markers. If that record cannot be appended, the command fails. The governed audit log—including resource-read records for reads that actually occurred—is the preview's only permitted local mutation.
+
+`config export`, `rule export`, and `flag export` are create-only. Generated names and every destination path are checked before the mutation intent; name or existing-file collisions fail in both plan and apply mode, and apply uses exclusive file creation so an export never overwrites an existing file.
+
+Every actual backend, credential, context, RBAC, or local-file mutation writes a synchronous `MutationAuditRecord` intent after authorization and final validation but before its first target write, then writes an outcome before returning ordinary success. Batch commands use one intent/outcome pair with aggregate `succeeded` / `failed` / `skipped` counts. Core v2 commit state is authoritative: only an outcome known not to be committed is atomically fsynced into the owner-only `<audit.log>.outcome-spool`; committed-post-commit-error and indeterminate outcomes are not blindly queued. Replay remains at-least-once for definitely uncommitted entries, but an indeterminate replay is renamed with `.indeterminate` and blocks later automatic replay until it is reconciled by `mutationId + phase`. Every incomplete path returns `AUDIT_INCOMPLETE`; an intent failure leaves the target untouched.
+
+New audit and telemetry records do not contain raw tickets, reasons, config/rule/flag bodies, or full error text. They retain domain-separated SHA-256 fingerprints, byte/item counts, revisions, and machine error codes. `audit query` also removes raw ticket/reason/diff/error-message fields from historical records before displaying them.
 
 ---
 
@@ -147,8 +159,10 @@ cfgov config delete   --key <key> --yes --ticket <t> [--allow-production-config-
 cfgov config import    --dir <dir> --dry-run --plan                                       # R1
 cfgov config promote   --source-context <ctx> (--key <k>|--prefix <p>) --dry-run --diff   # R1
 cfgov config rollback  --key <key> (--backup-file <f>|--backup-id <id>|--history-id <id>) # R1
-cfgov config reconcile --dir <dir> [--prune --prune-scope <s> --allow-production-prune]   # R2 / R3
+cfgov config reconcile --dir <dir> [--allow-production-reconcile] [--prune --prune-scope <s> --allow-production-prune] # R2 / R3
 ```
+
+An externally canceled `config listen` exits nonzero; automation must treat cancellation as incomplete rather than successful completion.
 </details>
 
 <details>
@@ -227,7 +241,9 @@ cfgov backup clean (--before <30d|RFC3339|YYYY-MM-DD> | --keep-last <n>) [--conf
 # Audit (tamper-evident)
 cfgov audit query  [--since 24h] [--type <t>] [--operator <o>] [--status <s>] [--limit 100] -o json
 cfgov audit verify [--strict] -o json
-cfgov audit prune  (--before <…> | --keep-last <n>) [--confirm]                       # dry-run unless --confirm
+cfgov audit verify --repair --confirm --yes --ticket <t> --allow-audit-repair -o json # R3
+cfgov audit prune  (--before <…> | --keep-last <n>)                                  # dry-run
+cfgov audit prune  (--before <…> | --keep-last <n>) --confirm --yes --ticket <t> --allow-audit-prune -o json # R3
 
 # Contexts
 cfgov ctx set <name> --backend nacos  --server <url> [--namespace <ns>] [--username <u>] [--protected]
@@ -242,20 +258,33 @@ cfgov ctx set <name> --backend consul --server <host:port> [--consul-key-prefix 
                      [--consul-ca-cert <f>] [--consul-client-cert <f>] [--consul-client-key <f>]
 cfgov ctx use|list|current|delete|export|import|migrate-credentials|test
 cfgov ctx role set|unset|list <context>
+#   Context create/replace/switch/import/credential migration is R3:
+#     --yes --ticket <human-ticket> --allow-context-change
+#   Context deletion is R3: --yes --ticket <human-ticket> --allow-context-delete
+#   Role set/unset is R3: --yes --ticket <human-ticket> --allow-role-change
+#   Existing set/import targets use their own pre-change policy; new targets use the persisted current context
+#   policy, or an empty bootstrap policy if none exists. ctx use uses the old persisted current policy, falling
+#   back to the target policy only when no current context exists. --plan previews before authorization and never writes targets.
+#   Apply paths re-read and authorize that policy inside the context-file lock; credential migration authorizes
+#   the complete locked batch before its first credential write. Portable imports accept exactly one known-field YAML document
+#   and validate credential backend availability, ticketPattern syntax, and inline reader/writer/admin roles without writing credentials.
 #   Nacos password: prefer CFGOV_PASSWORD for non-interactive runs when no credential is stored.
 #   To persist a password, use ctx set --password <pw> with --credential-backend keychain|encrypted-file.
-#   To migrate existing literal credentials, run ctx migrate-credentials --dry-run, then ctx migrate-credentials --yes.
+#   ctx set --plan still loads and validates the context config and credential backend availability, but writes neither.
+#   To migrate existing literal credentials, preview with ctx migrate-credentials --dry-run, then use the R3 flags above.
 #   --server URL userinfo remains supported; explicit --password/CFGOV_PASSWORD takes precedence.
+#   Vault credential backends require an absolute HTTPS --vault-addr without userinfo, query, or fragment.
 
 # Diagnostics & ecosystem
 cfgov doctor -o json            # read-only health check (redacted output)
+# cfgov doctor --plan marks the audit write check skipped and complete=false; writability is not claimed.
 cfgov capabilities -o json      # what the bound backend supports
 cfgov completion bash|zsh|fish|powershell
 cfgov install <agent> --skills  # install the cfgov AI skill into an agent (claude, codex, …)
 cfgov version
 ```
 
-> `backup clean` and `audit prune` **only delete local files**, default to a **dry-run**, and require `--confirm` to actually remove anything. The deletion itself is audited.
+> `backup clean` and `audit prune` **only delete local files** and default to a **dry-run**. Confirmed audit pruning and audit repair are fixed R3 evidence mutations: they require `--confirm`, `--yes`, a non-empty `--ticket`, and their exact `--allow-audit-prune` / `--allow-audit-repair` flag. They authorize against the persisted current-context policy (or an empty policy when no current context exists); `--context` does not replace that policy. Preview returns before authorization and does not delete or rewrite audit evidence. Core v2 holds the audit-path lock, binds confirmation to the exact preview set, fully verifies history, and returns `CONFLICT` if that set changed. Pruning supports authenticated v2 history and durably advances its checkpoint before deletion. Repair remains limited to legacy history. Both operations write mutation intent/outcome to the sibling `.<audit-base>-control` log so the target is not converted or polluted by control-log rotations.
 </details>
 
 ---
@@ -296,6 +325,9 @@ gofmt -l main.go cmd internal      # must print nothing
 golangci-lint run --timeout=5m
 go vet -tags=integration ./...
 ```
+
+See [CONTRIBUTING.md](CONTRIBUTING.md) for the full verification workflow and
+[SECURITY.md](SECURITY.md) for vulnerability reporting and security boundaries.
 
 cfgov-cli is built on the shared [`opskit-core`](https://github.com/JiangHe12/opskit-core) governance engine and is part of the **opskit** family of governed CLIs for AI agents — alongside [`dbgov-cli`](https://www.npmjs.com/package/dbgov-cli) (databases), [`srvgov-cli`](https://www.npmjs.com/package/srvgov-cli) (remote servers), and [`mqgov-cli`](https://www.npmjs.com/package/mqgov-cli) (message brokers).
 

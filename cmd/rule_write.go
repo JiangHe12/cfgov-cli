@@ -11,9 +11,9 @@ import (
 
 	"github.com/spf13/cobra"
 
-	"github.com/JiangHe12/opskit-core/apperrors"
-	"github.com/JiangHe12/opskit-core/audit"
-	"github.com/JiangHe12/opskit-core/safety"
+	"github.com/JiangHe12/opskit-core/v2/apperrors"
+	"github.com/JiangHe12/opskit-core/v2/audit"
+	"github.com/JiangHe12/opskit-core/v2/safety"
 
 	"github.com/JiangHe12/cfgov-cli/internal/backup"
 	"github.com/JiangHe12/cfgov-cli/internal/cfgov"
@@ -261,7 +261,7 @@ func runRuleBatchUpsert(ctx context.Context, f *cliFlags, app, action string, lo
 	}
 	risk := safety.R1
 	writes := make([]plannedRuleWrite, 0, len(locals))
-	plan := ruleWritePlan{ResourceType: "rule", Action: action, App: app, Risk: risk, DryRun: f.DryRun || f.Plan}
+	plan := ruleWritePlan{ResourceType: "rule", Action: action, App: app, Risk: risk, DryRun: isPlanOnly(f)}
 	for _, ruleType := range sortedRuleTypes(locals) {
 		current, err := readRuleSet(ctx, backend, store, app, ruleType)
 		if err != nil {
@@ -370,9 +370,10 @@ func plannedRuleSetWrite(store cfgov.RuleStore, app string, ruleType rule.Type, 
 	return plannedRuleWrite{ruleType: ruleType, coord: coord, current: current, next: next, payload: payload, planItem: item}, plan, nil
 }
 
-func applyRuleWrites(ctx context.Context, f *cliFlags, backend cfgov.Backend, ctxMeta cfgovctx.Context, plan ruleWritePlan, writes []plannedRuleWrite, risk safety.Risk, required safety.AllowFlag) error {
-	plan.DryRun = f.DryRun || f.Plan
+func applyRuleWrites(ctx context.Context, f *cliFlags, backend cfgov.Backend, ctxMeta cfgovctx.Context, plan ruleWritePlan, writes []plannedRuleWrite, risk safety.Risk, required safety.AllowFlag) error { //nolint:gocyclo // Preview, policy, backup, intent/outcome, and ordered writes are one governed transaction flow.
+	plan.DryRun = isPlanOnly(f)
 	if plan.DryRun {
+		markPreview(f)
 		appendRuleAudit(f, ctxMeta, plan.Action, plan.App, plan.Type, audit.StatusSuccess, ruleWriteAudit(plan), nil)
 		return targetJSONData(f, "ChangePlan", plan, operationTargetFromBackend(f, backend), operationTargetWrite)
 	}
@@ -385,7 +386,23 @@ func applyRuleWrites(ctx context.Context, f *cliFlags, backend cfgov.Backend, ct
 	if err := authorize(f, risk, ctxMeta, required); err != nil {
 		return err
 	}
+	mutation, err := beginSchemaMutationAudit(
+		f,
+		ctxMeta,
+		"rule",
+		plan.Action,
+		plan.App,
+		plan.Items,
+		plan.Summary.Total,
+		plan.Summary.Create,
+		plan.Summary.Update,
+		plan.Summary.Delete,
+	)
+	if err != nil {
+		return err
+	}
 	backups := make([]any, 0, len(writes))
+	succeeded := 0
 	for _, write := range writes {
 		if write.planItem.Action == "skip" {
 			appendRuleAudit(f, ctxMeta, plan.Action, plan.App, write.ruleType, auditStatusSkipped, ruleWriteItemAudit(plan.App, plan.Action, write.planItem), nil)
@@ -394,7 +411,7 @@ func applyRuleWrites(ctx context.Context, f *cliFlags, backend cfgov.Backend, ct
 		if write.backupBefore {
 			result, err := backupRuleCurrent(ctx, f, backend, ctxMeta, write.coord)
 			if err != nil {
-				return err
+				return finishBatchMutationAudit(mutation, plan.Summary.Total, succeeded, plan.Summary.Skip, err)
 			}
 			if result != nil {
 				backups = append(backups, result)
@@ -403,13 +420,20 @@ func applyRuleWrites(ctx context.Context, f *cliFlags, backend cfgov.Backend, ct
 		if write.deleteBlob {
 			if err := backend.Delete(ctx, cfgov.DeleteRequest{Coordinate: write.coord, ExpectedRevision: write.current.Revision}); err != nil {
 				appendRuleAudit(f, ctxMeta, plan.Action, plan.App, write.ruleType, audit.StatusFailed, ruleWriteAudit(plan), err)
-				return err
+				return finishBatchMutationAudit(mutation, plan.Summary.Total, succeeded, plan.Summary.Skip, err)
 			}
+			succeeded++
 			continue
 		}
 		expected := write.current.Revision
 		if _, err := backend.Put(ctx, cfgov.PutRequest{Coordinate: write.coord, Content: write.payload, ContentType: "json", ExpectedRevision: expected}); err != nil {
 			appendRuleAudit(f, ctxMeta, plan.Action, plan.App, write.ruleType, audit.StatusFailed, ruleWriteAudit(plan), err)
+			return finishBatchMutationAudit(mutation, plan.Summary.Total, succeeded, plan.Summary.Skip, err)
+		}
+		succeeded++
+	}
+	if mutation != nil {
+		if err := finishBatchMutationAudit(mutation, plan.Summary.Total, succeeded, plan.Summary.Skip, nil); err != nil {
 			return err
 		}
 	}

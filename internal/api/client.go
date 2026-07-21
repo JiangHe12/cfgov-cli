@@ -24,7 +24,7 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/JiangHe12/opskit-core/apperrors"
+	"github.com/JiangHe12/opskit-core/v2/apperrors"
 )
 
 const getMaxRetries = 3

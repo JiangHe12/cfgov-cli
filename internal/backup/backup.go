@@ -16,9 +16,9 @@ import (
 	"strings"
 	"time"
 
-	"github.com/JiangHe12/opskit-core/apperrors"
+	"github.com/JiangHe12/opskit-core/v2/apperrors"
 
-	"github.com/JiangHe12/opskit-core/lockfile"
+	"github.com/JiangHe12/opskit-core/v2/lockfile"
 )
 
 const (
@@ -242,12 +242,22 @@ func Clean(root string, opts CleanOptions) (CleanResult, error) { //nolint:gocyc
 }
 
 func cleanLocked(root string, opts CleanOptions) (CleanResult, error) { //nolint:gocyclo // reason: shared clean implementation
+	return cleanLockedWithOperations(root, opts, os.Remove, writeIndex)
+}
+
+func cleanLockedWithOperations(
+	root string,
+	opts CleanOptions,
+	remove func(string) error,
+	write func(string, []Metadata) error,
+) (CleanResult, error) { //nolint:gocyclo // reason: shared clean implementation
 	items, err := readIndex(root)
 	if err != nil {
 		return CleanResult{}, err
 	}
 	result := CleanResult{DryRun: !opts.Apply}
 	kept := make([]Metadata, 0, len(items))
+	removed := make([]Metadata, 0, len(items))
 	deleteSet := cleanDeleteSet(items, opts)
 	for _, item := range items {
 		item = reconcile(item)
@@ -261,8 +271,10 @@ func cleanLocked(root string, opts CleanOptions) (CleanResult, error) { //nolint
 			continue
 		}
 		if item.Status == StatusMissing {
-			result.Removed = append(result.Removed, item)
-			if !opts.Apply {
+			if opts.Apply {
+				removed = append(removed, item)
+			} else {
+				result.Removed = append(result.Removed, item)
 				kept = append(kept, item)
 			}
 			continue
@@ -271,19 +283,21 @@ func cleanLocked(root string, opts CleanOptions) (CleanResult, error) { //nolint
 			kept = append(kept, item)
 			continue
 		}
-		result.Deleted = append(result.Deleted, item)
 		if opts.Apply {
-			if err := os.Remove(item.Path); err != nil && !os.IsNotExist(err) {
-				return CleanResult{}, err
+			if err := remove(item.Path); err != nil && !os.IsNotExist(err) {
+				return result, err
 			}
+			result.Deleted = append(result.Deleted, item)
 			continue
 		}
+		result.Deleted = append(result.Deleted, item)
 		kept = append(kept, item)
 	}
 	if opts.Apply {
-		if err := writeIndex(root, kept); err != nil {
-			return CleanResult{}, err
+		if err := write(root, kept); err != nil {
+			return result, err
 		}
+		result.Removed = append(result.Removed, removed...)
 	}
 	return result, nil
 }

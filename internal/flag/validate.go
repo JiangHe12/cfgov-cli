@@ -6,7 +6,7 @@ import (
 	"io"
 	"strings"
 
-	"github.com/JiangHe12/opskit-core/apperrors"
+	"github.com/JiangHe12/opskit-core/v2/apperrors"
 )
 
 func DecodeSet(data []byte) ([]FeatureFlag, error) {

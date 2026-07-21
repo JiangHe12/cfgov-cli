@@ -3,6 +3,8 @@ package cfgov
 import (
 	"context"
 	"time"
+
+	"github.com/JiangHe12/opskit-core/v2/apperrors"
 )
 
 const DefaultGroup = "DEFAULT_GROUP"
@@ -23,6 +25,14 @@ type PutRequest struct {
 	Content          []byte
 	ContentType      string
 	ExpectedRevision string
+	RequireAbsent    bool
+}
+
+func (r PutRequest) ValidatePreconditions() error {
+	if r.RequireAbsent && r.ExpectedRevision != "" {
+		return apperrors.New(apperrors.CodeValidationFailed, "put preconditions require either absence or an expected revision, not both", nil)
+	}
+	return nil
 }
 
 type DeleteRequest struct {
