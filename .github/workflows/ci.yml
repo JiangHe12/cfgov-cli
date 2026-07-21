@@ -11,6 +11,7 @@ name: CI
 # a Windows-only flake does not block the required Linux gate during early rollout.
 
 on:
+  workflow_call: {}
   pull_request:
     branches:
       - main

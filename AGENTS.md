@@ -40,7 +40,12 @@ go vet -tags=integration ./...          # integration-tagged files are skipped o
 CGO_ENABLED=1 go test -race -count=1 ./...
 ```
 
-- Real-backend integration tests (`//go:build integration`, env-gated on `CFGOV_IT_*`, skipped by default) cover etcd/Consul/Nacos (docker) and K8s (Kind); they run in the nightly `integration.yml` workflow, not on push/PR.
+- Real-backend integration tests (`//go:build integration`, env-gated on
+  `CFGOV_IT_*`, skipped by default) cover digest-pinned etcd/Consul/Nacos
+  containers, a version-and-digest-pinned K8s Kind cluster, and the official
+  checksum-verified Apollo Quick Start OpenAPI. `CFGOV_IT_REQUIRED=1` turns a
+  missing environment into a hard failure. The reusable `integration.yml`
+  workflow runs nightly/on manual dispatch and is a mandatory release gate.
 - README / SKILL.md command examples are NOT covered by CI: run the real binary
   and confirm every cited flag exists (`cfgov <cmd> --help`) before shipping docs.
 - A new `t.Parallel()` test must not mutate a process global (config path, env,
@@ -148,5 +153,6 @@ stale docs is incomplete — align the docs, then cut the release.
 For reference, a release bumps `package.json`, adds an exact `## vX.Y.Z`
 `CHANGELOG.md` heading, passes Build & Verify (`npm pack --dry-run` lists exactly
 `LICENSE`, `README.md`, `package.json`, `bin/cfgov-cli.js`, `scripts/install.js`),
-then pushes tag `vX.Y.Z`. **npm publish is locked to the CI trusted publisher via
+then pushes a GitHub-verified signed annotated tag `vX.Y.Z` that exactly matches
+`package.json` and an exact `CHANGELOG.md` heading. **npm publish is locked to the CI trusted publisher via
 OIDC; local/token `npm publish` is disabled — never attempt a manual publish.**

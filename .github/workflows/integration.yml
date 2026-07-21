@@ -1,24 +1,30 @@
 name: Integration
 
-# Real-backend integration tests (//go:build integration), run against live
-# etcd, Consul and Nacos containers plus a Kind (real kube-apiserver) cluster
-# started on the runner. Kept SEPARATE from
-# the PR/push CI and the release pipeline so a slow Nacos boot or a transient
-# backend flake never blocks everyday commits or a release. Runs nightly and
-# on manual dispatch only.
+# Real-backend tests run against digest-pinned etcd, Consul, and Nacos
+# containers, a version-and-digest-pinned Kind cluster, and the official Apollo
+# Quick Start JAR with its SHA-256 verified before launch. The workflow is both
+# nightly/manually dispatchable and reusable as the release backend gate.
 
 on:
-  schedule:
-    - cron: '0 3 * * *'   # daily 03:00 UTC
+  workflow_call: {}
   workflow_dispatch: {}
+  schedule:
+    - cron: '0 3 * * *' # daily 03:00 UTC
 
 permissions:
   contents: read
 
+env:
+  ETCD_IMAGE: quay.io/coreos/etcd:v3.5.16@sha256:d967d98a12dc220a1a290794711dba7eba04b8ce465e12b02383d1bfbb33e159
+  CONSUL_IMAGE: hashicorp/consul:1.19.2@sha256:e244c64df77ab3586f177f1692e98575086eb40343dc82a6320f5e79543490eb
+  NACOS_IMAGE: nacos/nacos-server:v2.3.2@sha256:d70b20546fe59aeb86add0754db1dbc3a3067363e18599329c5163d0d8cd9cd8
+  APOLLO_QUICK_START_URL: https://raw.githubusercontent.com/apolloconfig/apollo-quick-start/599cf9e2db087996b768ef4822f0837c7a5bdaaf/apollo-all-in-one.jar
+  APOLLO_QUICK_START_SHA256: 22917193132a9228b23929fefd0460ebc129256a894b3a3724d7dae20b69a6a9
+
 jobs:
   integration:
-    name: real-backend integration (etcd + consul + nacos + k8s)
-    timeout-minutes: 20
+    name: real-backend integration (etcd + consul + nacos + k8s + apollo)
+    timeout-minutes: 25
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
@@ -30,74 +36,177 @@ jobs:
           go-version: 'stable'
           cache: true
 
-      - name: Start backends
+      - name: Set up Java 17 for Apollo Quick Start
+        uses: actions/setup-java@03ad4de0992f5dab5e18fcb136590ce7c4a0ac95 # v5.6.0
+        with:
+          distribution: temurin
+          java-version: '17.0.16+8'
+
+      - name: Start container backends
         shell: bash
         run: |
+          set -euo pipefail
           docker run -d --name cfgov-it-etcd -p 2379:2379 \
-            quay.io/coreos/etcd:v3.5.16 /usr/local/bin/etcd \
+            "${ETCD_IMAGE}" /usr/local/bin/etcd \
             --name s1 --data-dir /etcd-data \
             --listen-client-urls http://0.0.0.0:2379 \
             --advertise-client-urls http://0.0.0.0:2379
           docker run -d --name cfgov-it-consul -p 8500:8500 \
-            hashicorp/consul:1.19 agent -dev -client=0.0.0.0
+            "${CONSUL_IMAGE}" agent -dev -client=0.0.0.0
           docker run -d --name cfgov-it-nacos -p 8848:8848 -p 9848:9848 \
             -e MODE=standalone -e NACOS_AUTH_ENABLE=false \
-            nacos/nacos-server:v2.3.2
+            "${NACOS_IMAGE}"
 
-      - name: Wait for readiness
+      - name: Wait for container readiness
         shell: bash
         run: |
-          # GitHub's bash runs with `set -e`; a not-yet-ready backend makes the
-          # first curl exit non-zero and would abort before the retry loop can
-          # poll. Disable errexit — each loop self-manages via its ok flag and
-          # an explicit `exit 1` when the deadline passes.
           set +e
           ok=0
-          for i in $(seq 1 30); do
-            if curl -s http://127.0.0.1:2379/health | grep -q '"health":"true"'; then ok=1; break; fi
+          for _ in $(seq 1 30); do
+            if curl -fsS http://127.0.0.1:2379/health | grep -q '"health":"true"'; then ok=1; break; fi
             sleep 2
           done
           [ "$ok" = 1 ] || { echo "etcd not ready"; docker logs cfgov-it-etcd; exit 1; }
           echo "etcd ready"
 
           ok=0
-          for i in $(seq 1 30); do
-            if curl -s http://127.0.0.1:8500/v1/status/leader | grep -q ':8300'; then ok=1; break; fi
+          for _ in $(seq 1 30); do
+            if curl -fsS http://127.0.0.1:8500/v1/status/leader | grep -q ':8300'; then ok=1; break; fi
             sleep 2
           done
           [ "$ok" = 1 ] || { echo "consul not ready"; docker logs cfgov-it-consul; exit 1; }
           echo "consul ready"
 
           ok=0
-          for i in $(seq 1 60); do
-            code=$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:8848/nacos/v1/console/health/readiness)
+          for _ in $(seq 1 60); do
+            code=$(curl -sS -o /dev/null -w '%{http_code}' http://127.0.0.1:8848/nacos/v1/console/health/readiness)
             if [ "$code" = "200" ]; then ok=1; break; fi
             sleep 2
           done
-          [ "$ok" = 1 ] || { echo "nacos not ready"; docker logs --tail 30 cfgov-it-nacos; exit 1; }
+          [ "$ok" = 1 ] || { echo "nacos not ready"; docker logs --tail 100 cfgov-it-nacos; exit 1; }
           echo "nacos ready"
 
-      - name: Create Kind cluster
+      - name: Create pinned Kind cluster
         uses: helm/kind-action@ef37e7f390d99f746eb8b610417061a60e82a6cc # v1
         with:
+          version: v0.32.0
+          node_image: kindest/node:v1.36.1@sha256:3489c7674813ba5d8b1a9977baea8a6e553784dab7b84759d1014dbd78f7ebd5
+          kubectl_version: v1.36.1
           cluster_name: cfgov-it
 
-      - name: Run integration tests
+      - name: Start and bootstrap Apollo Quick Start OpenAPI
+        shell: bash
+        run: |
+          set -euo pipefail
+          APOLLO_DIR="${RUNNER_TEMP}/cfgov-apollo"
+          APOLLO_JAR="${APOLLO_DIR}/apollo-all-in-one.jar"
+          APOLLO_LOG="${APOLLO_DIR}/apollo.log"
+          COOKIE_JAR="${APOLLO_DIR}/cookies.txt"
+          CONSUMER_RESPONSE="${APOLLO_DIR}/consumer.json"
+          mkdir -p "${APOLLO_DIR}"
+
+          curl -fsSL --retry 3 --retry-all-errors \
+            -o "${APOLLO_JAR}" "${APOLLO_QUICK_START_URL}"
+          echo "${APOLLO_QUICK_START_SHA256}  ${APOLLO_JAR}" | sha256sum -c -
+
+          (
+            cd "${APOLLO_DIR}"
+            unset SPRING_SQL_CONFIG_INIT_MODE SPRING_SQL_PORTAL_INIT_MODE
+            SPRING_PROFILES_ACTIVE="github,database-discovery,auth" \
+              LOGGING_FILE_NAME="${APOLLO_LOG}" \
+              nohup java -jar "${APOLLO_JAR}" >"${APOLLO_DIR}/stdout.log" 2>&1 &
+            echo $! >"${APOLLO_DIR}/pid"
+          )
+
+          ready=0
+          for _ in $(seq 1 120); do
+            if curl -fsS http://127.0.0.1:8080/health >/dev/null \
+              && curl -fsS http://127.0.0.1:8090/health >/dev/null \
+              && curl -fsS http://127.0.0.1:8070/signin >/dev/null; then
+              ready=1
+              break
+            fi
+            sleep 3
+          done
+          if [ "${ready}" != 1 ]; then
+            echo "Apollo Quick Start not ready" >&2
+            tail -n 200 "${APOLLO_DIR}/stdout.log" >&2 || true
+            exit 1
+          fi
+
+          login_status=$(curl -sS -o /dev/null -w '%{http_code}' \
+            -c "${COOKIE_JAR}" -b "${COOKIE_JAR}" \
+            -H 'Content-Type: application/x-www-form-urlencoded' \
+            -X POST http://127.0.0.1:8070/signin \
+            --data-urlencode 'username=apollo' \
+            --data-urlencode 'password=admin')
+          case "${login_status}" in 200|302) ;; *) echo "Apollo login failed: HTTP ${login_status}" >&2; exit 1 ;; esac
+
+          app_status=$(curl -sS -o "${APOLLO_DIR}/app.json" -w '%{http_code}' \
+            -b "${COOKIE_JAR}" -H 'Content-Type: application/json' -X POST \
+            http://127.0.0.1:8070/apps \
+            -d '{"appId":"cfgov-integration","name":"cfgov integration","orgId":"TEST1","orgName":"Sample Department","ownerName":"apollo","admins":["apollo"]}')
+          [ "${app_status}" = 200 ] || { echo "Apollo app bootstrap failed: HTTP ${app_status}" >&2; exit 1; }
+
+          consumer_status=$(curl -sS -o "${CONSUMER_RESPONSE}" -w '%{http_code}' \
+            -b "${COOKIE_JAR}" -H 'Content-Type: application/json' -X POST \
+            http://127.0.0.1:8070/consumers \
+            -d '{"appId":"cfgov-integration-test","allowCreateApplication":false,"name":"cfgov integration test","orgId":"TEST1","orgName":"Sample Department","ownerName":"apollo","rateLimitEnabled":false,"rateLimit":0}')
+          [ "${consumer_status}" = 200 ] || { echo "Apollo consumer bootstrap failed: HTTP ${consumer_status}" >&2; exit 1; }
+          APOLLO_TOKEN=$(jq -er '.token | select(length > 0)' "${CONSUMER_RESPONSE}")
+          [[ "${APOLLO_TOKEN}" =~ ^[0-9A-Za-z._~-]+$ ]] || { echo "Apollo returned an invalid token format" >&2; exit 1; }
+          echo "::add-mask::${APOLLO_TOKEN}"
+
+          role_status=$(curl -sS -o "${APOLLO_DIR}/role.json" -w '%{http_code}' \
+            -b "${COOKIE_JAR}" -H 'Content-Type: application/json' -X POST \
+            "http://127.0.0.1:8070/consumers/${APOLLO_TOKEN}/assign-role?type=NamespaceRole&envs=LOCAL" \
+            -d '{"appId":"cfgov-integration","namespaceName":"application"}')
+          [ "${role_status}" = 200 ] || { echo "Apollo role bootstrap failed: HTTP ${role_status}" >&2; exit 1; }
+
+          echo "CFGOV_IT_APOLLO_TOKEN=${APOLLO_TOKEN}" >>"${GITHUB_ENV}"
+          rm -f "${COOKIE_JAR}" "${CONSUMER_RESPONSE}" "${APOLLO_DIR}/app.json" "${APOLLO_DIR}/role.json"
+          echo "Apollo OpenAPI ready"
+
+      - name: Run required real-backend tests
         shell: bash
         env:
+          CFGOV_IT_REQUIRED: '1'
           CFGOV_IT_ETCD_ENDPOINTS: 127.0.0.1:2379
           CFGOV_IT_CONSUL_ADDR: 127.0.0.1:8500
           CFGOV_IT_NACOS_ADDR: http://127.0.0.1:8848
+          CFGOV_IT_APOLLO_ADDR: http://127.0.0.1:8070
+          CFGOV_IT_APOLLO_APP_ID: cfgov-integration
+          CFGOV_IT_APOLLO_ENV: LOCAL
+          CFGOV_IT_APOLLO_CLUSTER: default
+          CFGOV_IT_APOLLO_NAMESPACE: application
         run: |
-          kind export kubeconfig --name cfgov-it --kubeconfig "$HOME/kind.kubeconfig"
-          export CFGOV_IT_K8S_KUBECONFIG="$HOME/kind.kubeconfig"
+          set -euo pipefail
+          kind export kubeconfig --name cfgov-it --kubeconfig "${HOME}/kind.kubeconfig"
+          export CFGOV_IT_K8S_KUBECONFIG="${HOME}/kind.kubeconfig"
           go test -tags=integration -count=1 -v \
             ./internal/backend/etcd/ \
             ./internal/backend/consul/ \
             ./internal/backend/nacos/ \
-            ./internal/backend/k8s/
+            ./internal/backend/k8s/ \
+            ./internal/backend/apollo/
 
-      - name: Tear down backends
+      - name: Tear down real backends
         if: always()
         shell: bash
-        run: docker rm -f cfgov-it-etcd cfgov-it-consul cfgov-it-nacos || true
+        run: |
+          APOLLO_DIR="${RUNNER_TEMP}/cfgov-apollo"
+          if [ "${{ job.status }}" != "success" ]; then
+            failure_log=$(
+              tail -n 200 "${APOLLO_DIR}/stdout.log" 2>/dev/null
+              tail -n 200 "${APOLLO_DIR}/apollo.log" 2>/dev/null
+            ) || true
+            failure_log=$(sed -E 's#/consumers/[^/?[:space:]]+/assign-role#/consumers/<redacted>/assign-role#g' <<<"${failure_log}")
+            if [ -n "${CFGOV_IT_APOLLO_TOKEN:-}" ]; then
+              failure_log=${failure_log//${CFGOV_IT_APOLLO_TOKEN}/<redacted>}
+            fi
+            printf '%s\n' "${failure_log}"
+          fi
+          if [ -s "${APOLLO_DIR}/pid" ]; then
+            kill "$(cat "${APOLLO_DIR}/pid")" 2>/dev/null || true
+          fi
+          docker rm -f cfgov-it-etcd cfgov-it-consul cfgov-it-nacos || true

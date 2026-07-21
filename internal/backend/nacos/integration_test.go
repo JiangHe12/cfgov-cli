@@ -19,6 +19,9 @@ import (
 func TestIntegrationNacosConfigGroupDataIDAndRules(t *testing.T) {
 	addr := os.Getenv("CFGOV_IT_NACOS_ADDR")
 	if addr == "" {
+		if os.Getenv("CFGOV_IT_REQUIRED") == "1" {
+			t.Fatal("CFGOV_IT_NACOS_ADDR is required when CFGOV_IT_REQUIRED=1")
+		}
 		t.Skip("set CFGOV_IT_NACOS_ADDR to run")
 	}
 	ctx := context.Background()
@@ -42,6 +45,18 @@ func TestIntegrationNacosConfigGroupDataIDAndRules(t *testing.T) {
 		t.Fatalf("Put(config) revision empty")
 	}
 	awaitNacosContent(t, ctx, backend, configCoord, []byte("name: demo\n"), "config")
+	_, err = backend.Put(ctx, cfgov.PutRequest{Coordinate: configCoord, Content: []byte("replacement"), RequireAbsent: true})
+	if code := apperrors.AsAppError(err).Code; code != apperrors.CodeNotImplemented {
+		t.Fatalf("Put(require absent) code = %s, want %s (err=%v)", code, apperrors.CodeNotImplemented, err)
+	}
+	_, err = backend.Put(ctx, cfgov.PutRequest{Coordinate: configCoord, Content: []byte("replacement"), ExpectedRevision: first.Revision})
+	if code := apperrors.AsAppError(err).Code; code != apperrors.CodeNotImplemented {
+		t.Fatalf("Put(expected revision) code = %s, want %s (err=%v)", code, apperrors.CodeNotImplemented, err)
+	}
+	if err := backend.Delete(ctx, cfgov.DeleteRequest{Coordinate: configCoord, ExpectedRevision: first.Revision}); apperrors.AsAppError(err).Code != apperrors.CodeNotImplemented {
+		t.Fatalf("Delete(expected revision) error = %v, want not implemented", err)
+	}
+	awaitNacosContent(t, ctx, backend, configCoord, []byte("name: demo\n"), "config after rejected preconditions")
 	if err := backend.Delete(ctx, cfgov.DeleteRequest{Coordinate: configCoord}); err != nil {
 		t.Fatalf("Delete(config) error = %v", err)
 	}

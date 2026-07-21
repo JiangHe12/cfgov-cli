@@ -308,6 +308,7 @@ cfgov install claude --skills     # 也支持:codex、opencode、copilot、curso
 
 ## 🔏 供应链可信与校验
 
+- **已验证发布标签**——仅当 signed annotated tag 经 GitHub 验证，且精确匹配 `package.json`、`CHANGELOG.md` 与最新拉取的 `origin/main` 时才开始发布；CI 与真实集成会在该标签提交上重跑。
 - **签名二进制**——每个发布产物都用 [cosign](https://github.com/sigstore/cosign) 无密钥(OIDC)签名;`checksums.txt` 覆盖全平台并同样签名。
 - **npm provenance**——npm 包由 CI 经 OpenID Connect 发布,带 [provenance 溯源声明](https://docs.npmjs.com/generating-provenance-statements),将其与本仓库及工作流精确关联。
 - **校验式安装**——npm postinstall 通过白名单主机下载二进制,并在安装前对照已签名的 `checksums.txt` 校验 SHA-256。

@@ -2,6 +2,17 @@
 
 All notable changes to this project are documented in this file.
 
+## v0.6.1
+
+### Added
+
+- Added a real Apollo Quick Start/OpenAPI integration test and Core v2 create-only/delete-CAS conflict coverage for the applicable real backends. Required integration mode now fails closed when any backend environment is missing.
+
+### Changed
+
+- Pinned backend containers and the Kind/Kubernetes node image to immutable digests. The real-backend workflow is reusable and now gates releases alongside the renamed unit-test job.
+- Release preflight now requires a GitHub-verified signed annotated tag matching `package.json`, one exact literal `CHANGELOG.md` version heading, and the freshly fetched `origin/main` commit; the complete CI/vulnerability and real-backend gates rerun on that tag commit.
+
 ## v0.6.0
 
 ### Added

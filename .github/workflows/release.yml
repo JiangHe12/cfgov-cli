@@ -9,26 +9,114 @@ permissions:
   contents: read
 
 jobs:
-  integration-test:
+  preflight:
+    name: signed tag and release metadata
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 5
     permissions:
       contents: read
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
-
-      - name: Set up Go
-        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
         with:
-          go-version: 'stable'
-          cache: true
+          fetch-depth: 0
 
-      - name: Run test suite
-        run: go test ./... -count=1
+      - name: Verify signed annotated tag and version metadata
+        shell: bash
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          TAG="${GITHUB_REF_NAME}"
+          SEMVER_RE='^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-((0|[1-9][0-9]*)|[0-9]*[A-Za-z-][0-9A-Za-z-]*)(\.((0|[1-9][0-9]*)|[0-9]*[A-Za-z-][0-9A-Za-z-]*))*)?(\+[0-9A-Za-z-]+(\.[0-9A-Za-z-]+)*)?$'
+          [[ "${TAG}" =~ ${SEMVER_RE} ]] || {
+            echo "tag ${TAG} is not valid SemVer with a v prefix" >&2
+            exit 1
+          }
+          VERSION=$(jq -er '.version | select(type == "string" and length > 0)' package.json)
+          [ "${TAG}" = "v${VERSION}" ] || {
+            echo "tag ${TAG} does not match package.json version ${VERSION}" >&2
+            exit 1
+          }
+
+          heading_count=$(grep -Fxc "## ${TAG}" CHANGELOG.md || true)
+          [ "${heading_count}" = 1 ] || {
+            echo "CHANGELOG.md must contain exactly one heading: ## ${TAG}" >&2
+            exit 1
+          }
+
+          github_api() {
+            curl -fsSL --retry 3 --retry-all-errors \
+              -H "Authorization: Bearer ${GITHUB_TOKEN}" \
+              -H 'Accept: application/vnd.github+json' \
+              -H 'X-GitHub-Api-Version: 2022-11-28' \
+              "https://api.github.com/repos/${GITHUB_REPOSITORY}/$1"
+          }
+
+          ref_json=$(github_api "git/ref/tags/${TAG}")
+          object_type=$(jq -r '.object.type' <<<"${ref_json}")
+          [ "${object_type}" = tag ] || {
+            echo "${TAG} must be an annotated tag, got object type ${object_type}" >&2
+            exit 1
+          }
+
+          tag_sha=$(jq -er '.object.sha' <<<"${ref_json}")
+          [[ "${tag_sha}" =~ ^[0-9a-f]{40}$ ]] || {
+            echo "GitHub tag object SHA is malformed" >&2
+            exit 1
+          }
+          tag_json=$(github_api "git/tags/${tag_sha}")
+          [ "$(jq -r '.tag' <<<"${tag_json}")" = "${TAG}" ] || {
+            echo "GitHub tag object name does not match ${TAG}" >&2
+            exit 1
+          }
+          [ "$(jq -r '.object.type' <<<"${tag_json}")" = commit ] || {
+            echo "${TAG} must point directly to a commit" >&2
+            exit 1
+          }
+          target_sha=$(jq -er '.object.sha' <<<"${tag_json}")
+          [[ "${target_sha}" =~ ^[0-9a-f]{40}$ ]] || {
+            echo "GitHub tag target SHA is malformed" >&2
+            exit 1
+          }
+          local_target=$(git rev-parse "${TAG}^{commit}")
+          [ "${target_sha}" = "${local_target}" ] || {
+            echo "GitHub tag target does not match checked-out commit" >&2
+            exit 1
+          }
+          git fetch --no-tags --force origin \
+            refs/heads/main:refs/remotes/origin/main
+          main_target=$(git rev-parse 'refs/remotes/origin/main^{commit}')
+          [[ "${main_target}" =~ ^[0-9a-f]{40}$ ]] || {
+            echo "origin/main did not resolve to a full commit SHA" >&2
+            exit 1
+          }
+          [ "${target_sha}" = "${main_target}" ] || {
+            echo "release tag ${TAG} must target origin/main exactly" >&2
+            exit 1
+          }
+          if ! jq -e '.verification.verified == true' <<<"${tag_json}" >/dev/null; then
+            reason=$(jq -r '.verification.reason // "unknown"' <<<"${tag_json}")
+            echo "${TAG} is not a GitHub-verified signed tag: ${reason}" >&2
+            exit 1
+          fi
+
+  ci:
+    name: CI and vulnerability gates on release commit
+    needs: preflight
+    permissions:
+      contents: read
+    uses: ./.github/workflows/ci.yml
+
+  real-integration:
+    name: real-backend integration gate
+    needs: preflight
+    permissions:
+      contents: read
+    uses: ./.github/workflows/integration.yml
 
   release:
-    needs: integration-test
+    needs: [preflight, ci, real-integration]
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -146,7 +234,7 @@ jobs:
         id: changelog
         run: |
           VERSION=${GITHUB_REF#refs/tags/}
-          BODY=$(awk "/^## ${VERSION}$/{found=1; next} found && /^## /{exit} found{print}" CHANGELOG.md)
+          BODY=$(awk -v heading="## ${VERSION}" '$0 == heading {found=1; next} found && /^## / {exit} found {print}' CHANGELOG.md)
           if [ -z "$BODY" ]; then
             BODY="See CHANGELOG.md for details."
           fi

@@ -22,6 +22,9 @@ import (
 func TestIntegrationK8sRealAPIServerConfigSecretCASWatchRulesFlags(t *testing.T) {
 	kubeconfig := os.Getenv("CFGOV_IT_K8S_KUBECONFIG")
 	if kubeconfig == "" {
+		if os.Getenv("CFGOV_IT_REQUIRED") == "1" {
+			t.Fatal("CFGOV_IT_K8S_KUBECONFIG is required when CFGOV_IT_REQUIRED=1")
+		}
 		t.Skip("set CFGOV_IT_K8S_KUBECONFIG to run")
 	}
 	ctx := context.Background()
@@ -101,6 +104,44 @@ func TestIntegrationK8sRealAPIServerConfigSecretCASWatchRulesFlags(t *testing.T)
 	if cm.Data["other.yaml"] != "keep: true\n" {
 		t.Fatalf("ConfigMap other data key = %q, want preserved", cm.Data["other.yaml"])
 	}
+	createOnlyConfig, err := backend.Put(ctx, cfgov.PutRequest{
+		Coordinate:    configCoord,
+		Content:       []byte("create-only: true\n"),
+		ContentType:   "yaml",
+		RequireAbsent: true,
+	})
+	if err != nil {
+		t.Fatalf("Put(config require absent) error = %v", err)
+	}
+	if createOnlyConfig.Revision == "" || createOnlyConfig.Revision == first.Revision {
+		t.Fatalf("Put(config require absent) revision = %q, want non-empty revision different from stale %q", createOnlyConfig.Revision, first.Revision)
+	}
+	_, err = backend.Put(ctx, cfgov.PutRequest{
+		Coordinate:    configCoord,
+		Content:       []byte("replacement: true\n"),
+		ContentType:   "yaml",
+		RequireAbsent: true,
+	})
+	if got := apperrors.AsAppError(err).Code; got != apperrors.CodeConflict {
+		t.Fatalf("Put(config require absent existing) code = %s, want %s (err=%v)", got, apperrors.CodeConflict, err)
+	}
+	assertBlobContent(t, ctx, backend, configCoord, []byte("create-only: true\n"), "create-only config")
+	if err := backend.Delete(ctx, cfgov.DeleteRequest{Coordinate: configCoord, ExpectedRevision: first.Revision}); apperrors.AsAppError(err).Code != apperrors.CodeConflict {
+		t.Fatalf("Delete(config stale revision) error = %v, want conflict", err)
+	}
+	if err := backend.Delete(ctx, cfgov.DeleteRequest{Coordinate: configCoord, ExpectedRevision: createOnlyConfig.Revision}); err != nil {
+		t.Fatalf("Delete(config current revision) error = %v", err)
+	}
+	if _, err := backend.Get(ctx, configCoord); apperrors.AsAppError(err).Code != apperrors.CodeResourceNotFound {
+		t.Fatalf("Get(config after current-revision delete) error = %v, want not found", err)
+	}
+	cm, err = backend.client.CoreV1().ConfigMaps("default").Get(ctx, cmName, metav1.GetOptions{})
+	if err != nil {
+		t.Fatalf("Get ConfigMap after CAS data-key delete error = %v", err)
+	}
+	if cm.Data["other.yaml"] != "keep: true\n" {
+		t.Fatalf("ConfigMap sibling after CAS delete = %q, want preserved", cm.Data["other.yaml"])
+	}
 
 	secretPayload := []byte("k8s-integration-secret-value")
 	secretFirst, err := backend.Put(ctx, cfgov.PutRequest{Coordinate: secretCoord, Content: secretPayload})
@@ -126,6 +167,34 @@ func TestIntegrationK8sRealAPIServerConfigSecretCASWatchRulesFlags(t *testing.T)
 	}
 	if string(secret.Data["keep"]) != "keep-secret" {
 		t.Fatalf("Secret keep data key = %q, want preserved", secret.Data["keep"])
+	}
+	createOnlySecret, err := backend.Put(ctx, cfgov.PutRequest{Coordinate: secretCoord, Content: secretPayload, RequireAbsent: true})
+	if err != nil {
+		t.Fatalf("Put(secret require absent) error = %v", err)
+	}
+	if createOnlySecret.Revision == "" || createOnlySecret.Revision == secretFirst.Revision {
+		t.Fatalf("Put(secret require absent) revision = %q, want non-empty revision different from stale %q", createOnlySecret.Revision, secretFirst.Revision)
+	}
+	_, err = backend.Put(ctx, cfgov.PutRequest{Coordinate: secretCoord, Content: []byte("replacement"), RequireAbsent: true})
+	if got := apperrors.AsAppError(err).Code; got != apperrors.CodeConflict {
+		t.Fatalf("Put(secret require absent existing) code = %s, want %s (err=%v)", got, apperrors.CodeConflict, err)
+	}
+	assertBlobContent(t, ctx, backend, secretCoord, secretPayload, "create-only secret")
+	if err := backend.Delete(ctx, cfgov.DeleteRequest{Coordinate: secretCoord, ExpectedRevision: secretFirst.Revision}); apperrors.AsAppError(err).Code != apperrors.CodeConflict {
+		t.Fatalf("Delete(secret stale revision) error = %v, want conflict", err)
+	}
+	if err := backend.Delete(ctx, cfgov.DeleteRequest{Coordinate: secretCoord, ExpectedRevision: createOnlySecret.Revision}); err != nil {
+		t.Fatalf("Delete(secret current revision) error = %v", err)
+	}
+	if _, err := backend.Get(ctx, secretCoord); apperrors.AsAppError(err).Code != apperrors.CodeResourceNotFound {
+		t.Fatalf("Get(secret after current-revision delete) error = %v, want not found", err)
+	}
+	secret, err = backend.client.CoreV1().Secrets("default").Get(ctx, secretName, metav1.GetOptions{})
+	if err != nil {
+		t.Fatalf("Get Secret after CAS data-key delete error = %v", err)
+	}
+	if string(secret.Data["keep"]) != "keep-secret" {
+		t.Fatalf("Secret sibling after CAS delete = %q, want preserved", secret.Data["keep"])
 	}
 
 	watchStart, err := backend.Put(ctx, cfgov.PutRequest{Coordinate: watchConfigCoord, Content: []byte("version: 1\n"), ContentType: "yaml"})

@@ -19,6 +19,9 @@ import (
 func TestIntegrationConsulConfigCASListWatchRulesFlagsAndHealth(t *testing.T) {
 	addr := os.Getenv("CFGOV_IT_CONSUL_ADDR")
 	if addr == "" {
+		if os.Getenv("CFGOV_IT_REQUIRED") == "1" {
+			t.Fatal("CFGOV_IT_CONSUL_ADDR is required when CFGOV_IT_REQUIRED=1")
+		}
 		t.Skip("set CFGOV_IT_CONSUL_ADDR to run")
 	}
 	ctx := context.Background()
@@ -28,6 +31,8 @@ func TestIntegrationConsulConfigCASListWatchRulesFlagsAndHealth(t *testing.T) {
 		t.Fatalf("New() error = %v", err)
 	}
 	coord := cfgov.Coordinate{Namespace: namespace, Key: "app.yaml"}
+	createOnlyCoord := cfgov.Coordinate{Namespace: namespace, Key: "create-only.yaml"}
+	deleteCASCoord := cfgov.Coordinate{Namespace: namespace, Key: "delete-cas.yaml"}
 	sibling, err := New(Options{Server: addr, Namespace: namespace + "-other"})
 	if err != nil {
 		t.Fatalf("New(sibling) error = %v", err)
@@ -46,6 +51,8 @@ func TestIntegrationConsulConfigCASListWatchRulesFlagsAndHealth(t *testing.T) {
 	port := 18080
 	t.Cleanup(func() {
 		_ = backend.Delete(context.Background(), cfgov.DeleteRequest{Coordinate: coord})
+		_ = backend.Delete(context.Background(), cfgov.DeleteRequest{Coordinate: createOnlyCoord})
+		_ = backend.Delete(context.Background(), cfgov.DeleteRequest{Coordinate: deleteCASCoord})
 		_ = backend.Delete(context.Background(), cfgov.DeleteRequest{Coordinate: ruleCoord})
 		_ = backend.Delete(context.Background(), cfgov.DeleteRequest{Coordinate: flagCoord})
 		_ = sibling.Delete(context.Background(), cfgov.DeleteRequest{Coordinate: siblingCoord})
@@ -75,6 +82,49 @@ func TestIntegrationConsulConfigCASListWatchRulesFlagsAndHealth(t *testing.T) {
 	_, err = backend.Put(ctx, cfgov.PutRequest{Coordinate: coord, Content: []byte("stale"), ExpectedRevision: first.Revision})
 	if code := apperrors.AsAppError(err).Code; code != apperrors.CodeConflict {
 		t.Fatalf("Put(stale) code = %s, want %s (err=%v)", code, apperrors.CodeConflict, err)
+	}
+
+	createdOnly, err := backend.Put(ctx, cfgov.PutRequest{
+		Coordinate:    createOnlyCoord,
+		Content:       []byte("first"),
+		RequireAbsent: true,
+	})
+	if err != nil {
+		t.Fatalf("Put(require absent) error = %v", err)
+	}
+	if string(createdOnly.Content) != "first" || createdOnly.Revision == "" {
+		t.Fatalf("Put(require absent) = %#v, want first with revision", createdOnly)
+	}
+	_, err = backend.Put(ctx, cfgov.PutRequest{
+		Coordinate:    createOnlyCoord,
+		Content:       []byte("replacement"),
+		RequireAbsent: true,
+	})
+	if code := apperrors.AsAppError(err).Code; code != apperrors.CodeConflict {
+		t.Fatalf("Put(require absent existing) code = %s, want %s (err=%v)", code, apperrors.CodeConflict, err)
+	}
+	assertContent(t, ctx, backend, createOnlyCoord, "first")
+
+	deleteCASFirst, err := backend.Put(ctx, cfgov.PutRequest{Coordinate: deleteCASCoord, Content: []byte("delete-me-v1")})
+	if err != nil {
+		t.Fatalf("Put(delete CAS fixture) error = %v", err)
+	}
+	deleteCASCurrent, err := backend.Put(ctx, cfgov.PutRequest{Coordinate: deleteCASCoord, Content: []byte("delete-me-v2"), ExpectedRevision: deleteCASFirst.Revision})
+	if err != nil {
+		t.Fatalf("Put(delete CAS fixture update) error = %v", err)
+	}
+	if deleteCASFirst.Revision == "" || deleteCASCurrent.Revision == "" || deleteCASCurrent.Revision == deleteCASFirst.Revision {
+		t.Fatalf("delete CAS revisions = %q -> %q, want distinct non-empty revisions", deleteCASFirst.Revision, deleteCASCurrent.Revision)
+	}
+	if err := backend.Delete(ctx, cfgov.DeleteRequest{Coordinate: deleteCASCoord, ExpectedRevision: deleteCASFirst.Revision}); apperrors.AsAppError(err).Code != apperrors.CodeConflict {
+		t.Fatalf("Delete(stale revision) error = %v, want conflict", err)
+	}
+	assertContent(t, ctx, backend, deleteCASCoord, "delete-me-v2")
+	if err := backend.Delete(ctx, cfgov.DeleteRequest{Coordinate: deleteCASCoord, ExpectedRevision: deleteCASCurrent.Revision}); err != nil {
+		t.Fatalf("Delete(current revision) error = %v", err)
+	}
+	if _, err := backend.Get(ctx, deleteCASCoord); apperrors.AsAppError(err).Code != apperrors.CodeResourceNotFound {
+		t.Fatalf("Get(after delete CAS) error = %v, want not found", err)
 	}
 
 	if _, err := sibling.Put(ctx, cfgov.PutRequest{Coordinate: siblingCoord, Content: []byte("sibling")}); err != nil {
@@ -155,6 +205,17 @@ func TestIntegrationConsulConfigCASListWatchRulesFlagsAndHealth(t *testing.T) {
 		t.Fatalf("UpdateTTL(critical) error = %v", err)
 	}
 	assertConsulHealth(t, ctx, backend, service, false)
+}
+
+func assertContent(t *testing.T, ctx context.Context, backend *Backend, coord cfgov.Coordinate, want string) {
+	t.Helper()
+	got, err := backend.Get(ctx, coord)
+	if err != nil {
+		t.Fatalf("Get(%#v) error = %v", coord, err)
+	}
+	if string(got.Content) != want {
+		t.Fatalf("Get(%#v) content = %q, want %q", coord, got.Content, want)
+	}
 }
 
 func assertConsulHealth(t *testing.T, ctx context.Context, backend *Backend, service string, want bool) {

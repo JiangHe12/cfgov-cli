@@ -17,6 +17,12 @@ go vet -tags=integration ./...
 npm pack --dry-run
 ```
 
+Real-backend tests are in `//go:build integration` files and remain opt-in for
+local development. The `Integration` workflow supplies all `CFGOV_IT_*`
+settings and sets `CFGOV_IT_REQUIRED=1`, so a missing etcd, Consul, Nacos,
+Kubernetes, or Apollo environment fails instead of being reported as a skip.
+It runs nightly, can be dispatched manually, and is reused as a release gate.
+
 Do not commit credentials, context files, audit logs, backups, exported
 configuration, or downloaded release binaries.
 
@@ -30,5 +36,7 @@ configuration, or downloaded release binaries.
 
 ## Releases
 
-Maintainers release from `main` with `v*` tags. Do not create tags or publish
-packages unless explicitly authorized.
+Maintainers release from `main` with GitHub-verified signed annotated `v*`
+tags. The tag must equal `v${package.json.version}` and have one exact
+`CHANGELOG.md` heading. Do not create tags or publish packages unless
+explicitly authorized.
