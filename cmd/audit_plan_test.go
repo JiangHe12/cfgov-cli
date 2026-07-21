@@ -12,9 +12,7 @@ func TestAuditVerifyRepairPlanDoesNotRewrite(t *testing.T) {
 	home := t.TempDir()
 	path := filepath.Join(home, "audit.jsonl")
 	original := []byte("{malformed\n")
-	if err := os.WriteFile(path, original, 0o600); err != nil {
-		t.Fatal(err)
-	}
+	writePrivateAuditFixture(t, path, original)
 
 	out, err := runCommandForTestAtHome(t, home,
 		"--plan", "-o", "json",
@@ -66,17 +64,13 @@ func TestAuditPrunePreviewFlagsDoNotDelete(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			home := t.TempDir()
 			path := filepath.Join(home, "audit.jsonl")
-			if err := os.WriteFile(path, nil, 0o600); err != nil {
-				t.Fatal(err)
-			}
+			writePrivateAuditFixture(t, path, nil)
 			beforeActive, err := os.ReadFile(path)
 			if err != nil {
 				t.Fatal(err)
 			}
 			rotated := path + ".20260524-010203.log"
-			if err := os.WriteFile(rotated, []byte("{}\n"), 0o600); err != nil {
-				t.Fatal(err)
-			}
+			writePrivateAuditFixture(t, rotated, []byte("{}\n"))
 			args := append([]string{}, tt.args...)
 			args = append(args, "-o", "json", "audit", "prune", "--path", path, "--keep-last", "0", "--confirm")
 			if tt.name == "local dry run shadows global flag" {
@@ -106,13 +100,9 @@ func TestAuditPrunePreviewFlagsDoNotDelete(t *testing.T) {
 func TestAuditPruneConfirmStillDeletes(t *testing.T) {
 	home := t.TempDir()
 	path := filepath.Join(home, "audit.jsonl")
-	if err := os.WriteFile(path, nil, 0o600); err != nil {
-		t.Fatal(err)
-	}
+	writePrivateAuditFixture(t, path, nil)
 	rotated := path + ".20260524-010203.log"
-	if err := os.WriteFile(rotated, []byte(`{"timestamp":"2026-05-24T01:02:03Z","eventType":"test.rotated","operator":"tester"}`+"\n"), 0o600); err != nil {
-		t.Fatal(err)
-	}
+	writePrivateAuditFixture(t, rotated, []byte(`{"timestamp":"2026-05-24T01:02:03Z","eventType":"test.rotated","operator":"tester"}`+"\n"))
 	out, err := runCommandForTestAtHome(t, home,
 		"-o", "json", "--yes", "--ticket", "TEST-1", "--allow-audit-prune", "audit", "prune",
 		"--path", path, "--keep-last", "0", "--confirm",

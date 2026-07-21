@@ -139,9 +139,7 @@ func TestAuditRepairRequiresExactR3Authorization(t *testing.T) {
 			home := t.TempDir()
 			path := filepath.Join(home, "audit.jsonl")
 			original := []byte("{malformed\n")
-			if err := os.WriteFile(path, original, 0o600); err != nil {
-				t.Fatal(err)
-			}
+			writePrivateAuditFixture(t, path, original)
 			args := append([]string{"-o", "json"}, tt.auth...)
 			args = append(args, "audit", "verify", "--path", path, "--repair", "--confirm")
 			_, err := runCommandForTestAtHome(t, home, args...)
@@ -237,9 +235,7 @@ func TestAuditPruneRejectsInvalidHistoryWithoutDeleting(t *testing.T) {
 	home := t.TempDir()
 	path, rotated := writeAuditPruneFixture(t, home)
 	invalid := []byte(`{"timestamp":"2026-05-24T01:02:03Z","eventType":"x","eventType":"y","operator":"tester"}` + "\n")
-	if err := os.WriteFile(rotated, invalid, 0o600); err != nil {
-		t.Fatal(err)
-	}
+	writePrivateAuditFixture(t, rotated, invalid)
 	_, err := runCommandForTestAtHome(t, home,
 		"-o", "json", "--yes", "--ticket", "TEST-1", "--allow-audit-prune",
 		"audit", "prune", "--path", path, "--keep-last", "0", "--confirm",
@@ -300,9 +296,7 @@ func TestAuditPruneLockAndCandidateConsistency(t *testing.T) {
 			t.Fatal(err)
 		}
 		second := path + ".20260525-010203.log"
-		if err := os.WriteFile(second, []byte("{}\n"), 0o600); err != nil {
-			t.Fatal(err)
-		}
+		writePrivateAuditFixture(t, second, []byte("{}\n"))
 		_, err = coreaudit.PruneRotatedFiles(path, preview, coreaudit.PruneOptions{Confirm: true, ExpectedRotatedFiles: []string{first}})
 		if err == nil || apperrors.AsAppError(err).Code != apperrors.CodeConflict {
 			t.Fatalf("candidate change error = %v, want CONFLICT", err)
@@ -352,9 +346,7 @@ func TestAuditRepairLockAndCandidateConsistency(t *testing.T) {
 		home := t.TempDir()
 		path := filepath.Join(home, "audit.jsonl")
 		original := []byte("{malformed\n")
-		if err := os.WriteFile(path, original, 0o600); err != nil {
-			t.Fatal(err)
-		}
+		writePrivateAuditFixture(t, path, original)
 		held := lockfile.New(path)
 		if err := held.Acquire(); err != nil {
 			t.Fatal(err)
@@ -377,9 +369,7 @@ func TestAuditRepairLockAndCandidateConsistency(t *testing.T) {
 	t.Run("core verify owns its lock without self-deadlock", func(t *testing.T) {
 		home := t.TempDir()
 		path := filepath.Join(home, "audit.jsonl")
-		if err := os.WriteFile(path, []byte("{malformed\n"), 0o600); err != nil {
-			t.Fatal(err)
-		}
+		writePrivateAuditFixture(t, path, []byte("{malformed\n"))
 		t.Setenv("OPSKIT_LOCK_TIMEOUT", "100ms")
 		_, err := runCommandForTestAtHome(t, home,
 			"-o", "json", "--yes", "--ticket", "TEST-1", "--allow-audit-repair",
@@ -394,17 +384,13 @@ func TestAuditRepairLockAndCandidateConsistency(t *testing.T) {
 		home := t.TempDir()
 		path, _ := writeAuditPruneFixture(t, home)
 		original := []byte("{malformed\n")
-		if err := os.WriteFile(path, original, 0o600); err != nil {
-			t.Fatal(err)
-		}
+		writePrivateAuditFixture(t, path, original)
 		preview, err := strictAuditRotatedFiles(path)
 		if err != nil {
 			t.Fatal(err)
 		}
 		second := path + ".20260525-010203.log"
-		if err := os.WriteFile(second, []byte("{}\n"), 0o600); err != nil {
-			t.Fatal(err)
-		}
+		writePrivateAuditFixture(t, second, []byte("{}\n"))
 		_, err = repairAudit(path, preview, coreaudit.VerifyOptions{Repair: true, Confirm: true})
 		if err == nil || apperrors.AsAppError(err).Code != apperrors.CodeConflict {
 			t.Fatalf("repair candidate change error = %v, want CONFLICT", err)
@@ -420,9 +406,7 @@ func TestAuditPrunePlanListsV2CandidateWithoutAuthorization(t *testing.T) {
 	home := t.TempDir()
 	path, rotated := writeAuditPruneFixture(t, home)
 	envelope := []byte(`{"apiVersion":"opskit-core.io/audit/v2","kind":"AuditEnvelope"}` + "\n")
-	if err := os.WriteFile(rotated, envelope, 0o600); err != nil {
-		t.Fatal(err)
-	}
+	writePrivateAuditFixture(t, rotated, envelope)
 	out, err := runCommandForTestAtHome(t, home,
 		"--plan", "-o", "json",
 		"audit", "prune", "--path", path, "--keep-last", "0", "--confirm",
@@ -441,16 +425,12 @@ func TestAuditPrunePlanListsV2CandidateWithoutAuthorization(t *testing.T) {
 func TestAuditPruneCandidateOrderIsChronological(t *testing.T) {
 	home := t.TempDir()
 	path := filepath.Join(home, "audit.log")
-	if err := os.WriteFile(path, nil, 0o600); err != nil {
-		t.Fatal(err)
-	}
+	writePrivateAuditFixture(t, path, nil)
 	first := path + ".20260101-000000.log"
 	second := path + ".20260201-000000.log"
 	third := path + ".20260301-000000.log"
 	for _, filePath := range []string{third, first, second} {
-		if err := os.WriteFile(filePath, nil, 0o600); err != nil {
-			t.Fatal(err)
-		}
+		writePrivateAuditFixture(t, filePath, nil)
 	}
 	got, err := auditPruneCandidates(path, auditPruneOptions{keepLast: 1})
 	if err != nil {
@@ -464,13 +444,9 @@ func TestAuditPruneCandidateOrderIsChronological(t *testing.T) {
 func TestAuditPruneCandidatesUseNumericCollisionOrder(t *testing.T) {
 	home := t.TempDir()
 	path := filepath.Join(home, "audit.log")
-	if err := os.WriteFile(path, nil, 0o600); err != nil {
-		t.Fatal(err)
-	}
+	writePrivateAuditFixture(t, path, nil)
 	for _, suffix := range []string{".20260101-000000.2.log", ".20260101-000000.10.log", ".20260101-000000.1.log"} {
-		if err := os.WriteFile(path+suffix, nil, 0o600); err != nil {
-			t.Fatal(err)
-		}
+		writePrivateAuditFixture(t, path+suffix, nil)
 	}
 	got, err := auditPruneCandidates(path, auditPruneOptions{keepLast: 1})
 	if err != nil {
@@ -488,13 +464,9 @@ func TestAuditPruneCandidatesUseNumericCollisionOrder(t *testing.T) {
 func TestAuditPruneRejectsUnexpectedRotationFilename(t *testing.T) {
 	home := t.TempDir()
 	path := filepath.Join(home, "audit.log")
-	if err := os.WriteFile(path, nil, 0o600); err != nil {
-		t.Fatal(err)
-	}
+	writePrivateAuditFixture(t, path, nil)
 	unexpected := path + ".20260101-000000.backup.log"
-	if err := os.WriteFile(unexpected, nil, 0o600); err != nil {
-		t.Fatal(err)
-	}
+	writePrivateAuditFixture(t, unexpected, nil)
 	if _, err := auditPruneCandidates(path, auditPruneOptions{keepLast: 0}); apperrors.AsAppError(err).Code != apperrors.CodeValidationFailed {
 		t.Fatalf("unexpected rotation error = %v, want VALIDATION_FAILED", err)
 	}
@@ -504,12 +476,8 @@ func writeAuditPruneFixture(t *testing.T, home string) (string, string) {
 	t.Helper()
 	prepareMutationAuditTestParent(t, home)
 	path := filepath.Join(home, "audit.jsonl")
-	if err := os.WriteFile(path, []byte(`{"timestamp":"2026-05-26T01:02:03Z","eventType":"test.active","operator":"tester"}`+"\n"), 0o600); err != nil {
-		t.Fatal(err)
-	}
+	writePrivateAuditFixture(t, path, []byte(`{"timestamp":"2026-05-26T01:02:03Z","eventType":"test.active","operator":"tester"}`+"\n"))
 	rotated := path + ".20260524-010203.log"
-	if err := os.WriteFile(rotated, []byte(`{"timestamp":"2026-05-24T01:02:03Z","eventType":"test.rotated","operator":"tester"}`+"\n"), 0o600); err != nil {
-		t.Fatal(err)
-	}
+	writePrivateAuditFixture(t, rotated, []byte(`{"timestamp":"2026-05-24T01:02:03Z","eventType":"test.rotated","operator":"tester"}`+"\n"))
 	return path, rotated
 }
