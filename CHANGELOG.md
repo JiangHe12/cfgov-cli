@@ -8,6 +8,10 @@ All notable changes to this project are documented in this file.
 
 - Upgraded `golang.org/x/text` to `v0.39.0` to fix the reachable infinite-loop vulnerability `GO-2026-5970`; the `v0.6.1` release was blocked before artifact or npm publication by the exact-tag vulnerability gate.
 
+### Fixed
+
+- Release checksum aggregation now merges matrix artifacts without Unix binary/directory name collisions, verifies all six per-platform checksum files, and fails unless the global manifest contains exactly six binaries.
+
 ## v0.6.1
 
 ### Added
