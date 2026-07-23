@@ -134,9 +134,10 @@ CGO_ENABLED=1 go test -race -count=1 ./...
 - Nacos trace never emits request/response bodies, remote response bodies are
   never echoed in public errors, and no environment variable may disable TLS
   certificate verification.
-- Nacos and Apollo report no CAS support. Existing rule/flag blob mutations
-  fail `NOT_IMPLEMENTED` before authorization or side effects; never drop the
-  revision binding to turn them into unconditional writes.
+- Nacos and Apollo report no CAS support. All rule/flag blob writes fail
+  `NOT_IMPLEMENTED` before authorization or side effects because initial
+  creation requires atomic absence and existing blobs require a revision;
+  never drop either binding to turn them into unconditional writes.
 
 ## Code Conventions
 

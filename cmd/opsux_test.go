@@ -36,12 +36,18 @@ func TestCapabilitiesDeclareBackupCleanRiskContract(t *testing.T) {
 	if !foundList {
 		t.Fatal("backup list R0 contract missing")
 	}
-	if data.Domain.Backend.SupportsExistingRuleWrites || data.Domain.Backend.SupportsExistingFlagWrites {
-		t.Fatal("Nacos capabilities claim existing rule/flag writes without CAS")
+	if data.Domain.Backend.SupportsRuleWrites ||
+		data.Domain.Backend.SupportsFlagWrites ||
+		data.Domain.Backend.SupportsExistingRuleWrites ||
+		data.Domain.Backend.SupportsExistingFlagWrites {
+		t.Fatal("Nacos capabilities claim rule/flag writes without CAS")
 	}
 	casData := buildCapabilities(newDefaultFlags(), currentBackendCapabilities(&cliFlags{Backend: "etcd"}))
-	if !casData.Domain.Backend.SupportsExistingRuleWrites || !casData.Domain.Backend.SupportsExistingFlagWrites {
-		t.Fatal("etcd capabilities hide CAS-backed existing rule/flag writes")
+	if !casData.Domain.Backend.SupportsRuleWrites ||
+		!casData.Domain.Backend.SupportsFlagWrites ||
+		!casData.Domain.Backend.SupportsExistingRuleWrites ||
+		!casData.Domain.Backend.SupportsExistingFlagWrites {
+		t.Fatal("etcd capabilities hide CAS-backed rule/flag writes")
 	}
 }
 

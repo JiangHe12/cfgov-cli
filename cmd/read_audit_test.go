@@ -597,7 +597,7 @@ func TestMandatoryReadDiagnosticsAreBoundedAndMarked(t *testing.T) {
 	}
 }
 
-func TestDelayedReadDiagnosticsAreConcurrentAndCloseSafe(t *testing.T) {
+func TestDelayedReadDiagnosticsAreConcurrentAndPromoteSafe(t *testing.T) {
 	t.Parallel()
 
 	buffer := newDelayedReadDiagnostics()
@@ -620,8 +620,60 @@ func TestDelayedReadDiagnosticsAreConcurrentAndCloseSafe(t *testing.T) {
 	}
 	_, _ = buffer.Write([]byte("late diagnostic"))
 	buffer.complete(&released, true)
-	if released.Len() != releasedBytes {
-		t.Fatalf("late diagnostic was released after completion: %q", released.String()[releasedBytes:])
+	if got := released.String()[releasedBytes:]; got != "late diagnostic" {
+		t.Fatalf("promoted diagnostic = %q, want late diagnostic", got)
+	}
+
+	suppressed := newDelayedReadDiagnostics()
+	_, _ = suppressed.Write([]byte("buffered"))
+	suppressed.complete(&released, false)
+	beforeSuppressedWrite := released.Len()
+	_, _ = suppressed.Write([]byte("must stay suppressed"))
+	if released.Len() != beforeSuppressedWrite {
+		t.Fatalf("suppressed diagnostics leaked: %q", released.String()[beforeSuppressedWrite:])
+	}
+}
+
+func TestMandatoryBackendReadPromotesDiagnosticsForLaterMutation(t *testing.T) {
+	f, auditPath := readAuditTestFlags(t)
+	f.Context = ""
+	f.Backend = "fake"
+	f.Server = "https://backend.example.invalid"
+	cfgovctx.SetConfigPath(filepath.Join(filepath.Dir(auditPath), "missing-config.yaml"))
+	t.Cleanup(func() { cfgovctx.SetConfigPath("") })
+	f.mutationAudit = committedReadAuditRuntime(new([]mutationAuditRecord), 0x47)
+	var released bytes.Buffer
+	f.diagnosticOut = &released
+	var retained io.Writer
+	f.backendBuilder = func(*cliFlags, cfgovctx.Context, string) (cfgov.Backend, error) {
+		retained = diagnosticWriter(f)
+		return fakeConfigBackend{namespace: "ns", blobs: map[string][]byte{}}, nil
+	}
+
+	_, err := runMandatoryBackendRead(
+		f,
+		"config.preflight-diagnostics",
+		"config",
+		"app.yaml",
+		map[string]string{"key": "app.yaml"},
+		func(cfgov.Backend, cfgovctx.Context) (int, error) {
+			_, _ = fmt.Fprint(diagnosticWriter(f), "preflight diagnostic\n")
+			if released.Len() != 0 {
+				t.Fatalf("diagnostics released before read outcome: %q", released.String())
+			}
+			return 1, nil
+		},
+		func(int) int { return 1 },
+	)
+	if err != nil {
+		t.Fatalf("runMandatoryBackendRead() error = %v", err)
+	}
+	if released.String() != "preflight diagnostic\n" {
+		t.Fatalf("released preflight diagnostics = %q", released.String())
+	}
+	_, _ = fmt.Fprint(retained, "mutation diagnostic\n")
+	if released.String() != "preflight diagnostic\nmutation diagnostic\n" {
+		t.Fatalf("retained backend diagnostics = %q", released.String())
 	}
 }
 

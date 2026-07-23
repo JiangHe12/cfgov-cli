@@ -6,6 +6,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -78,6 +79,16 @@ type CleanResult struct {
 	Deleted []Metadata `json:"deleted"`
 	Removed []Metadata `json:"removed"`
 	DryRun  bool       `json:"dryRun"`
+}
+
+type CleanPlan struct {
+	Result            CleanResult
+	candidateIDs      []string
+	candidateBindings []string
+}
+
+func (p CleanPlan) CandidateIDs() []string {
+	return append([]string(nil), p.candidateIDs...)
 }
 
 func Write(root string, req Request) (Result, error) {
@@ -241,6 +252,51 @@ func Clean(root string, opts CleanOptions) (CleanResult, error) { //nolint:gocyc
 	return cleanLocked(root, opts)
 }
 
+func PlanClean(root string, opts CleanOptions) (CleanPlan, error) {
+	opts.Apply = false
+	if opts.Now.IsZero() {
+		opts.Now = time.Now()
+	}
+	if _, err := os.Stat(root); err != nil {
+		if os.IsNotExist(err) {
+			return newCleanPlan(CleanResult{DryRun: true}), nil
+		}
+		return CleanPlan{}, err
+	}
+	indexLock := lockfile.New(filepath.Join(root, "index"))
+	if err := indexLock.Acquire(); err != nil {
+		return CleanPlan{}, apperrors.New(apperrors.CodeLocalIOError, "lock backup index", err)
+	}
+	defer func() { _ = indexLock.Release() }()
+	result, err := cleanLocked(root, opts)
+	if err != nil {
+		return CleanPlan{}, err
+	}
+	return newCleanPlan(result), nil
+}
+
+func ApplyCleanPlan(root string, opts CleanOptions, plan CleanPlan) (CleanResult, error) {
+	opts.Apply = true
+	if opts.Now.IsZero() {
+		opts.Now = time.Now()
+	}
+	if _, err := os.Stat(root); err != nil {
+		if os.IsNotExist(err) {
+			return CleanResult{}, cleanPlanConflict()
+		}
+		return CleanResult{}, err
+	}
+	indexLock := lockfile.New(filepath.Join(root, "index"))
+	if err := indexLock.Acquire(); err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return CleanResult{}, cleanPlanConflict()
+		}
+		return CleanResult{}, apperrors.New(apperrors.CodeLocalIOError, "lock backup index", err)
+	}
+	defer func() { _ = indexLock.Release() }()
+	return cleanLockedWithPlan(root, opts, &plan, os.Remove, writeIndex)
+}
+
 func cleanLocked(root string, opts CleanOptions) (CleanResult, error) { //nolint:gocyclo // reason: shared clean implementation
 	return cleanLockedWithOperations(root, opts, os.Remove, writeIndex)
 }
@@ -251,55 +307,140 @@ func cleanLockedWithOperations(
 	remove func(string) error,
 	write func(string, []Metadata) error,
 ) (CleanResult, error) { //nolint:gocyclo // reason: shared clean implementation
+	return cleanLockedWithPlan(root, opts, nil, remove, write)
+}
+
+func cleanLockedWithPlan(
+	root string,
+	opts CleanOptions,
+	expected *CleanPlan,
+	remove func(string) error,
+	write func(string, []Metadata) error,
+) (CleanResult, error) { //nolint:gocyclo // reason: shared clean implementation
 	items, err := readIndex(root)
 	if err != nil {
 		return CleanResult{}, err
 	}
+	items = normalizeCleanItems(items)
+	deleteSet := cleanDeleteSet(items, opts)
+	current := cleanPlanForItems(items, opts, deleteSet)
+	if expected != nil && !equalStrings(expected.candidateBindings, current.candidateBindings) {
+		return CleanResult{}, cleanPlanConflict()
+	}
+	if !opts.Apply {
+		return current.Result, nil
+	}
 	result := CleanResult{DryRun: !opts.Apply}
 	kept := make([]Metadata, 0, len(items))
 	removed := make([]Metadata, 0, len(items))
-	deleteSet := cleanDeleteSet(items, opts)
 	for _, item := range items {
-		item = reconcile(item)
-		if item.BackupID == "" {
-			if createdAt, err := time.Parse(time.RFC3339, item.CreatedAt); err == nil {
-				item.BackupID = legacyBackupID(createdAt)
-			}
-		}
-		if !matches(item, opts.Filter) {
+		switch cleanCandidateAction(item, opts, deleteSet) {
+		case "":
 			kept = append(kept, item)
 			continue
-		}
-		if item.Status == StatusMissing {
-			if opts.Apply {
-				removed = append(removed, item)
-			} else {
-				result.Removed = append(result.Removed, item)
-				kept = append(kept, item)
-			}
+		case "remove":
+			removed = append(removed, item)
 			continue
-		}
-		if !deleteSet[item.BackupID] && !cleanByTime(item, opts) {
-			kept = append(kept, item)
-			continue
-		}
-		if opts.Apply {
+		case "delete":
 			if err := remove(item.Path); err != nil && !os.IsNotExist(err) {
 				return result, err
 			}
 			result.Deleted = append(result.Deleted, item)
 			continue
 		}
-		result.Deleted = append(result.Deleted, item)
-		kept = append(kept, item)
 	}
-	if opts.Apply {
-		if err := write(root, kept); err != nil {
-			return result, err
-		}
-		result.Removed = append(result.Removed, removed...)
+	if err := write(root, kept); err != nil {
+		return result, err
 	}
+	result.Removed = append(result.Removed, removed...)
 	return result, nil
+}
+
+func normalizeCleanItems(items []Metadata) []Metadata {
+	normalized := make([]Metadata, len(items))
+	for i, item := range items {
+		item = reconcile(item)
+		if item.BackupID == "" {
+			if createdAt, err := time.Parse(time.RFC3339, item.CreatedAt); err == nil {
+				item.BackupID = legacyBackupID(createdAt)
+			}
+		}
+		normalized[i] = item
+	}
+	return normalized
+}
+
+func cleanPlanForItems(items []Metadata, opts CleanOptions, deleteSet map[string]bool) CleanPlan {
+	result := CleanResult{DryRun: true}
+	bindings := make([]string, 0, len(items))
+	ids := make([]string, 0, len(items))
+	for _, item := range items {
+		action := cleanCandidateAction(item, opts, deleteSet)
+		switch action {
+		case "delete":
+			result.Deleted = append(result.Deleted, item)
+		case "remove":
+			result.Removed = append(result.Removed, item)
+		default:
+			continue
+		}
+		ids = append(ids, item.BackupID)
+		bindings = append(bindings, strings.Join([]string{action, item.BackupID, item.StoreID, item.Path, item.SHA256}, "\x00"))
+	}
+	sort.Strings(ids)
+	sort.Strings(bindings)
+	return CleanPlan{Result: result, candidateIDs: ids, candidateBindings: bindings}
+}
+
+func newCleanPlan(result CleanResult) CleanPlan {
+	bindings := make([]string, 0, len(result.Deleted)+len(result.Removed))
+	ids := make([]string, 0, len(result.Deleted)+len(result.Removed))
+	appendCandidate := func(action string, item Metadata) {
+		ids = append(ids, item.BackupID)
+		bindings = append(bindings, strings.Join([]string{action, item.BackupID, item.StoreID, item.Path, item.SHA256}, "\x00"))
+	}
+	for _, item := range result.Deleted {
+		appendCandidate("delete", item)
+	}
+	for _, item := range result.Removed {
+		appendCandidate("remove", item)
+	}
+	sort.Strings(ids)
+	sort.Strings(bindings)
+	return CleanPlan{Result: result, candidateIDs: ids, candidateBindings: bindings}
+}
+
+func cleanCandidateAction(item Metadata, opts CleanOptions, deleteSet map[string]bool) string {
+	if !matches(item, opts.Filter) {
+		return ""
+	}
+	if item.Status == StatusMissing {
+		return "remove"
+	}
+	if deleteSet[cleanItemKey(item)] || cleanByTime(item, opts) {
+		return "delete"
+	}
+	return ""
+}
+
+func cleanItemKey(item Metadata) string {
+	return item.BackupID + "\x00" + item.Path
+}
+
+func equalStrings(left, right []string) bool {
+	if len(left) != len(right) {
+		return false
+	}
+	for i := range left {
+		if left[i] != right[i] {
+			return false
+		}
+	}
+	return true
+}
+
+func cleanPlanConflict() error {
+	return apperrors.New(apperrors.CodeConflict, "backup cleanup candidates changed after preview", nil)
 }
 
 func cleanDeleteSet(items []Metadata, opts CleanOptions) map[string]bool {
@@ -309,7 +450,6 @@ func cleanDeleteSet(items []Metadata, opts CleanOptions) map[string]bool {
 	}
 	matched := make([]Metadata, 0, len(items))
 	for _, item := range items {
-		item = reconcile(item)
 		if item.Status == StatusMissing || !matches(item, opts.Filter) {
 			continue
 		}
@@ -321,7 +461,7 @@ func cleanDeleteSet(items []Metadata, opts CleanOptions) map[string]bool {
 		return out
 	}
 	for _, item := range matched[:len(matched)-keep] {
-		out[item.BackupID] = true
+		out[cleanItemKey(item)] = true
 	}
 	return out
 }

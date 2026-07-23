@@ -100,18 +100,19 @@ func runBackupClean(f *cliFlags, opts backupCleanOptions) error {
 	}
 	previewOptions := cleanOpts
 	previewOptions.Apply = false
-	preview, err := backup.Clean(root, previewOptions)
+	previewPlan, err := backup.PlanClean(root, previewOptions)
 	if err != nil {
 		return apperrors.New(apperrors.CodeLocalIOError, "failed to plan backup cleanup", err)
 	}
-	total := len(preview.Deleted) + len(preview.Removed)
+	candidateIDs := previewPlan.CandidateIDs()
+	total := len(candidateIDs)
 	if total == 0 {
 		result := backup.CleanResult{DryRun: false}
 		appendBackupCleanAudit(f, result, audit.StatusSuccess, nil)
 		return printBackupClean(f, result)
 	}
 	return withAuditControlPolicyLock(f, allowBackupClean, func() error {
-		metadata := mutationValueMetadata("backup.prune", preview)
+		metadata := mutationValueMetadata("backup.prune.candidates", candidateIDs)
 		metadata.Items = total
 		metadata.Deletes = total
 		mutation, err := beginMutationAudit(f, mutationAuditSpec{
@@ -122,7 +123,7 @@ func runBackupClean(f *cliFlags, opts backupCleanOptions) error {
 		if err != nil {
 			return err
 		}
-		result, err := backup.Clean(root, cleanOpts)
+		result, err := backup.ApplyCleanPlan(root, cleanOpts, previewPlan)
 		if err != nil {
 			result.DryRun = !cleanOpts.Apply
 		}
@@ -131,16 +132,20 @@ func runBackupClean(f *cliFlags, opts backupCleanOptions) error {
 			status = audit.StatusFailed
 		}
 		appendBackupCleanAudit(f, result, status, err)
-		operationErr := err
-		if operationErr != nil {
-			operationErr = apperrors.New(apperrors.CodeLocalIOError, "failed to clean backups", operationErr)
-		}
+		operationErr := backupCleanOperationError(err)
 		succeeded := len(result.Deleted) + len(result.Removed)
 		if auditErr := finishBatchMutationAudit(mutation, total, succeeded, 0, operationErr); auditErr != nil {
 			return auditErr
 		}
 		return printBackupClean(f, result)
 	})
+}
+
+func backupCleanOperationError(err error) error {
+	if err == nil || apperrors.AsAppError(err).Code == apperrors.CodeConflict {
+		return err
+	}
+	return apperrors.New(apperrors.CodeLocalIOError, "failed to clean backups", err)
 }
 
 func backupCleanRequest(opts backupCleanOptions) (backup.CleanOptions, error) {

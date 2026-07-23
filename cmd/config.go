@@ -654,10 +654,20 @@ func configPushCmd(f *cliFlags) *cobra.Command { //nolint:gocyclo // Cobra handl
 			if err := validateBackupPolicy(f, ctxMeta); err != nil {
 				return err
 			}
-			if err := authorizeForContext(f, class.Risk, ctxMeta, "", ctxName); err != nil {
+			if err := validateConfigPushMode(createOnly, updateOnly, exists); err != nil {
 				return err
 			}
-			if err := validateConfigPushMode(createOnly, updateOnly, exists); err != nil {
+			req := cfgov.PutRequest{
+				Coordinate:       coord,
+				Content:          content,
+				ContentType:      contentType,
+				ExpectedRevision: expectedRevision,
+				RequireAbsent:    createOnly,
+			}
+			if err := validateConfigPutPreconditions(backend.Capabilities(), req); err != nil {
+				return err
+			}
+			if err := authorizeForContext(f, class.Risk, ctxMeta, "", ctxName); err != nil {
 				return err
 			}
 			if done, err := finishIdempotentConfigPush(f, ctxMeta, coord, content, plan, remote, exists); done || err != nil {
@@ -685,7 +695,6 @@ func configPushCmd(f *cliFlags) *cobra.Command { //nolint:gocyclo // Cobra handl
 			if err != nil {
 				return finishMutationAudit(mutation, mutationAuditOutcome{}, err)
 			}
-			req := cfgov.PutRequest{Coordinate: coord, Content: content, ContentType: contentType, ExpectedRevision: expectedRevision}
 			blob, err := backend.Put(cmd.Context(), req)
 			status := audit.StatusSuccess
 			if err != nil {
@@ -729,34 +738,15 @@ func configDeleteCmd(f *cliFlags) *cobra.Command {
 		Short:   "Delete a config blob",
 		Args:    cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			backendRead, err := runMandatoryBackendRead(
-				f,
-				"config.delete.preflight",
-				"config",
-				key,
-				map[string]any{
-					"key":              key,
-					"expectedRevision": mutationAuditFingerprint("config.delete.expected-revision", []byte(expectedRevision)),
-				},
-				func(backend cfgov.Backend, _ cfgovctx.Context) (configDeleteReadResult, error) {
-					normalizedKey, keyErr := validateConfigKey(backend, key)
-					if keyErr != nil {
-						return configDeleteReadResult{}, keyErr
-					}
-					return configDeleteReadResult{
-						Coordinate: cfgov.Coordinate{Namespace: backend.Describe().Namespace, Key: normalizedKey},
-						Key:        normalizedKey,
-					}, nil
-				},
-				func(configDeleteReadResult) int { return 0 },
-			)
+			key = strings.TrimSpace(key)
+			if key == "" {
+				return apperrors.New(apperrors.CodeValidationFailed, "config key is required", nil)
+			}
+			ctxMeta, ctxName, err := resolvedContext(f)
 			if err != nil {
 				return err
 			}
-			backend, ctxMeta := backendRead.Backend, backendRead.Context
-			ctxName := backendRead.ContextName
-			coord, key := backendRead.Value.Coordinate, backendRead.Value.Key
-			target := backendRead.operationTarget()
+			target := operationTargetFromResolvedContext(f, ctxMeta, ctxName)
 			class := cfgclass.Classify(cfgclass.OperationDelete, nil, "")
 			if isPlanOnly(f) {
 				markPreview(f)
@@ -766,37 +756,43 @@ func configDeleteCmd(f *cliFlags) *cobra.Command {
 			if err := validateBackupPolicy(f, ctxMeta); err != nil {
 				return err
 			}
-			if err := authorizeForContext(f, safety.R2, ctxMeta, allowProductionConfigDelete, ctxName); err != nil {
-				return err
-			}
-			mutation, err := beginMutationAudit(f, mutationAuditSpec{
-				Action:      "config.delete",
-				ContextName: ctxName,
-				Context:     ctxMeta,
-				Target:      audit.EventTarget{ResourceType: "config", Resource: key},
+			var (
+				coord        cfgov.Coordinate
+				backupResult *backup.Result
+			)
+			execution, err := runAuthorizedBackendMutation(f, ctxMeta, ctxName, safety.R2, allowProductionConfigDelete, mutationAuditSpec{
+				Action: "config.delete",
+				Target: audit.EventTarget{ResourceType: "config", Resource: key},
 				Metadata: mutationAuditMetadata{
 					Revision: expectedRevision,
 					Items:    1,
 					Deletes:  1,
 				},
+			}, func(backend cfgov.Backend, _ cfgovctx.Context) error {
+				normalizedKey, keyErr := validateConfigKey(backend, key)
+				if keyErr != nil {
+					return keyErr
+				}
+				key = normalizedKey
+				coord = cfgov.Coordinate{Namespace: backend.Describe().Namespace, Key: normalizedKey}
+				backupResult, keyErr = maybeBackupConfig(cmd.Context(), f, backend, ctxMeta, coord)
+				if keyErr != nil {
+					return keyErr
+				}
+				operationErr := backend.Delete(cmd.Context(), cfgov.DeleteRequest{Coordinate: coord, ExpectedRevision: expectedRevision})
+				appendAuditWarn(f, audit.EventType("config.delete"), ctxMeta, audit.EventTarget{ResourceType: "config", Resource: key}, auditStatus(operationErr), "delete one config blob", operationErr)
+				return operationErr
 			})
 			if err != nil {
 				return err
 			}
-			backupResult, err := maybeBackupConfig(cmd.Context(), f, backend, ctxMeta, coord)
-			if err != nil {
-				return finishMutationAudit(mutation, mutationAuditOutcome{}, err)
-			}
-			err = backend.Delete(cmd.Context(), cfgov.DeleteRequest{Coordinate: coord, ExpectedRevision: expectedRevision})
-			status := audit.StatusSuccess
-			if err != nil {
-				status = audit.StatusFailed
-			}
-			appendAuditWarn(f, audit.EventType("config.delete"), ctxMeta, audit.EventTarget{ResourceType: "config", Resource: key}, status, "delete one config blob", err)
-			if auditErr := finishMutationAudit(mutation, mutationAuditOutcome{}, err); auditErr != nil {
-				return auditErr
-			}
-			return targetJSONData(f, "ChangeResult", map[string]any{"resourceType": "config", "namespace": coord.Namespace, "key": key, "deleted": true, "backup": backupResult}, target, operationTargetWrite)
+			return targetJSONData(
+				f,
+				"ChangeResult",
+				map[string]any{"resourceType": "config", "namespace": coord.Namespace, "key": key, "deleted": true, "backup": backupResult},
+				operationTargetFromDescription(execution.ContextName, execution.Backend.Describe()),
+				operationTargetWrite,
+			)
 		},
 	}
 	cmd.Flags().StringVar(&key, "key", "", "Config key: dataId or group/dataId")
@@ -822,11 +818,6 @@ type configPushReadResult struct {
 	Plan       changePlan
 	Remote     cfgov.Blob
 	Exists     bool
-	Coordinate cfgov.Coordinate
-	Key        string
-}
-
-type configDeleteReadResult struct {
 	Coordinate cfgov.Coordinate
 	Key        string
 }
@@ -888,6 +879,16 @@ func validateConfigPushMode(createOnly, updateOnly, exists bool) error {
 	}
 	if updateOnly && !exists {
 		return apperrors.New(apperrors.CodeResourceNotFound, "config does not exist", nil)
+	}
+	return nil
+}
+
+func validateConfigPutPreconditions(capabilities cfgov.Capabilities, req cfgov.PutRequest) error {
+	if err := req.ValidatePreconditions(); err != nil {
+		return err
+	}
+	if (req.RequireAbsent || req.ExpectedRevision != "") && !capabilities.SupportsCAS {
+		return apperrors.New(apperrors.CodeNotImplemented, "backend does not support atomic config preconditions", nil)
 	}
 	return nil
 }

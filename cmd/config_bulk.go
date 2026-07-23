@@ -785,11 +785,8 @@ func authorizeReconcile(f *cliFlags, base safety.Risk, meta cfgovctx.Context, re
 func applyUpserts(ctx context.Context, f *cliFlags, backend cfgov.Backend, meta cfgovctx.Context, items []localConfig, eventType audit.EventType) (int, error) {
 	for _, item := range items {
 		precondition := cfgov.PutRequest{ExpectedRevision: item.ExpectedRevision, RequireAbsent: item.RequireAbsent}
-		if err := precondition.ValidatePreconditions(); err != nil {
+		if err := validateConfigPutPreconditions(backend.Capabilities(), precondition); err != nil {
 			return 0, err
-		}
-		if (item.RequireAbsent || item.ExpectedRevision != "") && !backend.Capabilities().SupportsCAS {
-			return 0, apperrors.New(apperrors.CodeNotImplemented, "backend does not support atomic config preconditions", nil)
 		}
 	}
 	succeeded := 0

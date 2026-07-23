@@ -48,10 +48,11 @@
 | 🩺 **运维与体验** | `doctor` 诊断、shell `completion` 补全、OpenTelemetry 链路/指标、输错命令的「您是不是想…」提示、处处可 JSON 输出。 |
 | 🔏 **可信供应链** | 二进制经 **cosign 签名**,npm 包带 **provenance 溯源**,安装器校验 **SHA-256**。 |
 
-Nacos 与 Apollo 会报告 `supportsCas=false`。规则和特性开关仍可读取和新建
-blob，但修改或删除已有 rule/flag blob 需要原子 revision 前置条件，因此在
-这两个后端会返回 `NOT_IMPLEMENTED`。`supportsExistingRuleWrites` 与
-`supportsExistingFlagWrites` 能力字段会明确暴露这一边界。
+Nacos 与 Apollo 会报告 `supportsCas=false`。规则和特性开关仍可读取，但
+每次 rule/flag blob 写入都需要原子前置条件：初建要求目标不存在，已有 blob
+要求 revision。因此这些写入在 Nacos 与 Apollo 上会返回 `NOT_IMPLEMENTED`。
+`supportsRuleWrites` / `supportsFlagWrites` 会暴露整体写能力；已有资源能力
+字段继续保留以兼容现有调用方。
 
 ---
 
@@ -297,7 +298,7 @@ cfgov install <agent> --skills  # 把 cfgov AI 技能装进某个智能体(claud
 cfgov version
 ```
 
-> `backup clean` 和 `audit prune` **只删本地文件**,并默认 **dry-run**。确认执行的 backup clean 是固定 R3 变更，必须同时提供 `--confirm`、`--yes`、非空 `--ticket` 和 `--allow-backup-clean`。确认执行的审计 prune 与 repair 也是固定 R3 证据变更，需要同类输入及精确的 `--allow-audit-prune` / `--allow-audit-repair`。三者都使用持久化 current context 策略授权(没有 current 时为空策略),`--context` 不能替换该策略。预览会在授权前返回,不删除或重写目标。core v2 会为审计 prune/repair 持有审计路径锁、把确认绑定到精确预览集合、完整验证历史，并在集合变化时返回 `CONFLICT`。prune 支持认证 v2 历史，并在删除前持久推进 checkpoint；repair 仍只支持 legacy 历史。审计 prune/repair 的 mutation intent/outcome 写入同目录 sibling `.<audit-base>-control`，避免转换目标日志或让 control rotation 污染目标日志命名空间。
+> `backup clean` 和 `audit prune` **只删本地文件**,并默认 **dry-run**。确认执行的 backup clean 是固定 R3 变更，必须同时提供 `--confirm`、`--yes`、非空 `--ticket` 和 `--allow-backup-clean`；intent 会记录精确候选 backup ID 集合的指纹，执行前若集合或目标绑定漂移，会在删除前返回 `CONFLICT`。确认执行的审计 prune 与 repair 也是固定 R3 证据变更，需要同类输入及精确的 `--allow-audit-prune` / `--allow-audit-repair`。三者都使用持久化 current context 策略授权(没有 current 时为空策略),`--context` 不能替换该策略。预览会在授权前返回,不删除或重写目标。core v2 会为审计 prune/repair 持有审计路径锁、把确认绑定到精确预览集合、完整验证历史，并在集合变化时返回 `CONFLICT`。prune 支持认证 v2 历史，并在删除前持久推进 checkpoint；repair 仍只支持 legacy 历史。审计 prune/repair 的 mutation intent/outcome 写入同目录 sibling `.<audit-base>-control`，避免转换目标日志或让 control rotation 污染目标日志命名空间。
 </details>
 
 ---

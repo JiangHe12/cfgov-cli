@@ -40,10 +40,11 @@ type readAuditHandle struct {
 }
 
 type delayedReadDiagnostics struct {
-	mu        sync.Mutex
-	data      []byte
-	truncated bool
-	done      bool
+	mu         sync.Mutex
+	data       []byte
+	truncated  bool
+	done       bool
+	downstream io.Writer
 }
 
 func newDelayedReadDiagnostics() *delayedReadDiagnostics {
@@ -53,10 +54,15 @@ func newDelayedReadDiagnostics() *delayedReadDiagnostics {
 func (buffer *delayedReadDiagnostics) Write(p []byte) (int, error) {
 	written := len(p)
 	buffer.mu.Lock()
-	defer buffer.mu.Unlock()
 	if buffer.done {
-		return written, nil
+		downstream := buffer.downstream
+		buffer.mu.Unlock()
+		if downstream == nil {
+			return written, nil
+		}
+		return downstream.Write(p)
 	}
+	defer buffer.mu.Unlock()
 	remaining := maxReadDiagnosticBytes - len(buffer.data)
 	if remaining <= 0 {
 		buffer.truncated = buffer.truncated || len(p) > 0
@@ -73,24 +79,24 @@ func (buffer *delayedReadDiagnostics) Write(p []byte) (int, error) {
 
 func (buffer *delayedReadDiagnostics) complete(out io.Writer, release bool) {
 	buffer.mu.Lock()
+	defer buffer.mu.Unlock()
 	if buffer.done {
-		buffer.mu.Unlock()
 		return
 	}
-	buffer.done = true
-	data := buffer.data
-	truncated := buffer.truncated
-	buffer.data = nil
-	buffer.mu.Unlock()
 	if !release {
+		buffer.done = true
+		buffer.data = nil
 		return
 	}
-	if len(data) > 0 {
-		_, _ = out.Write(data)
+	if len(buffer.data) > 0 {
+		_, _ = out.Write(buffer.data)
 	}
-	if truncated {
+	if buffer.truncated {
 		_, _ = fmt.Fprint(out, readDiagnosticTruncated)
 	}
+	buffer.data = nil
+	buffer.downstream = out
+	buffer.done = true
 }
 
 type mandatoryBackendReadResult[T any] struct {

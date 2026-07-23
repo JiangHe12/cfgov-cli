@@ -135,6 +135,27 @@ func TestCapabilitiesDeclareProtectedReconcileAllowFlag(t *testing.T) {
 	t.Fatal("protected reconcile capability is missing")
 }
 
+func TestStaticBackendCapabilitiesMatchWatchContracts(t *testing.T) {
+	t.Parallel()
+	apollo := currentBackendCapabilities(&cliFlags{Backend: "apollo"})
+	if apollo.SupportsWatch || containsCapabilityVerb(apollo.Verbs, "listen") {
+		t.Fatalf("Apollo watch capabilities = %#v, want unsupported", apollo)
+	}
+	k8s := currentBackendCapabilities(&cliFlags{Backend: "k8s"})
+	if !k8s.SupportsWatch || !containsCapabilityVerb(k8s.Verbs, "listen") {
+		t.Fatalf("Kubernetes watch capabilities = %#v, want listen support", k8s)
+	}
+}
+
+func containsCapabilityVerb(verbs []string, want string) bool {
+	for _, verb := range verbs {
+		if verb == want {
+			return true
+		}
+	}
+	return false
+}
+
 func TestGlobalFlagsWithVersion(t *testing.T) {
 	SetVersionInfo("v0.0.0-test", "deadbeef", "2026-06-29")
 	t.Cleanup(func() { SetVersionInfo("dev", "", "") })

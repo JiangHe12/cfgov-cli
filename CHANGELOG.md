@@ -2,6 +2,35 @@
 
 All notable changes to this project are documented in this file.
 
+## [Unreleased]
+
+## v0.6.4
+
+### Security
+
+- Config deletion now completes local preflight, R2 authorization, and durable
+  mutation intent before constructing a backend client or loading credentials.
+- Create-only config writes and initial rule or flag writes now require a
+  backend-supported atomic absence precondition. Nacos and Apollo reject
+  unsupported CAS paths before authorization or side effects.
+- Backup-clean plans bind the exact candidate IDs, store IDs, paths, and
+  content digests. Apply recomputes the set under lock and rejects drift before
+  deleting any backup.
+
+### Changed
+
+- Updated the shared `opskit-core/v2` dependency to v2.0.3, carrying corrected
+  committed-state reporting for secure-file replacements that encounter a
+  later durability error.
+
+### Fixed
+
+- Corrected backend capability and command documentation for Apollo watch,
+  Kubernetes listen, and rule or flag write support, and kept delayed read
+  diagnostics inside the governed outcome boundary.
+- Restored Node.js 14 compatibility in the npm installer without changing its
+  provenance or atomic-install checks.
+
 ## v0.6.3
 
 ### Security
@@ -20,9 +49,9 @@ All notable changes to this project are documented in this file.
   exact workflow identity before GitHub and npm publication; downloads are
   bounded, timeout-controlled, fsynced, and atomically installed without a
   verification bypass.
-- Structured config validation now fails closed for invalid JSON, requires
-  exactly one YAML document, and rejects XML payloads without exactly one
-  complete root element.
+- Structured config validation now fails closed for invalid JSON, validates
+  every document in a YAML stream, and rejects XML payloads without exactly
+  one complete root element.
 
 ### Changed
 

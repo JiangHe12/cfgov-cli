@@ -457,7 +457,13 @@ func applyFlagWrites(ctx context.Context, f *cliFlags, backend cfgov.Backend, ct
 			succeeded++
 			continue
 		}
-		if _, err := backend.Put(ctx, cfgov.PutRequest{Coordinate: write.coord, Content: write.payload, ContentType: "json", ExpectedRevision: write.current.Revision}); err != nil {
+		if _, err := backend.Put(ctx, cfgov.PutRequest{
+			Coordinate:       write.coord,
+			Content:          write.payload,
+			ContentType:      "json",
+			ExpectedRevision: write.current.Revision,
+			RequireAbsent:    write.current.Revision == "",
+		}); err != nil {
 			appendFlagAudit(f, ctxMeta, plan.Action, plan.App, audit.StatusFailed, flagWriteAudit(plan), err)
 			return finishBatchMutationAudit(mutation, plan.Summary.Total, succeeded, plan.Summary.Skip, err)
 		}
@@ -477,12 +483,12 @@ func validateFlagWriteCapabilities(capabilities cfgov.Capabilities, writes []pla
 		return nil
 	}
 	for _, write := range writes {
-		if write.planItem.Action == "skip" || write.current.Revision == "" {
+		if write.planItem.Action == "skip" {
 			continue
 		}
 		return apperrors.New(
 			apperrors.CodeNotImplemented,
-			fmt.Sprintf("%s does not support the atomic revision precondition required to modify an existing flag set", capabilities.Backend),
+			fmt.Sprintf("%s does not support the atomic precondition required to write a flag set", capabilities.Backend),
 			nil,
 		)
 	}

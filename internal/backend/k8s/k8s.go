@@ -314,7 +314,7 @@ func (b *Backend) Capabilities() cfgov.Capabilities {
 	return cfgov.Capabilities{
 		Backend:          "k8s",
 		ResourceTypes:    []string{"config", "rule", "flag"},
-		Verbs:            []string{"get", "list", "diff", "validate", "pull", "push", "delete"},
+		Verbs:            []string{"get", "list", "diff", "validate", "pull", "listen", "push", "delete"},
 		SupportsCAS:      true,
 		SupportsRevision: true,
 		SupportsHistory:  false,

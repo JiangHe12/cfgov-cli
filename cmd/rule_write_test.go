@@ -94,7 +94,7 @@ func TestClassifyRuleChangeSkipWhenHashesMatch(t *testing.T) {
 	}
 }
 
-func TestRuleExistingWritesRequireBackendCAS(t *testing.T) {
+func TestRuleWritesRequireBackendCAS(t *testing.T) {
 	t.Parallel()
 	write := plannedRuleWrite{
 		current:  ruleSetResult{Revision: "rev1"},
@@ -119,5 +119,13 @@ func TestRuleExistingWritesRequireBackendCAS(t *testing.T) {
 		[]plannedRuleWrite{write},
 	); err != nil {
 		t.Fatalf("idempotent rule skip rejected: %v", err)
+	}
+	write.current.Revision = ""
+	write.planItem.Action = "create"
+	if err := validateRuleWriteCapabilities(
+		cfgov.Capabilities{Backend: "nacos", SupportsRules: true, SupportsCAS: false},
+		[]plannedRuleWrite{write},
+	); apperrors.AsAppError(err).Code != apperrors.CodeNotImplemented {
+		t.Fatalf("Nacos initial rule write error = %v, want not implemented", err)
 	}
 }

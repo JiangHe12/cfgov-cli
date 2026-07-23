@@ -512,7 +512,13 @@ func applyRuleWrites(ctx context.Context, f *cliFlags, backend cfgov.Backend, ct
 			continue
 		}
 		expected := write.current.Revision
-		if _, err := backend.Put(ctx, cfgov.PutRequest{Coordinate: write.coord, Content: write.payload, ContentType: "json", ExpectedRevision: expected}); err != nil {
+		if _, err := backend.Put(ctx, cfgov.PutRequest{
+			Coordinate:       write.coord,
+			Content:          write.payload,
+			ContentType:      "json",
+			ExpectedRevision: expected,
+			RequireAbsent:    expected == "",
+		}); err != nil {
 			appendRuleAudit(f, ctxMeta, plan.Action, plan.App, write.ruleType, audit.StatusFailed, ruleWriteAudit(plan), err)
 			return finishBatchMutationAudit(mutation, plan.Summary.Total, succeeded, plan.Summary.Skip, err)
 		}
@@ -532,12 +538,12 @@ func validateRuleWriteCapabilities(capabilities cfgov.Capabilities, writes []pla
 		return nil
 	}
 	for _, write := range writes {
-		if write.planItem.Action == "skip" || write.current.Revision == "" {
+		if write.planItem.Action == "skip" {
 			continue
 		}
 		return apperrors.New(
 			apperrors.CodeNotImplemented,
-			fmt.Sprintf("%s does not support the atomic revision precondition required to modify an existing rule set", capabilities.Backend),
+			fmt.Sprintf("%s does not support the atomic precondition required to write a rule set", capabilities.Backend),
 			nil,
 		)
 	}

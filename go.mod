@@ -21,7 +21,7 @@ require (
 require (
 	filippo.io/age v1.3.1 // indirect
 	filippo.io/hpke v0.4.0 // indirect
-	github.com/JiangHe12/opskit-core/v2 v2.0.2
+	github.com/JiangHe12/opskit-core/v2 v2.0.3
 	github.com/armon/go-metrics v0.4.1 // indirect
 	github.com/cenkalti/backoff/v5 v5.0.3 // indirect
 	github.com/cespare/xxhash/v2 v2.3.0 // indirect

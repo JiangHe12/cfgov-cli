@@ -17,6 +17,7 @@ import (
 	"github.com/JiangHe12/cfgov-cli/internal/cfgov"
 	"github.com/JiangHe12/cfgov-cli/internal/cfgovctx"
 	"github.com/JiangHe12/cfgov-cli/internal/flag"
+	"github.com/JiangHe12/cfgov-cli/internal/rule"
 )
 
 func TestFlagCreateUpdatePlanningErrors(t *testing.T) {
@@ -111,7 +112,7 @@ func TestMandatoryFlagBackupRejectsNoBackup(t *testing.T) {
 	}
 }
 
-func TestFlagExistingWritesRequireBackendCAS(t *testing.T) {
+func TestFlagWritesRequireBackendCAS(t *testing.T) {
 	t.Parallel()
 	write := plannedFlagWrite{
 		current:  flagSetResult{Revision: "rev1"},
@@ -136,6 +137,14 @@ func TestFlagExistingWritesRequireBackendCAS(t *testing.T) {
 		[]plannedFlagWrite{write},
 	); err != nil {
 		t.Fatalf("idempotent flag skip rejected: %v", err)
+	}
+	write.current.Revision = ""
+	write.planItem.Action = "create"
+	if err := validateFlagWriteCapabilities(
+		cfgov.Capabilities{Backend: "apollo", SupportsFlags: true, SupportsCAS: false},
+		[]plannedFlagWrite{write},
+	); apperrors.AsAppError(err).Code != apperrors.CodeNotImplemented {
+		t.Fatalf("Apollo initial flag write error = %v, want not implemented", err)
 	}
 }
 
@@ -187,6 +196,34 @@ func TestUnsupportedSchemaCASStopsBeforeAuditAndBackend(t *testing.T) {
 	if apperrors.AsAppError(err).Code != apperrors.CodeNotImplemented {
 		t.Fatalf("applyRuleWrites() error = %v, want not implemented", err)
 	}
+	initialFlagWrite := plannedFlagWrite{planItem: flagPlanItem{Action: "create"}}
+	err = applyFlagWrites(
+		context.Background(),
+		f,
+		backend,
+		cfgovctx.Context{},
+		flagWritePlan{Action: "create"},
+		[]plannedFlagWrite{initialFlagWrite},
+		safety.R1,
+		"",
+	)
+	if apperrors.AsAppError(err).Code != apperrors.CodeNotImplemented {
+		t.Fatalf("initial applyFlagWrites() error = %v, want not implemented", err)
+	}
+	initialRuleWrite := plannedRuleWrite{planItem: rulePlanItem{Action: "create"}}
+	err = applyRuleWrites(
+		context.Background(),
+		f,
+		backend,
+		cfgovctx.Context{},
+		ruleWritePlan{Action: "create"},
+		[]plannedRuleWrite{initialRuleWrite},
+		safety.R1,
+		"",
+	)
+	if apperrors.AsAppError(err).Code != apperrors.CodeNotImplemented {
+		t.Fatalf("initial applyRuleWrites() error = %v, want not implemented", err)
+	}
 	if appendCalls != 0 || backend.puts != 0 || backend.deletes != 0 {
 		t.Fatalf(
 			"unsupported CAS caused side effects: audit=%d put=%d delete=%d",
@@ -194,6 +231,58 @@ func TestUnsupportedSchemaCASStopsBeforeAuditAndBackend(t *testing.T) {
 			backend.puts,
 			backend.deletes,
 		)
+	}
+}
+
+func TestInitialSchemaWritesUseAtomicAbsencePrecondition(t *testing.T) {
+	root := t.TempDir()
+	prepareMutationAuditTestParent(t, root)
+	f := mutationAuditTestFlags()
+	f.Yes = true
+	f.mutationAuditPath = filepath.Join(root, "audit.log")
+	f.mutationAudit = &mutationAuditRuntime{
+		appendRecord: func(string, mutationAuditRecord, audit.Options) (audit.AppendResult, error) {
+			return audit.AppendResult{State: audit.AppendCommitCommitted}, nil
+		},
+		appendOrdinary: func(string, any, audit.Options) error { return nil },
+		now:            func() time.Time { return time.Unix(1_700_000_000, 0).UTC() },
+		random:         bytes.NewReader(bytes.Repeat([]byte{0x42}, 64)),
+	}
+
+	flagBackend := &flagWriteBackend{supportsCAS: true}
+	flagCoord := cfgov.Coordinate{Namespace: "ns", Key: "FEATURE_FLAG_GROUP/app-flags"}
+	flagItem := flagPlanItem{Key: flagCoord.Key, Action: "create", Coordinate: flagCoord}
+	flagWrite := plannedFlagWrite{coord: flagCoord, payload: []byte(`[]`), planItem: flagItem}
+	flagPlan := flagWritePlan{
+		ResourceType: "flag",
+		Action:       "create",
+		App:          "app",
+		Summary:      flagPlanSummary{Create: 1, Total: 1},
+		Items:        []flagPlanItem{flagItem},
+	}
+	if err := applyFlagWrites(context.Background(), f, flagBackend, cfgovctx.Context{}, flagPlan, []plannedFlagWrite{flagWrite}, safety.R1, ""); err != nil {
+		t.Fatalf("applyFlagWrites() error = %v", err)
+	}
+	if !flagBackend.lastPut.RequireAbsent || flagBackend.lastPut.ExpectedRevision != "" {
+		t.Fatalf("initial flag put = %#v, want RequireAbsent only", flagBackend.lastPut)
+	}
+
+	ruleBackend := &flagWriteBackend{supportsCAS: true}
+	ruleCoord := cfgov.Coordinate{Namespace: "ns", Key: "SENTINEL_GROUP/app-flow-rules"}
+	ruleItem := rulePlanItem{Type: rule.TypeFlow, Key: ruleCoord.Key, Action: "create", Coordinate: ruleCoord}
+	ruleWrite := plannedRuleWrite{ruleType: rule.TypeFlow, coord: ruleCoord, payload: []byte(`[]`), planItem: ruleItem}
+	rulePlan := ruleWritePlan{
+		ResourceType: "rule",
+		Action:       "create",
+		App:          "app",
+		Summary:      rulePlanSummary{Create: 1, Total: 1},
+		Items:        []rulePlanItem{ruleItem},
+	}
+	if err := applyRuleWrites(context.Background(), f, ruleBackend, cfgovctx.Context{}, rulePlan, []plannedRuleWrite{ruleWrite}, safety.R1, ""); err != nil {
+		t.Fatalf("applyRuleWrites() error = %v", err)
+	}
+	if !ruleBackend.lastPut.RequireAbsent || ruleBackend.lastPut.ExpectedRevision != "" {
+		t.Fatalf("initial rule put = %#v, want RequireAbsent only", ruleBackend.lastPut)
 	}
 }
 
@@ -404,6 +493,7 @@ type flagWriteBackend struct {
 	puts        int
 	deletes     int
 	onPut       func()
+	lastPut     cfgov.PutRequest
 }
 
 func newFlagWriteBackend(content []byte) *flagWriteBackend {
@@ -427,10 +517,14 @@ func (b *flagWriteBackend) Put(_ context.Context, req cfgov.PutRequest) (cfgov.B
 	if req.ExpectedRevision != "" && req.ExpectedRevision != b.revision {
 		return cfgov.Blob{}, apperrors.New(apperrors.CodeConflict, "config revision changed", nil)
 	}
+	if req.RequireAbsent && b.content != nil {
+		return cfgov.Blob{}, apperrors.New(apperrors.CodeConflict, "config already exists", nil)
+	}
 	if b.onPut != nil {
 		b.onPut()
 	}
 	b.puts++
+	b.lastPut = req
 	b.content = append([]byte(nil), req.Content...)
 	b.revision = sha256Bytes(req.Content)
 	return cfgov.Blob{Coordinate: req.Coordinate, Content: b.content, Revision: b.revision}, nil

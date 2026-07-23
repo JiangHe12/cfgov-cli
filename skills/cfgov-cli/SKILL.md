@@ -48,12 +48,12 @@ For authenticated Nacos, prefer `--username <user>` in the context and `CFGOV_PA
 
 `--backend` can temporarily override the current context for one command. Nacos supports config, rule, feature flag, namespace, service, config history, and config listen. Apollo supports config, rule, and feature-flag storage; namespace/service management, history, and listen are not supported and fail closed. etcd supports config, rule, and feature-flag storage plus native watch (`config listen`); history, namespace, and service are not supported. Kubernetes (ConfigMap/Secret) supports config, rule, and feature-flag storage plus object-granular watch (`config listen`) — config keys are `<kind>/<name>/<dataKey>` where `<kind>` is `configmap` or `secret`, rule sets use ConfigMap keys `configmap/{app}-{type}-rules/rules.json` in the context `--namespace`, and namespace/service plus history are not supported and fail closed. Kubernetes exec credential plugins are rejected fail-closed because client-go connects plugin stderr directly to the process; use a static bearer token or client certificate in the selected kubeconfig context. Consul supports config, rule, and feature-flag storage plus service registry and watch via blocking query (`config listen`); namespace and history are not supported and fail closed. Always check `cfgov capabilities -o json` for the bound backend.
 
-Nacos and Apollo report `supportsCas=false`. They can read rule/flag blobs and
-create a missing blob, but an update, delete, rollback, or import that would
-modify an existing rule/flag blob returns `NOT_IMPLEMENTED` before
-authorization, backup, audit intent, or target mutation. Check
-`supportsExistingRuleWrites` / `supportsExistingFlagWrites`; never remove the
-revision binding or retry as an unconditional write.
+Nacos and Apollo report `supportsCas=false`. They can read rule/flag blobs, but
+every rule/flag blob write requires an atomic precondition: absence for initial
+creation and a revision for an existing blob. Those writes return
+`NOT_IMPLEMENTED` before authorization, backup, audit intent, or target
+mutation. Check `supportsRuleWrites` / `supportsFlagWrites`; never remove an
+absence/revision binding or retry as an unconditional write.
 
 Credentials are stored through cfgov context credential handling. Hidden token/secret flags exist for setup paths; do not print secrets.
 
@@ -202,6 +202,6 @@ cfgov version -o json
 cfgov install <agent> --skills
 ```
 
-`backup clean` and `audit prune` default to dry-run. Confirmed backup cleanup is a fixed R3 mutation requiring `--confirm`, `--yes`, a non-empty human ticket, and `--allow-backup-clean`. Confirmed audit pruning and repair are fixed R3 evidence mutations requiring the equivalent inputs and the exact `--allow-audit-prune` or `--allow-audit-repair`. All authorize against the persisted current-context policy (empty only when no current context exists), never a `--context` override. Preview returns before authorization and does not change the target. Core v2 holds the audit-path lock for evidence pruning/repair, binds confirmation to the exact preview set, fully verifies history, and returns `CONFLICT` if that set changed. Pruning supports authenticated v2 history and advances its checkpoint before deletion; repair remains legacy-only. Audit prune/repair write control evidence to the sibling `.<audit-base>-control` log. Nacos trace never contains request/response bodies and its public errors never echo remote bodies; TLS verification cannot be disabled by an environment variable. Vault credential backends require an absolute HTTPS address without userinfo, query, or fragment. Do not add confirmation or authorization inputs unless the human explicitly supplied them after reviewing the preview.
+`backup clean` and `audit prune` default to dry-run. Confirmed backup cleanup is a fixed R3 mutation requiring `--confirm`, `--yes`, a non-empty human ticket, and `--allow-backup-clean`; its intent fingerprints the exact candidate backup-ID set, and apply returns `CONFLICT` before deletion if the set or target bindings drift. Confirmed audit pruning and repair are fixed R3 evidence mutations requiring the equivalent inputs and the exact `--allow-audit-prune` or `--allow-audit-repair`. All authorize against the persisted current-context policy (empty only when no current context exists), never a `--context` override. Preview returns before authorization and does not change the target. Core v2 holds the audit-path lock for evidence pruning/repair, binds confirmation to the exact preview set, fully verifies history, and returns `CONFLICT` if that set changed. Pruning supports authenticated v2 history and advances its checkpoint before deletion; repair remains legacy-only. Audit prune/repair write control evidence to the sibling `.<audit-base>-control` log. Nacos trace never contains request/response bodies and its public errors never echo remote bodies; TLS verification cannot be disabled by an environment variable. Vault credential backends require an absolute HTTPS address without userinfo, query, or fragment. Do not add confirmation or authorization inputs unless the human explicitly supplied them after reviewing the preview.
 
 Check `cfgov capabilities -o json` before assuming a backend supports a noun or verb.

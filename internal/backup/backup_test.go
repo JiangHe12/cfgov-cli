@@ -7,6 +7,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/JiangHe12/opskit-core/v2/apperrors"
 )
 
 func TestWriteCreatesBackupAndIndex(t *testing.T) {
@@ -117,6 +119,57 @@ func TestCleanBeforeApplies(t *testing.T) {
 	}
 	if len(items) != 0 {
 		t.Fatalf("items after clean = %#v, want none", items)
+	}
+}
+
+func TestApplyCleanPlanRejectsCandidateDriftBeforeDeletion(t *testing.T) {
+	root := secureTempBackupRoot(t)
+	first, err := Write(root, Request{
+		Context: "prod", Namespace: "public", Group: "DEFAULT_GROUP",
+		DataID: "first.yaml", Content: []byte("first"), Operator: "tester",
+	})
+	if err != nil {
+		t.Fatalf("Write(first) error = %v", err)
+	}
+	second, err := Write(root, Request{
+		Context: "prod", Namespace: "public", Group: "DEFAULT_GROUP",
+		DataID: "second.yaml", Content: []byte("second"), Operator: "tester",
+	})
+	if err != nil {
+		t.Fatalf("Write(second) error = %v", err)
+	}
+	keepLast := 1
+	opts := CleanOptions{KeepLast: &keepLast}
+	plan, err := PlanClean(root, opts)
+	if err != nil {
+		t.Fatalf("PlanClean() error = %v", err)
+	}
+	if len(plan.CandidateIDs()) != 1 {
+		t.Fatalf("planned candidates = %v, want one", plan.CandidateIDs())
+	}
+	third, err := Write(root, Request{
+		Context: "prod", Namespace: "public", Group: "DEFAULT_GROUP",
+		DataID: "third.yaml", Content: []byte("third"), Operator: "tester",
+	})
+	if err != nil {
+		t.Fatalf("Write(third) error = %v", err)
+	}
+
+	result, err := ApplyCleanPlan(root, opts, plan)
+	if got := apperrors.AsAppError(err).Code; got != apperrors.CodeConflict {
+		t.Fatalf("ApplyCleanPlan() code = %s, want %s (result=%#v err=%v)", got, apperrors.CodeConflict, result, err)
+	}
+	for _, path := range []string{first.Path, second.Path, third.Path} {
+		if _, statErr := os.Stat(path); statErr != nil {
+			t.Fatalf("candidate drift removed %s: %v", path, statErr)
+		}
+	}
+	items, err := List(root, Filter{})
+	if err != nil {
+		t.Fatalf("List() error = %v", err)
+	}
+	if len(items) != 3 {
+		t.Fatalf("items after conflict = %#v, want all three", items)
 	}
 }
 

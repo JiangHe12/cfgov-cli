@@ -32,6 +32,8 @@ type capBackend struct {
 	SupportsRules              bool     `json:"supportsRules"`
 	SupportsFlags              bool     `json:"supportsFlags"`
 	SupportsCAS                bool     `json:"supportsCas"`
+	SupportsRuleWrites         bool     `json:"supportsRuleWrites"`
+	SupportsFlagWrites         bool     `json:"supportsFlagWrites"`
 	SupportsExistingRuleWrites bool     `json:"supportsExistingRuleWrites"`
 	SupportsExistingFlagWrites bool     `json:"supportsExistingFlagWrites"`
 	Verbs                      []string `json:"verbs"`
@@ -136,7 +138,7 @@ func currentBackendCapabilities(f *cliFlags) cfgov.Capabilities {
 			SupportsCAS:      false,
 			SupportsRevision: true,
 			SupportsHistory:  false,
-			SupportsWatch:    true,
+			SupportsWatch:    false,
 			SupportsRules:    true,
 			SupportsFlags:    true,
 		}
@@ -168,7 +170,7 @@ func currentBackendCapabilities(f *cliFlags) cfgov.Capabilities {
 		return cfgov.Capabilities{
 			Backend:          "k8s",
 			ResourceTypes:    []string{"config", "rule", "flag"},
-			Verbs:            []string{"get", "list", "diff", "validate", "pull", "push", "delete"},
+			Verbs:            []string{"get", "list", "diff", "validate", "pull", "listen", "push", "delete"},
 			SupportsCAS:      true,
 			SupportsRevision: true,
 			SupportsHistory:  false,
@@ -209,6 +211,8 @@ func buildCapabilities(f *cliFlags, backend cfgov.Capabilities) capabilitiesData
 				SupportsRules:              backend.SupportsRules,
 				SupportsFlags:              backend.SupportsFlags,
 				SupportsCAS:                backend.SupportsCAS,
+				SupportsRuleWrites:         backend.SupportsRules && backend.SupportsCAS,
+				SupportsFlagWrites:         backend.SupportsFlags && backend.SupportsCAS,
 				SupportsExistingRuleWrites: backend.SupportsRules && backend.SupportsCAS,
 				SupportsExistingFlagWrites: backend.SupportsFlags && backend.SupportsCAS,
 				Verbs:                      backend.Verbs,

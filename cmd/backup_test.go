@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"sort"
 	"testing"
 	"time"
 
@@ -200,6 +201,14 @@ func TestBackupCleanPartialFailureAuditsCompletedDeletionCount(t *testing.T) {
 	}
 	if len(records) != 2 {
 		t.Fatalf("mutation audit records = %d, want intent and outcome", len(records))
+	}
+	candidateIDs := []string{deleted.BackupID, blocked.BackupID}
+	sort.Strings(candidateIDs)
+	expectedMetadata := mutationValueMetadata("backup.prune.candidates", candidateIDs)
+	if records[0].Phase != mutationAuditPhaseIntent ||
+		records[0].Metadata.PayloadFingerprint != expectedMetadata.PayloadFingerprint ||
+		records[0].Metadata.PayloadBytes != expectedMetadata.PayloadBytes {
+		t.Fatalf("intent metadata = %#v, want exact candidate ID fingerprint %#v", records[0], expectedMetadata)
 	}
 	outcome := records[1]
 	if outcome.Phase != mutationAuditPhaseOutcome || outcome.Outcome == nil {
