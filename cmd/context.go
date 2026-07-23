@@ -61,6 +61,7 @@ type importedCredentialPlan struct {
 	backendName string
 	name        string
 	password    string
+	context     cfgovctx.Context
 }
 
 type importedCredentialState struct {
@@ -215,13 +216,20 @@ func ctxSetCmd(f *cliFlags) *cobra.Command { //nolint:gocyclo // Cobra wiring fo
 				K8sKubeconfig:       f.K8sKubeconfig,
 				K8sContext:          f.K8sContext,
 			}
-			if _, err := cfgovctx.Load(); err != nil {
+			cfg, err := cfgovctx.Load()
+			if err != nil {
 				return err
 			}
-			if err := validateCredentialBackendAvailableWithFactory(item, vaultSecretID, contextImportCredentialBackend(f)); err != nil {
+			if err := validateCredentialBackendConfiguration(item, vaultSecretID); err != nil {
 				return err
 			}
 			if isPlanOnly(f) {
+				item, err = prepareContextCredentialPlan(
+					cmd.Context(), f, cfg, args[0], credentialBackend, credential, item, vaultSecretID,
+				)
+				if err != nil {
+					return err
+				}
 				return printLocalChangePlan(f, "context", "set", args[0], map[string]any{
 					"backend":            item.Backend,
 					"namespace":          item.Namespace,
@@ -233,16 +241,33 @@ func ctxSetCmd(f *cliFlags) *cobra.Command { //nolint:gocyclo // Cobra wiring fo
 			runBeforeContextUpdate(f)
 			var mutation *mutationAuditHandle
 			var credentialTransaction *credentialMutationTransaction
+			credentialWriteIndex := -1
 			var original contextTargetState
-			err := updateImportedContexts(f, func(cfg *corectx.Config[cfgovctx.Context]) error {
+			err = updateImportedContexts(f, func(cfg *corectx.Config[cfgovctx.Context]) error {
 				prePolicy, err := contextPreChangePolicy(cfg, args[0])
 				if err != nil {
 					return err
 				}
+				original = captureContextTargetState(cfg, args[0])
+				preflight, err := prepareContextCredentialPreflight(
+					cmd.Context(),
+					f,
+					args[0],
+					prePolicy,
+					credentialBackend,
+					credential,
+					item,
+					vaultSecretID,
+				)
+				if err != nil {
+					return err
+				}
+				item = preflight.Item
+				credentialTransaction = preflight.Transaction
+				credentialWriteIndex = preflight.WriteIndex
 				if err := authorizeForContext(f, safety.R3, prePolicy, allowContextChange, args[0]); err != nil {
 					return err
 				}
-				original = captureContextTargetState(cfg, args[0])
 				metadata := mutationValueMetadata("ctx.set", item)
 				metadata.Items = 1
 				if _, exists := cfg.Contexts[args[0]]; exists {
@@ -260,24 +285,8 @@ func ctxSetCmd(f *cliFlags) *cobra.Command { //nolint:gocyclo // Cobra wiring fo
 				if err != nil {
 					return err
 				}
-				if vaultSecretID != "" {
-					if err := os.Setenv("VAULT_SECRET_ID", vaultSecretID); err != nil {
-						return apperrors.New(apperrors.CodeLocalIOError, "failed to set VAULT_SECRET_ID for credential backend", err)
-					}
-				}
-				stored, transaction, err := prepareContextCredentialTransaction(
-					f,
-					credentialBackend,
-					credential,
-					item,
-				)
-				if err != nil {
-					return err
-				}
-				item = stored
-				if transaction != nil {
-					credentialTransaction = transaction
-					if err := transaction.put(cmd.Context(), args[0], credential); err != nil {
+				if credentialTransaction != nil {
+					if err := credentialTransaction.applyWrite(cmd.Context(), credentialWriteIndex); err != nil {
 						return apperrors.New(apperrors.CodeCredentialStoreError, "failed to store credential", err)
 					}
 				}
@@ -603,36 +612,50 @@ func ctxTestCmd(f *cliFlags) *cobra.Command {
 		Short: "Test backend connectivity for a context",
 		Args:  cobra.MaximumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			var backendName, ctxName string
+			var ctxName string
 			var meta cfgovctx.Context
-			var backend cfgov.Backend
 			var err error
 			if len(args) == 1 {
-				backend, err = buildBackendFromNamedContext(cmd.Context(), f, args[0])
-				if err != nil {
-					appendContextAuditWarn(f, audit.EventContextTest, cfgovctx.Context{}, audit.StatusFailed, "", err)
-					return err
-				}
-				cfg, _ := cfgovctx.Load()
-				meta = cfg.Contexts[args[0]]
 				ctxName = args[0]
-			} else {
-				var item cfgovctx.Context
-				backend, item, err = buildBackend(f)
+				meta, err = loadNamedContext(ctxName)
 				if err != nil {
-					appendContextAuditWarn(f, audit.EventContextTest, cfgovctx.Context{}, audit.StatusFailed, "", err)
 					return err
 				}
-				meta = item
-				ctxName = f.contextName()
+			} else {
+				meta, ctxName, err = resolvedContext(f)
+				if err != nil {
+					return err
+				}
 			}
-			backendName = backend.Describe().Backend
-			err = backend.Ping(cmd.Context())
-			status := audit.StatusSuccess
-			if err != nil {
-				status = audit.StatusFailed
-			}
-			appendContextAuditWarn(f, audit.EventContextTest, meta, status, "backend="+backendName, err)
+			spec := newReadAuditSpec(
+				string(audit.EventContextTest),
+				meta,
+				"diagnostic",
+				ctxName+"\x00"+firstNonEmpty(meta.Backend, f.Backend, "nacos"),
+				map[string]string{"context": ctxName},
+			)
+			spec.ContextName = ctxName
+			backendName, err := runMandatoryRead(
+				f,
+				spec,
+				func() (string, error) {
+					var backend cfgov.Backend
+					var buildErr error
+					if len(args) == 1 {
+						backend, buildErr = buildBackendFromNamedContext(cmd.Context(), f, ctxName, meta)
+					} else {
+						backend, _, buildErr = buildBackendForResolvedContext(f, meta, ctxName)
+					}
+					if buildErr != nil {
+						return "", buildErr
+					}
+					if pingErr := backend.Ping(cmd.Context()); pingErr != nil {
+						return "", pingErr
+					}
+					return backend.Describe().Backend, nil
+				},
+				func(string) int { return 1 },
+			)
 			if err != nil {
 				return err
 			}
@@ -953,12 +976,12 @@ func runCtxImport(f *cliFlags, file, rename string, force bool) error { //nolint
 	}
 	var credentialPlan *importedCredentialPlan
 	if !credentialRedacted {
-		doc.Context, credentialPlan, err = planImportedCredential(f, name, doc.Context)
+		doc.Context, credentialPlan, err = planImportedCredential(name, doc.Context)
 		if err != nil {
 			return err
 		}
 	}
-	if err := validatePortableContextWithCredentialFactory(doc.Context, contextImportCredentialBackend(f)); err != nil {
+	if err := validatePortableContextStatic(doc.Context); err != nil {
 		return err
 	}
 	cfg, err := cfgovctx.Load()
@@ -984,14 +1007,11 @@ func runCtxImport(f *cliFlags, file, rename string, force bool) error { //nolint
 		if exists && !force {
 			return apperrors.New(apperrors.CodeUsageError, fmt.Sprintf("context %q already exists; use --force to overwrite", name), nil)
 		}
-		if err := validatePortableContextWithCredentialFactory(doc.Context, contextImportCredentialBackend(f)); err != nil {
+		if err := validatePortableContextStatic(doc.Context); err != nil {
 			return err
 		}
 		prePolicy, err := contextPreChangePolicy(lockedCfg, name)
 		if err != nil {
-			return err
-		}
-		if err := authorizeForContext(f, safety.R3, prePolicy, allowContextChange, name); err != nil {
 			return err
 		}
 		original = captureContextTargetState(lockedCfg, name)
@@ -1004,10 +1024,13 @@ func runCtxImport(f *cliFlags, file, rename string, force bool) error { //nolint
 		}
 		var credentialState *importedCredentialState
 		if credentialPlan != nil {
-			credentialState, err = inspectImportedCredential(commandContext(f), credentialPlan)
+			credentialState, err = inspectImportedCredentialMandatory(commandContext(f), f, prePolicy, credentialPlan)
 			if err != nil {
 				return err
 			}
+		}
+		if err := authorizeForContext(f, safety.R3, prePolicy, allowContextChange, name); err != nil {
+			return err
 		}
 		mutation, err = beginMutationAudit(f, mutationAuditSpec{
 			Action:      "ctx.import",
@@ -1091,15 +1114,8 @@ func runCtxMigrateCredentials(f *cliFlags, opts migrateCredentialsOptions) error
 	if dryRun || len(candidates) == 0 {
 		return printCredentialMigrationResult(f, result)
 	}
-	if err := authorizeCredentialMigrationCandidates(f, candidates); err != nil {
-		return err
-	}
-	backend, err := credentialMigrationBackend(f, opts.toBackend)
-	if err != nil {
-		return err
-	}
 	runBeforeContextUpdate(f)
-	applyResult, err := migrateCredentialsLocked(f, opts, backend)
+	applyResult, err := migrateCredentialsLocked(f, opts)
 	if auditErr := finishCredentialMigrationMutation(applyResult, err); auditErr != nil {
 		return auditErr
 	}
@@ -1164,7 +1180,7 @@ func finishCredentialMigrationMutation(result credentialMigrationApplyResult, op
 	)
 }
 
-func migrateCredentialsLocked(f *cliFlags, opts migrateCredentialsOptions, backend credstore.Backend) (credentialMigrationApplyResult, error) {
+func migrateCredentialsLocked(f *cliFlags, opts migrateCredentialsOptions) (credentialMigrationApplyResult, error) {
 	var result credentialMigrationApplyResult
 	var lockedCandidates []migrateCredentialCandidate
 	var transaction *credentialMutationTransaction
@@ -1173,6 +1189,10 @@ func migrateCredentialsLocked(f *cliFlags, opts migrateCredentialsOptions, backe
 	err := updateImportedContexts(f, func(lockedCfg *corectx.Config[cfgovctx.Context]) error {
 		var err error
 		lockedCandidates, err = credentialMigrationCandidates(lockedCfg, opts.contextName)
+		if err != nil {
+			return err
+		}
+		preflight, err := prepareCredentialMigrationPreflight(migrationCtx, f, opts, lockedCandidates)
 		if err != nil {
 			return err
 		}
@@ -1195,9 +1215,10 @@ func migrateCredentialsLocked(f *cliFlags, opts migrateCredentialsOptions, backe
 		if err != nil {
 			return err
 		}
-		transaction = &credentialMutationTransaction{backend: backend, backendName: opts.toBackend}
-		for _, candidate := range lockedCandidates {
-			if err := transaction.put(migrationCtx, candidate.name, candidate.password); err != nil {
+		transaction = &credentialMutationTransaction{backend: preflight.backend, backendName: opts.toBackend}
+		for index, candidate := range lockedCandidates {
+			transaction.writes = append(transaction.writes, preflight.writes[index])
+			if err := transaction.applyWrite(migrationCtx, len(transaction.writes)-1); err != nil {
 				result.progress.failed++
 				operationErr := apperrors.New(apperrors.CodeCredentialStoreError, fmt.Sprintf("store credential for context %q failed", candidate.name), err)
 				compensated = true
@@ -1242,6 +1263,60 @@ func migrateCredentialsLocked(f *cliFlags, opts migrateCredentialsOptions, backe
 		return result, err
 	}
 	return result, nil
+}
+
+func prepareCredentialMigrationPreflight(
+	ctx context.Context,
+	f *cliFlags,
+	opts migrateCredentialsOptions,
+	candidates []migrateCredentialCandidate,
+) (*credentialMutationTransaction, error) {
+	contextName := firstNonEmpty(opts.contextName, "multiple")
+	contextMeta := cfgovctx.Context{}
+	authorizations := make([]readAuditAuthorization, 0, len(candidates))
+	if len(candidates) > 0 {
+		contextMeta = candidates[0].context
+	}
+	for _, candidate := range candidates {
+		authorizations = append(authorizations, readAuditAuthorization{
+			ContextName: candidate.name,
+			Context:     candidate.context,
+		})
+	}
+	spec := newReadAuditSpec(
+		"credential.migrate.preflight",
+		contextMeta,
+		"credential",
+		contextName,
+		map[string]any{
+			"backend":  opts.toBackend,
+			"contexts": credentialMigrationContextNames(candidates),
+		},
+	)
+	spec.ContextName = contextName
+	spec.Authorize = authorizations
+	return runMandatoryRead(
+		f,
+		spec,
+		func() (*credentialMutationTransaction, error) {
+			backend, err := credentialMigrationBackend(f, opts.toBackend)
+			if err != nil {
+				return nil, err
+			}
+			transaction := &credentialMutationTransaction{backend: backend, backendName: opts.toBackend}
+			for _, candidate := range candidates {
+				if _, err := transaction.inspectPut(ctx, candidate.name, candidate.password); err != nil {
+					return nil, apperrors.New(
+						apperrors.CodeCredentialStoreError,
+						fmt.Sprintf("inspect credential for context %q failed", candidate.name),
+						err,
+					)
+				}
+			}
+			return transaction, nil
+		},
+		func(*credentialMutationTransaction) int { return len(candidates) },
+	)
 }
 
 func finishCredentialMutationAudit(
@@ -1474,22 +1549,12 @@ func validateCredentialBackendAvailableWithFactory(
 	vaultSecretID string,
 	factory func(cfgovctx.Context) (credstore.Backend, error),
 ) error {
+	if err := validateCredentialBackendConfiguration(item, vaultSecretID); err != nil {
+		return err
+	}
 	name := firstNonEmpty(item.CredentialBackend, "plain-yaml")
-	if name == "vault" {
-		vaultURL, err := url.Parse(strings.TrimSpace(item.VaultAddr))
-		if err != nil || !vaultURL.IsAbs() || vaultURL.Scheme != "https" || vaultURL.Host == "" ||
-			vaultURL.Opaque != "" || vaultURL.User != nil || vaultURL.RawQuery != "" || vaultURL.ForceQuery || vaultURL.Fragment != "" {
-			return apperrors.New(apperrors.CodeCredentialStoreError, "credential backend \"vault\" is not available: vaultAddr must be an absolute HTTPS URL without userinfo, query, or fragment", err)
-		}
-		if strings.TrimSpace(item.VaultPath) == "" {
-			return apperrors.New(apperrors.CodeCredentialStoreError, "credential backend \"vault\" is not available: vaultPath is required", nil)
-		}
-		if vaultSecretID != "" && strings.TrimSpace(item.VaultRoleID) == "" {
-			return apperrors.New(apperrors.CodeCredentialStoreError, "credential backend \"vault\" is not available: vaultRoleID is required with --vault-secret-id", nil)
-		}
-		if vaultSecretID != "" {
-			return nil
-		}
+	if name == "vault" && vaultSecretID != "" {
+		return nil
 	}
 	item.CredentialBackend = name
 	backend, err := factory(item)
@@ -1498,6 +1563,25 @@ func validateCredentialBackendAvailableWithFactory(
 	}
 	if err := backend.Available(); err != nil {
 		return apperrors.New(apperrors.CodeCredentialStoreError, fmt.Sprintf("credential backend %q is not available", name), err)
+	}
+	return nil
+}
+
+func validateCredentialBackendConfiguration(item cfgovctx.Context, vaultSecretID string) error {
+	name := firstNonEmpty(item.CredentialBackend, "plain-yaml")
+	if name != "vault" {
+		return nil
+	}
+	vaultURL, err := url.Parse(strings.TrimSpace(item.VaultAddr))
+	if err != nil || !vaultURL.IsAbs() || vaultURL.Scheme != "https" || vaultURL.Host == "" ||
+		vaultURL.Opaque != "" || vaultURL.User != nil || vaultURL.RawQuery != "" || vaultURL.ForceQuery || vaultURL.Fragment != "" {
+		return apperrors.New(apperrors.CodeCredentialStoreError, "credential backend \"vault\" is not available: vaultAddr must be an absolute HTTPS URL without userinfo, query, or fragment", err)
+	}
+	if strings.TrimSpace(item.VaultPath) == "" {
+		return apperrors.New(apperrors.CodeCredentialStoreError, "credential backend \"vault\" is not available: vaultPath is required", nil)
+	}
+	if vaultSecretID != "" && strings.TrimSpace(item.VaultRoleID) == "" {
+		return apperrors.New(apperrors.CodeCredentialStoreError, "credential backend \"vault\" is not available: vaultRoleID is required with --vault-secret-id", nil)
 	}
 	return nil
 }
@@ -1522,19 +1606,116 @@ func prepareContextCredentialTransaction(
 	return item, &credentialMutationTransaction{backend: backend, backendName: backendName}, nil
 }
 
+type contextCredentialPreflight struct {
+	Item        cfgovctx.Context
+	Transaction *credentialMutationTransaction
+	WriteIndex  int
+}
+
+func prepareContextCredentialPreflight(
+	ctx context.Context,
+	f *cliFlags,
+	contextName string,
+	prePolicy cfgovctx.Context,
+	backendName string,
+	password string,
+	item cfgovctx.Context,
+	vaultSecretID string,
+) (contextCredentialPreflight, error) {
+	if backendName == "" || backendName == "plain-yaml" {
+		stored, transaction, err := prepareContextCredentialTransaction(f, backendName, password, item)
+		return contextCredentialPreflight{Item: stored, Transaction: transaction, WriteIndex: -1}, err
+	}
+	spec := newReadAuditSpec(
+		"ctx.set.credential.preflight",
+		prePolicy,
+		"credential",
+		contextName,
+		map[string]any{
+			"credentialBackend":  backendName,
+			"credentialProvided": password != "",
+		},
+	)
+	spec.ContextName = contextName
+	return runMandatoryRead(
+		f,
+		spec,
+		func() (contextCredentialPreflight, error) {
+			if vaultSecretID != "" {
+				if err := os.Setenv("VAULT_SECRET_ID", vaultSecretID); err != nil {
+					return contextCredentialPreflight{}, apperrors.New(apperrors.CodeLocalIOError, "failed to set VAULT_SECRET_ID for credential backend", err)
+				}
+			}
+			stored, transaction, err := prepareContextCredentialTransaction(f, backendName, password, item)
+			if err != nil {
+				return contextCredentialPreflight{}, err
+			}
+			if transaction == nil || transaction.backend == nil {
+				return contextCredentialPreflight{}, apperrors.New(apperrors.CodeCredentialStoreError, "credential transaction backend is required", nil)
+			}
+			if err := transaction.backend.Available(); err != nil {
+				return contextCredentialPreflight{}, apperrors.New(apperrors.CodeCredentialStoreError, fmt.Sprintf("credential backend %q is not available", backendName), err)
+			}
+			index, err := transaction.inspectPut(ctx, contextName, password)
+			if err != nil {
+				return contextCredentialPreflight{}, err
+			}
+			return contextCredentialPreflight{
+				Item:        stored,
+				Transaction: transaction,
+				WriteIndex:  index,
+			}, nil
+		},
+		func(contextCredentialPreflight) int { return 1 },
+	)
+}
+
+func prepareContextCredentialPlan(
+	ctx context.Context,
+	f *cliFlags,
+	cfg *corectx.Config[cfgovctx.Context],
+	contextName string,
+	backendName string,
+	password string,
+	item cfgovctx.Context,
+	vaultSecretID string,
+) (cfgovctx.Context, error) {
+	if backendName == "vault" {
+		return item, nil
+	}
+	prePolicy, err := contextPreChangePolicy(cfg, contextName)
+	if err != nil {
+		return cfgovctx.Context{}, err
+	}
+	preflight, err := prepareContextCredentialPreflight(
+		ctx,
+		f,
+		contextName,
+		prePolicy,
+		backendName,
+		password,
+		item,
+		vaultSecretID,
+	)
+	if err != nil {
+		return cfgovctx.Context{}, err
+	}
+	return preflight.Item, nil
+}
+
 func captureContextTargetState(cfg *corectx.Config[cfgovctx.Context], name string) contextTargetState {
 	item, exists := cfg.Contexts[name]
 	return contextTargetState{item: item, exists: exists}
 }
 
-func (transaction *credentialMutationTransaction) put(ctx context.Context, name, password string) error {
+func (transaction *credentialMutationTransaction) inspectPut(ctx context.Context, name, password string) (int, error) {
 	if transaction == nil || transaction.backend == nil {
-		return apperrors.New(apperrors.CodeCredentialStoreError, "credential transaction backend is required", nil)
+		return -1, apperrors.New(apperrors.CodeCredentialStoreError, "credential transaction backend is required", nil)
 	}
 	previous, err := transaction.backend.Get(ctx, name)
 	existed := err == nil
 	if err != nil && !errors.Is(err, credstore.ErrNotFound) {
-		return err
+		return -1, err
 	}
 	transaction.writes = append(transaction.writes, credentialMutationWrite{
 		name:     name,
@@ -1542,7 +1723,15 @@ func (transaction *credentialMutationTransaction) put(ctx context.Context, name,
 		written:  password,
 		existed:  existed,
 	})
-	return transaction.backend.Put(ctx, name, password)
+	return len(transaction.writes) - 1, nil
+}
+
+func (transaction *credentialMutationTransaction) applyWrite(ctx context.Context, index int) error {
+	if transaction == nil || transaction.backend == nil || index < 0 || index >= len(transaction.writes) {
+		return apperrors.New(apperrors.CodeCredentialStoreError, "credential transaction write is required", nil)
+	}
+	write := transaction.writes[index]
+	return transaction.backend.Put(ctx, write.name, write.written)
 }
 
 // compensate provides single-process failure compensation only. The context
@@ -1886,11 +2075,7 @@ func readContextExportDocument(path string) (contextExportDocument, error) {
 	return doc, nil
 }
 
-func planImportedCredential(
-	f *cliFlags,
-	name string,
-	item cfgovctx.Context,
-) (cfgovctx.Context, *importedCredentialPlan, error) {
+func planImportedCredential(name string, item cfgovctx.Context) (cfgovctx.Context, *importedCredentialPlan, error) {
 	if ref := credstore.ParseRef(item.Password); ref.IsRef {
 		if strings.TrimSpace(ref.BackendName) == "" {
 			return item, nil, apperrors.New(apperrors.CodeUsageError, "credential reference backend must not be empty", nil)
@@ -1905,19 +2090,17 @@ func planImportedCredential(
 	if item.CredentialBackend == "" || item.CredentialBackend == "plain-yaml" {
 		return item, nil, nil
 	}
-	backend, err := contextImportCredentialBackend(f)(item)
-	if err != nil {
-		return item, nil, apperrors.New(apperrors.CodeCredentialStoreError, "failed to initialize credential backend", err)
-	}
 	if item.Password == "" {
 		item.Password = credstore.EncodeRef(item.CredentialBackend)
 		return item, nil, nil
 	}
+	backendContext := item
+	backendContext.Password = ""
 	plan := &importedCredentialPlan{
-		backend:     backend,
 		backendName: item.CredentialBackend,
 		name:        name,
 		password:    item.Password,
+		context:     backendContext,
 	}
 	item.Password = credstore.EncodeRef(item.CredentialBackend)
 	return item, plan, nil
@@ -1927,6 +2110,9 @@ func inspectImportedCredential(ctx context.Context, plan *importedCredentialPlan
 	if plan == nil {
 		return nil, nil
 	}
+	if plan.backend == nil {
+		return nil, apperrors.New(apperrors.CodeCredentialStoreError, "credential backend is required before import preflight", nil)
+	}
 	previous, err := plan.backend.Get(ctx, plan.name)
 	if err == nil {
 		return &importedCredentialState{plan: plan, previous: previous, existed: true}, nil
@@ -1935,6 +2121,42 @@ func inspectImportedCredential(ctx context.Context, plan *importedCredentialPlan
 		return &importedCredentialState{plan: plan}, nil
 	}
 	return nil, apperrors.New(apperrors.CodeCredentialStoreError, "failed to inspect existing credential before import", err)
+}
+
+func inspectImportedCredentialMandatory(
+	ctx context.Context,
+	f *cliFlags,
+	prePolicy cfgovctx.Context,
+	plan *importedCredentialPlan,
+) (*importedCredentialState, error) {
+	if plan == nil {
+		return nil, nil
+	}
+	spec := newReadAuditSpec(
+		"ctx.import.credential.preflight",
+		prePolicy,
+		"credential",
+		plan.name,
+		map[string]string{"credentialBackend": plan.backendName},
+	)
+	spec.ContextName = plan.name
+	return runMandatoryRead(
+		f,
+		spec,
+		func() (*importedCredentialState, error) {
+			backend, err := contextImportCredentialBackend(f)(plan.context)
+			if err != nil {
+				return nil, apperrors.New(apperrors.CodeCredentialStoreError, "failed to initialize credential backend", err)
+			}
+			if err := backend.Available(); err != nil {
+				return nil, apperrors.New(apperrors.CodeCredentialStoreError, fmt.Sprintf("credential backend %q is not available", plan.backendName), err)
+			}
+			boundPlan := *plan
+			boundPlan.backend = backend
+			return inspectImportedCredential(ctx, &boundPlan)
+		},
+		func(*importedCredentialState) int { return 1 },
+	)
 }
 
 func applyImportedCredential(ctx context.Context, state *importedCredentialState) error {
@@ -2004,6 +2226,13 @@ func validatePortableContextWithCredentialFactory( //nolint:gocyclo // Backend-s
 	item cfgovctx.Context,
 	factory func(cfgovctx.Context) (credstore.Backend, error),
 ) error {
+	if err := validatePortableContextStatic(item); err != nil {
+		return err
+	}
+	return validateCredentialBackendAvailableWithFactory(item, "", factory)
+}
+
+func validatePortableContextStatic(item cfgovctx.Context) error { //nolint:gocyclo // Backend-specific context and governance-policy validation is intentionally centralized.
 	if item.Backend != "nacos" && item.Backend != "apollo" && item.Backend != "etcd" && item.Backend != "consul" && item.Backend != "k8s" {
 		return apperrors.New(apperrors.CodeNotImplemented, "backend is not supported", nil)
 	}
@@ -2031,7 +2260,7 @@ func validatePortableContextWithCredentialFactory( //nolint:gocyclo // Backend-s
 	if item.Backend == "apollo" && item.ApolloAppID == "" {
 		return apperrors.New(apperrors.CodeUsageError, "apollo context requires apolloAppId", nil)
 	}
-	if err := validateCredentialBackendAvailableWithFactory(item, "", factory); err != nil {
+	if err := validateCredentialBackendConfiguration(item, ""); err != nil {
 		return err
 	}
 	if item.TicketPattern != "" {
@@ -2127,7 +2356,7 @@ func appendContextAuditWarnFor(f *cliFlags, eventType audit.EventType, contextNa
 func appendRoleAuditWarn(f *cliFlags, eventType audit.EventType, contextName string, item cfgovctx.Context, operator, role string, err error) {
 	path, pathErr := configuredAuditPath(f)
 	if pathErr != nil {
-		_, _ = fmt.Fprintf(os.Stderr, "warning: audit path failed: %v\n", pathErr)
+		_, _ = fmt.Fprintf(diagnosticWriter(f), "warning: audit path failed: %s\n", redactedDiagnosticError(pathErr))
 		return
 	}
 	status := audit.StatusSuccess
@@ -2151,14 +2380,14 @@ func appendRoleAuditWarn(f *cliFlags, eventType audit.EventType, contextName str
 		evt.Error = &audit.EventError{Code: string(appErr.Code)}
 	}
 	if appendErr := appendQueuedAuditEvent(f, path, evt); appendErr != nil {
-		_, _ = fmt.Fprintf(os.Stderr, "warning: audit write failed: %v\n", appendErr)
+		_, _ = fmt.Fprintf(diagnosticWriter(f), "warning: audit write failed: %s\n", redactedDiagnosticError(appendErr))
 	}
 }
 
 func appendCredentialMigrationAuditWarn(f *cliFlags, contextName string, item cfgovctx.Context, backendName string, err error) {
 	path, pathErr := configuredAuditPath(f)
 	if pathErr != nil {
-		_, _ = fmt.Fprintf(os.Stderr, "warning: audit path failed: %v\n", pathErr)
+		_, _ = fmt.Fprintf(diagnosticWriter(f), "warning: audit path failed: %s\n", redactedDiagnosticError(pathErr))
 		return
 	}
 	status := audit.StatusSuccess
@@ -2178,6 +2407,6 @@ func appendCredentialMigrationAuditWarn(f *cliFlags, contextName string, item cf
 		evt.Error = &audit.EventError{Code: string(appErr.Code)}
 	}
 	if appendErr := appendQueuedAuditEvent(f, path, evt); appendErr != nil {
-		_, _ = fmt.Fprintf(os.Stderr, "warning: audit write failed: %v\n", appendErr)
+		_, _ = fmt.Fprintf(diagnosticWriter(f), "warning: audit write failed: %s\n", redactedDiagnosticError(appendErr))
 	}
 }

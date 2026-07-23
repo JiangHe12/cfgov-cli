@@ -46,6 +46,11 @@ type flagValidationResult struct {
 	Issues   []flag.Issue `json:"issues,omitempty"`
 }
 
+type flagExportReadResult struct {
+	Result  flagSetResult
+	Payload []byte
+}
+
 func newFlagCmd(f *cliFlags) *cobra.Command {
 	cmd := &cobra.Command{Use: "flag", Short: "Read and validate feature flags", Args: requireSubcommand, RunE: runParentHelp}
 	cmd.AddCommand(
@@ -70,18 +75,28 @@ func flagListCmd(f *cliFlags) *cobra.Command {
 		Short: "List feature flag count",
 		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			backend, store, ctxMeta, err := buildFlagStore(f)
+			readResult, err := runMandatoryBackendRead(
+				f,
+				"flag.list",
+				"flag",
+				app,
+				map[string]any{"app": app},
+				func(backend cfgov.Backend, _ cfgovctx.Context) (flagSetResult, error) {
+					_, store, storeErr := ensureFlagStore(backend)
+					if storeErr != nil {
+						return flagSetResult{}, storeErr
+					}
+					return readFlagSet(cmd.Context(), backend, store, app)
+				},
+				func(result flagSetResult) int { return result.Count },
+			)
 			if err != nil {
 				return err
 			}
-			result, err := readFlagSet(cmd.Context(), backend, store, app)
-			appendFlagAudit(f, ctxMeta, "list", app, auditStatus(err), flagSetAudit(result), err)
-			if err != nil {
-				return err
-			}
+			result := readResult.Value
 			result.Flags = nil
 			items := []flagSetResult{result}
-			target := operationTargetFromBackend(f, backend)
+			target := readResult.operationTarget()
 			if f.Output == "json" {
 				return targetJSONList(f, "FlagList", items, len(items), 1, len(items), target)
 			}
@@ -104,19 +119,32 @@ func flagGetCmd(f *cliFlags) *cobra.Command {
 		Short: "Get one feature flag set",
 		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			backend, store, ctxMeta, err := buildFlagStore(f)
+			readResult, err := runMandatoryBackendRead(
+				f,
+				"flag.get",
+				"flag",
+				app,
+				map[string]any{
+					"app": app,
+					"key": key,
+				},
+				func(backend cfgov.Backend, _ cfgovctx.Context) (flagSetResult, error) {
+					_, store, storeErr := ensureFlagStore(backend)
+					if storeErr != nil {
+						return flagSetResult{}, storeErr
+					}
+					result, readErr := readFlagSet(cmd.Context(), backend, store, app)
+					if readErr != nil {
+						return flagSetResult{}, readErr
+					}
+					return filterFlagSetByKey(result, key), nil
+				},
+				func(result flagSetResult) int { return result.Count },
+			)
 			if err != nil {
 				return err
 			}
-			result, err := readFlagSet(cmd.Context(), backend, store, app)
-			appendFlagAudit(f, ctxMeta, "get", app, auditStatus(err), flagSetAudit(result), err)
-			if err != nil {
-				return err
-			}
-			if key != "" {
-				result = filterFlagSetByKey(result, key)
-			}
-			return targetJSONData(f, "FlagSet", result, operationTargetFromBackend(f, backend), operationTargetRead)
+			return targetJSONData(f, "FlagSet", readResult.Value, readResult.operationTarget(), operationTargetRead)
 		},
 	}
 	cmd.Flags().StringVar(&app, "app", "", "Application name")
@@ -132,30 +160,44 @@ func flagExportCmd(f *cliFlags) *cobra.Command {
 		Short: "Export feature flag set",
 		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			backend, store, ctxMeta, err := buildFlagStore(f)
-			if err != nil {
-				return err
-			}
-			result, err := readFlagSet(cmd.Context(), backend, store, app)
-			if err != nil {
-				appendFlagAudit(f, ctxMeta, "export", app, auditStatus(err), flagSetAudit(result), err)
-				return err
-			}
 			planOnly := isPlanOnly(f)
-			content, err := json.MarshalIndent(result.Flags, "", "  ")
+			backendRead, err := runMandatoryBackendRead(
+				f,
+				"flag.export",
+				"flag",
+				app,
+				map[string]any{"app": app, "dir": dir},
+				func(backend cfgov.Backend, _ cfgovctx.Context) (flagExportReadResult, error) {
+					_, store, storeErr := ensureFlagStore(backend)
+					if storeErr != nil {
+						return flagExportReadResult{}, storeErr
+					}
+					result, readErr := readFlagSet(cmd.Context(), backend, store, app)
+					if readErr != nil {
+						return flagExportReadResult{}, readErr
+					}
+					content, marshalErr := json.MarshalIndent(result.Flags, "", "  ")
+					if marshalErr != nil {
+						return flagExportReadResult{}, apperrors.New(apperrors.CodeLocalIOError, "failed to encode flags", marshalErr)
+					}
+					result.Flags = nil
+					payload := append(append(make([]byte, 0, len(content)+1), content...), '\n')
+					if preflightErr := preflightNewLocalFiles(dir, []string{"flags.json"}); preflightErr != nil {
+						return flagExportReadResult{}, preflightErr
+					}
+					return flagExportReadResult{Result: result, Payload: payload}, nil
+				},
+				func(result flagExportReadResult) int { return result.Result.Count },
+			)
 			if err != nil {
-				return apperrors.New(apperrors.CodeLocalIOError, "failed to encode flags", err)
-			}
-			result.Flags = nil
-			payload := make([]byte, len(content)+1)
-			copy(payload, content)
-			payload[len(content)] = '\n'
-			if err := preflightNewLocalFiles(dir, []string{"flags.json"}); err != nil {
-				appendFlagAudit(f, ctxMeta, "export", app, audit.StatusFailed, flagSetAudit(result), err)
 				return err
 			}
+			readResult := backendRead.Value
+			ctxMeta := backendRead.Context
+			target := backendRead.operationTarget()
+			result := readResult.Result
+			payload := readResult.Payload
 			if planOnly {
-				appendFlagAudit(f, ctxMeta, "export", app, audit.StatusSuccess, flagSetAudit(result), nil)
 				markPreview(f)
 				return targetJSONData(f, "ChangePlan", map[string]any{
 					"resourceType": "file",
@@ -164,7 +206,7 @@ func flagExportCmd(f *cliFlags) *cobra.Command {
 					"dir":          dir,
 					"items":        []flagSetResult{result},
 					"dryRun":       true,
-				}, operationTargetFromBackend(f, backend), operationTargetRead)
+				}, target, operationTargetRead)
 			}
 			metadata := mutationPayloadMetadata("flag.export", payload)
 			metadata.Items = 1
@@ -191,8 +233,7 @@ func flagExportCmd(f *cliFlags) *cobra.Command {
 			); auditErr != nil {
 				return auditErr
 			}
-			appendFlagAudit(f, ctxMeta, "export", app, audit.StatusSuccess, flagSetAudit(result), nil)
-			return targetJSONData(f, "FlagExport", map[string]any{"app": app, "dir": dir, "items": []flagSetResult{result}}, operationTargetFromBackend(f, backend), operationTargetRead)
+			return targetJSONData(f, "FlagExport", map[string]any{"app": app, "dir": dir, "items": []flagSetResult{result}}, target, operationTargetRead)
 		},
 	}
 	cmd.Flags().StringVar(&app, "app", "", "Application name")
@@ -213,24 +254,42 @@ func flagDiffCmd(f *cliFlags) *cobra.Command {
 			if err != nil {
 				return err
 			}
-			backend, store, ctxMeta, err := buildFlagStore(f)
+			readResult, err := runMandatoryBackendRead(
+				f,
+				"flag.diff",
+				"flag",
+				app,
+				map[string]any{
+					"app":         app,
+					"localSha256": local.SHA256,
+					"localCount":  local.Count,
+				},
+				func(backend cfgov.Backend, _ cfgovctx.Context) (flagDiffResult, error) {
+					_, store, storeErr := ensureFlagStore(backend)
+					if storeErr != nil {
+						return flagDiffResult{}, storeErr
+					}
+					remote, readErr := readFlagSet(cmd.Context(), backend, store, app)
+					if readErr != nil {
+						return flagDiffResult{}, readErr
+					}
+					result := flagDiffResult{
+						App:          app,
+						RemoteSHA256: remote.SHA256,
+						LocalSHA256:  local.SHA256,
+						RemoteCount:  remote.Count,
+						LocalCount:   local.Count,
+					}
+					result.Same = result.RemoteSHA256 == result.LocalSHA256 &&
+						result.RemoteCount == result.LocalCount
+					return result, nil
+				},
+				func(flagDiffResult) int { return 1 },
+			)
 			if err != nil {
 				return err
 			}
-			remote, err := readFlagSet(cmd.Context(), backend, store, app)
-			appendFlagAudit(f, ctxMeta, "diff", app, auditStatus(err), flagSetAudit(remote), err)
-			if err != nil {
-				return err
-			}
-			result := flagDiffResult{
-				App:          app,
-				RemoteSHA256: remote.SHA256,
-				LocalSHA256:  local.SHA256,
-				RemoteCount:  remote.Count,
-				LocalCount:   local.Count,
-			}
-			result.Same = result.RemoteSHA256 == result.LocalSHA256 && result.RemoteCount == result.LocalCount
-			return targetJSONData(f, "FlagDiff", result, operationTargetFromBackend(f, backend), operationTargetRead)
+			return targetJSONData(f, "FlagDiff", readResult.Value, readResult.operationTarget(), operationTargetRead)
 		},
 	}
 	cmd.Flags().StringVar(&app, "app", "", "Application name")
@@ -265,18 +324,6 @@ func flagValidateCmd(f *cliFlags) *cobra.Command {
 	cmd.Flags().BoolVar(&deep, "deep", false, "Run deep semantic checks")
 	cmd.Flags().BoolVar(&failOnWarnings, "fail-on-warnings", false, "Exit non-zero when deep validation reports warnings")
 	return cmd
-}
-
-func buildFlagStore(f *cliFlags) (cfgov.Backend, cfgov.FlagStore, cfgovctx.Context, error) {
-	backend, ctxMeta, err := buildBackend(f)
-	if err != nil {
-		return nil, nil, cfgovctx.Context{}, err
-	}
-	backend, store, err := ensureFlagStore(backend)
-	if err != nil {
-		return nil, nil, cfgovctx.Context{}, err
-	}
-	return backend, store, ctxMeta, nil
 }
 
 func ensureFlagStore(backend cfgov.Backend) (cfgov.Backend, cfgov.FlagStore, error) {
@@ -371,13 +418,6 @@ func countFlagIssues(issues []flag.Issue) (int, int) {
 
 func appendFlagAudit(f *cliFlags, ctxMeta cfgovctx.Context, verb, app, status, diff string, err error) {
 	appendAuditWarn(f, audit.EventType("flag."+verb), ctxMeta, audit.EventTarget{ResourceType: "flag", Resource: app}, status, diff, err)
-}
-
-func flagSetAudit(result flagSetResult) string {
-	if result.App == "" {
-		return ""
-	}
-	return "app=" + result.App + " sha256=" + result.SHA256 + " count=" + intString(result.Count)
 }
 
 func filterFlagSetByKey(result flagSetResult, key string) flagSetResult {

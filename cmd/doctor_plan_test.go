@@ -4,7 +4,6 @@ import (
 	"context"
 	"net/http"
 	"net/http/httptest"
-	"os"
 	"strings"
 	"testing"
 )
@@ -23,10 +22,6 @@ func TestDoctorPlanMarksAuditWriteCheckSkipped(t *testing.T) {
 	f.Plan = true
 	f.Output = "json"
 
-	path, err := auditPath("")
-	if err != nil {
-		t.Fatal(err)
-	}
 	out := captureStdout(t, func() {
 		_ = runDoctor(context.Background(), f)
 	})
@@ -42,9 +37,11 @@ func TestDoctorPlanMarksAuditWriteCheckSkipped(t *testing.T) {
 	if strings.Contains(out, `"audit log writable"`) {
 		t.Fatalf("planned doctor output claims audit log is writable: %s", out)
 	}
-	if _, err := os.Stat(path); !os.IsNotExist(err) {
-		t.Fatalf("runDoctor plan probe created audit file: %v", err)
+	records := readRawAuditRecords(t, home)
+	if len(records) != 2 {
+		t.Fatalf("doctor plan read audit count = %d, want pair: %#v", len(records), records)
 	}
+	assertRequiredReadPair(t, records, "doctor.ping")
 }
 
 func TestDoctorPlanCommandWritesPreviewAudit(t *testing.T) {
@@ -67,5 +64,5 @@ func TestDoctorPlanCommandWritesPreviewAudit(t *testing.T) {
 	if !strings.Contains(out, `"status": "skipped"`) || !strings.Contains(out, `"complete": false`) {
 		t.Fatalf("doctor plan output does not expose skipped audit check: %s", out)
 	}
-	assertSingleExplicitPreviewAudit(t, home, "cfgov-cli.doctor")
+	assertReadPairAndPreview(t, home, "doctor.ping", "cfgov-cli.doctor")
 }

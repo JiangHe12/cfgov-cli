@@ -2,6 +2,7 @@ package cmd
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -33,6 +34,11 @@ type doctorCheck struct {
 	Latency string `json:"latency,omitempty"`
 }
 
+type doctorBackendReadResult struct {
+	Auth    doctorCheck
+	Backend doctorCheck
+}
+
 func newDoctorCmd(f *cliFlags) *cobra.Command {
 	return &cobra.Command{
 		Use:   "doctor",
@@ -52,25 +58,19 @@ func runDoctor(ctx context.Context, f *cliFlags) error {
 		result.add(doctorFailed("context", ctxErr))
 	} else {
 		result.add(doctorCheck{Name: "context", Status: audit.StatusSuccess, Context: ctxName, Message: redact.String("context loaded")})
-		result.add(doctorAuthCheck(f, ctxMeta, ctxName))
 		result.add(doctorWriteProbeCheck(ctxMeta, ctxName))
 	}
 
-	backend, _, backendErr := buildBackend(f)
-	if backendErr != nil {
-		result.add(doctorFailed("backend", backendErr))
+	if ctxErr != nil {
+		result.add(doctorFailed("backend", ctxErr))
 	} else {
-		start := time.Now()
-		err := backend.Ping(ctx)
-		status := auditStatus(err)
-		result.add(doctorCheck{
-			Name:    "backend",
-			Status:  status,
-			Message: doctorMessage("ping ok", err),
-			Backend: backend.Describe().Backend,
-			Context: ctxName,
-			Latency: time.Since(start).String(),
-		})
+		checks, err := doctorBackendChecks(ctx, f, ctxMeta, ctxName)
+		if err != nil {
+			return err
+		}
+		for _, check := range checks {
+			result.add(check)
+		}
 	}
 
 	if planOnly {
@@ -89,6 +89,59 @@ func runDoctor(ctx context.Context, f *cliFlags) error {
 	return nil
 }
 
+func doctorBackendChecks(ctx context.Context, f *cliFlags, ctxMeta cfgovctx.Context, ctxName string) ([]doctorCheck, error) {
+	spec := newReadAuditSpec(
+		"doctor.ping",
+		ctxMeta,
+		"diagnostic",
+		ctxName+"\x00"+firstNonEmpty(ctxMeta.Backend, f.Backend, "nacos"),
+		map[string]string{"context": ctxName},
+	)
+	spec.ContextName = ctxName
+	readResult, operationErr, auditErr := executeMandatoryRead(
+		f,
+		spec,
+		func() (doctorBackendReadResult, error) {
+			authCheck, authErr := doctorAuthCheck(f, ctxMeta, ctxName)
+			backend, _, buildErr := buildBackendForResolvedContext(f, ctxMeta, ctxName)
+			if buildErr != nil {
+				return doctorBackendReadResult{
+					Auth:    authCheck,
+					Backend: doctorFailed("backend", buildErr),
+				}, errors.Join(authErr, buildErr)
+			}
+			start := time.Now()
+			pingErr := backend.Ping(ctx)
+			return doctorBackendReadResult{
+				Auth: authCheck,
+				Backend: doctorCheck{
+					Name:    "backend",
+					Status:  auditStatus(pingErr),
+					Message: doctorMessage("ping ok", pingErr),
+					Backend: backend.Describe().Backend,
+					Context: ctxName,
+					Latency: time.Since(start).String(),
+				},
+			}, errors.Join(authErr, pingErr)
+		},
+		func(doctorBackendReadResult) int { return 2 },
+	)
+	if auditErr != nil {
+		return nil, auditErr
+	}
+	if operationErr != nil && readResult.Auth.Name == "" && readResult.Backend.Name == "" {
+		return nil, operationErr
+	}
+	checks := make([]doctorCheck, 0, 2)
+	if readResult.Auth.Name != "" {
+		checks = append(checks, readResult.Auth)
+	}
+	if readResult.Backend.Name != "" {
+		checks = append(checks, readResult.Backend)
+	}
+	return checks, nil
+}
+
 func (r *doctorResult) add(check doctorCheck) {
 	if check.Status == audit.StatusFailed {
 		r.OK = false
@@ -99,11 +152,11 @@ func (r *doctorResult) add(check doctorCheck) {
 	r.Checks = append(r.Checks, check)
 }
 
-func doctorAuthCheck(f *cliFlags, meta cfgovctx.Context, ctxName string) doctorCheck {
+func doctorAuthCheck(f *cliFlags, meta cfgovctx.Context, ctxName string) (doctorCheck, error) {
 	if _, err := cfgovctx.ResolvePassword(commandContext(f), ctxName, meta); err != nil {
-		return doctorFailed("auth", err)
+		return doctorFailed("auth", err), err
 	}
-	return doctorCheck{Name: "auth", Status: audit.StatusSuccess, Message: redact.String("credentials resolvable"), Context: ctxName}
+	return doctorCheck{Name: "auth", Status: audit.StatusSuccess, Message: redact.String("credentials resolvable"), Context: ctxName}, nil
 }
 
 func doctorWriteProbeCheck(meta cfgovctx.Context, ctxName string) doctorCheck {

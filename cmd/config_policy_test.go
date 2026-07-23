@@ -37,6 +37,16 @@ func TestValidateContentRejectsMalformedJSON(t *testing.T) {
 	}
 }
 
+func TestValidateContentChecksEveryYAMLDocument(t *testing.T) {
+	if err := validateContent([]byte("enabled: true\n---\nname: cfgov\n"), "yaml"); err != nil {
+		t.Fatalf("valid multi-document YAML rejected: %v", err)
+	}
+	err := validateContent([]byte("enabled: true\n---\nname: [\n"), "yaml")
+	if apperrors.AsAppError(err).Code != apperrors.CodeValidationFailed {
+		t.Fatalf("invalid later YAML document error = %v, want validation failed", err)
+	}
+}
+
 func TestValidateContentRejectsMalformedXML(t *testing.T) {
 	err := validateContent([]byte(`<root>`), "xml")
 	if apperrors.AsAppError(err).Code != apperrors.CodeValidationFailed {
@@ -76,7 +86,7 @@ func TestDiffSummaryIncludesLineDiff(t *testing.T) {
 
 func TestBuildBackendRequiresContextOrServer(t *testing.T) {
 	cfgovctx.SetConfigPath(filepath.Join(t.TempDir(), "config.yaml"))
-	_, _, err := buildBackend(newDefaultFlags())
+	err := buildBackendForTest(newDefaultFlags())
 	if apperrors.AsAppError(err).Code != apperrors.CodeUsageError {
 		t.Fatalf("error = %v, want usage error", err)
 	}
@@ -87,8 +97,17 @@ func TestBuildBackendUnsupportedBackendFailsClosed(t *testing.T) {
 	f := newDefaultFlags()
 	f.Server = "http://127.0.0.1:8848"
 	f.Backend = "unsupported"
-	_, _, err := buildBackend(f)
+	err := buildBackendForTest(f)
 	if apperrors.AsAppError(err).Code != apperrors.CodeNotImplemented {
 		t.Fatalf("error = %v, want not implemented", err)
 	}
+}
+
+func buildBackendForTest(f *cliFlags) error {
+	item, name, err := resolvedContext(f)
+	if err != nil {
+		return err
+	}
+	_, _, err = buildBackendForResolvedContext(f, item, name)
+	return err
 }

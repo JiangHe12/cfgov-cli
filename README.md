@@ -48,6 +48,13 @@ If you used to run `nacos-cli` or `sentinel-cli`, **cfgov-cli replaces both** �
 | 🩺 **Ops & DX** | `doctor` diagnostics, shell `completion`, OpenTelemetry traces/metrics, "did you mean…" suggestions, JSON output everywhere. |
 | 🔏 **Trusted supply chain** | binaries are **cosign-signed**, the npm package ships with **provenance**, and the installer verifies a **SHA-256** checksum. |
 
+Nacos and Apollo report `supportsCas=false`. Rule and feature-flag reads and
+new-blob creation remain available, but modifying or deleting an existing
+rule/flag blob requires an atomic revision precondition and therefore returns
+`NOT_IMPLEMENTED` on those two backends. The capability fields
+`supportsExistingRuleWrites` and `supportsExistingFlagWrites` expose that
+boundary explicitly.
+
 ---
 
 ## 📦 Install
@@ -127,11 +134,18 @@ cfgov derives the authorization and audit operator from the local OS username pl
 
 `--plan` is a hard target no-mutation override for backend writes and local mutations, including contexts/RBAC/credentials, pull/export, audit repair/prune, backup cleanup, and skill installation. It takes precedence over `--confirm`; command-local `--dry-run` flags remain supported, and write-command `--diff` paths that return a `ChangePlan` are previews too. Every successfully completed preview writes exactly one `command.preview` audit record with `status=skipped` and explicit `preview=true` / `dryRun=true` markers. If that record cannot be appended, the command fails. The governed audit log—including resource-read records for reads that actually occurred—is the preview's only permitted local mutation.
 
+Backend-backed R0 resource reads fail closed. Before backend client construction or any other backend access, cfgov durably writes a `ReadAuditRecord` intent; before printing a result or writing its file content, it durably writes the paired outcome with the same `operationId`. R0 role authorization runs after intent and before construction for every involved context; an unknown operator or any configured remote role source is denied, and that denial receives a failed outcome. An intent failure prevents backend construction, while an outcome failure withholds the result and returns `LOCAL_IO_ERROR`; backend failures still receive a failed outcome, and their original error remains in the cause chain if that outcome also fails. Backend and credential-store reads used by config, rule, flag, namespace, and context write plans or apply preflight state follow the same rule. Client construction is bound to the exact context snapshot authorized by the read intent, so a later context-file change cannot redirect the operation. Mutations with no remote preflight authorize at their elevated tier and persist their mutation intent before constructing a client. A batch or bounded `config listen` invocation uses one pair for the logical read; `--max-events` is capped at 1000 before allocation. Resource-specific audit metadata contains only domain-separated target/request fingerprints and bounded counts—never returned bodies or resource lists. Purely local validation, static `capabilities` / `version`, and dry-runs that do not access a backend are outside this requirement. `capabilities` advertises the contract as `supported.readAudit = "required-intent-outcome"` and `limits.maxListenEvents = 1000`.
+
 `config export`, `rule export`, and `flag export` are create-only. Generated names and every destination path are checked before the mutation intent; name or existing-file collisions fail in both plan and apply mode, and apply uses exclusive file creation so an export never overwrites an existing file.
 
 Every actual backend, credential, context, RBAC, or local-file mutation writes a synchronous `MutationAuditRecord` intent after authorization and final validation but before its first target write, then writes an outcome before returning ordinary success. Batch commands use one intent/outcome pair with aggregate `succeeded` / `failed` / `skipped` counts. Core v2 commit state is authoritative: only an outcome known not to be committed is atomically fsynced into the owner-only `<audit.log>.outcome-spool`; committed-post-commit-error and indeterminate outcomes are not blindly queued. Replay remains at-least-once for definitely uncommitted entries, but an indeterminate replay is renamed with `.indeterminate` and blocks later automatic replay until it is reconciled by `mutationId + phase`. Every incomplete path returns `AUDIT_INCOMPLETE`; an intent failure leaves the target untouched.
 
 New audit and telemetry records do not contain raw tickets, reasons, config/rule/flag bodies, or full error text. They retain domain-separated SHA-256 fingerprints, byte/item counts, revisions, and machine error codes. `audit query` also removes raw ticket/reason/diff/error-message fields from historical records before displaying them.
+
+Nacos trace output contains request/response metadata only, never request or
+response bodies; HTTP and business errors likewise never echo remote response
+bodies. TLS certificate verification cannot be disabled through a hidden
+environment variable.
 
 ---
 
@@ -236,7 +250,8 @@ cfgov service deregister --service <name> --ip <ip> --port <port> --yes --ticket
 ```bash
 # Local backup store
 cfgov backup list  [--context-filter <c>] [--namespace <n>] [--data-id <k>] -o json
-cfgov backup clean (--before <30d|RFC3339|YYYY-MM-DD> | --keep-last <n>) [--confirm]   # dry-run unless --confirm
+cfgov backup clean (--before <30d|RFC3339|YYYY-MM-DD> | --keep-last <n>)              # dry-run
+cfgov backup clean (--before <…> | --keep-last <n>) --confirm --yes --ticket <t> --allow-backup-clean # R3
 
 # Audit (tamper-evident)
 cfgov audit query  [--since 24h] [--type <t>] [--operator <o>] [--status <s>] [--limit 100] -o json
@@ -258,6 +273,8 @@ cfgov ctx set <name> --backend consul --server <host:port> [--consul-key-prefix 
                      [--consul-ca-cert <f>] [--consul-client-cert <f>] [--consul-client-key <f>]
 cfgov ctx use|list|current|delete|export|import|migrate-credentials|test
 cfgov ctx role set|unset|list <context>
+#   Kubernetes exec credential plugins are rejected fail-closed because client-go connects plugin stderr
+#   directly to the process; use a static bearer token or client certificate in the selected kubeconfig context.
 #   Context create/replace/switch/import/credential migration is R3:
 #     --yes --ticket <human-ticket> --allow-context-change
 #   Context deletion is R3: --yes --ticket <human-ticket> --allow-context-delete
@@ -284,7 +301,7 @@ cfgov install <agent> --skills  # install the cfgov AI skill into an agent (clau
 cfgov version
 ```
 
-> `backup clean` and `audit prune` **only delete local files** and default to a **dry-run**. Confirmed audit pruning and audit repair are fixed R3 evidence mutations: they require `--confirm`, `--yes`, a non-empty `--ticket`, and their exact `--allow-audit-prune` / `--allow-audit-repair` flag. They authorize against the persisted current-context policy (or an empty policy when no current context exists); `--context` does not replace that policy. Preview returns before authorization and does not delete or rewrite audit evidence. Core v2 holds the audit-path lock, binds confirmation to the exact preview set, fully verifies history, and returns `CONFLICT` if that set changed. Pruning supports authenticated v2 history and durably advances its checkpoint before deletion. Repair remains limited to legacy history. Both operations write mutation intent/outcome to the sibling `.<audit-base>-control` log so the target is not converted or polluted by control-log rotations.
+> `backup clean` and `audit prune` **only delete local files** and default to a **dry-run**. Confirmed backup cleanup is a fixed R3 mutation requiring `--confirm`, `--yes`, a non-empty `--ticket`, and `--allow-backup-clean`. Confirmed audit pruning and repair are fixed R3 evidence mutations requiring the equivalent inputs and their exact `--allow-audit-prune` / `--allow-audit-repair` flag. All three authorize against the persisted current-context policy (or an empty policy when no current context exists); `--context` does not replace that policy. Preview returns before authorization and does not delete or rewrite the target. Core v2 holds the audit-path lock for evidence pruning/repair, binds confirmation to the exact preview set, fully verifies history, and returns `CONFLICT` if that set changed. Pruning supports authenticated v2 history and durably advances its checkpoint before deletion. Repair remains limited to legacy history. Audit prune/repair write mutation intent/outcome to the sibling `.<audit-base>-control` log so the target is not converted or polluted by control-log rotations.
 </details>
 
 ---
@@ -311,7 +328,7 @@ cfgov install claude --skills     # also: codex, opencode, copilot, cursor, wind
 - **Verified release tags** — publication starts only from a GitHub-verified signed annotated tag that exactly matches `package.json`, `CHANGELOG.md`, and freshly fetched `origin/main`; CI and real integrations rerun on that tag commit.
 - **Signed binaries** — every release artifact is signed with [cosign](https://github.com/sigstore/cosign) (keyless / OIDC). A `checksums.txt` (also signed) covers all platforms.
 - **npm provenance** — the npm package is published from CI via OpenID Connect with [provenance attestations](https://docs.npmjs.com/generating-provenance-statements) linking it to this exact repo and workflow.
-- **Verified installs** — the npm postinstall downloads the binary over an allow-listed host and checks its SHA-256 against the signed `checksums.txt` before installing.
+- **Verified installs** — the npm postinstall trusts only the six platform SHA-256 digests embedded in `package.json` and covered by npm provenance. Mirrors may supply binary bytes but never verification data; verified bytes are fsynced and atomically replace the previous binary. There is no verification bypass.
 - **Tamper-evident audit** — `cfgov audit verify --strict` re-walks the hash chain and reports any gap or modification.
 
 ---

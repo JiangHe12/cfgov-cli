@@ -31,6 +31,8 @@ import (
 	"github.com/JiangHe12/opskit-core/v2/apperrors"
 	"go.etcd.io/etcd/api/v3/mvccpb"
 	clientv3 "go.etcd.io/etcd/client/v3"
+	"go.uber.org/zap"
+	"google.golang.org/grpc/grpclog"
 
 	"github.com/JiangHe12/cfgov-cli/internal/cfgov"
 	"github.com/JiangHe12/cfgov-cli/internal/flag"
@@ -85,6 +87,13 @@ var (
 	_ cfgov.FlagStore = (*Backend)(nil)
 )
 
+func init() {
+	// grpc-go and ETCD_CLIENT_DEBUG use a process-global logger that cannot be
+	// routed through a client config. Keep it silent; cfgov emits its own
+	// redacted backend diagnostics.
+	grpclog.SetLoggerV2(grpclog.NewLoggerV2(io.Discard, io.Discard, io.Discard))
+}
+
 func ValidateEndpoints(raw string) error {
 	_, err := normalizeEndpoints(raw)
 	return err
@@ -133,6 +142,7 @@ func New(opts Options) (*Backend, error) {
 			Username:    opts.Username,
 			Password:    opts.Password,
 			TLS:         tlsConfig,
+			Logger:      zap.NewNop(),
 		})
 		if err != nil {
 			return nil, apperrors.New(apperrors.CodeBackendUnreachable, "failed to create etcd client", err)

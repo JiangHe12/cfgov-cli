@@ -72,6 +72,11 @@ type plannedFlagWrite struct {
 	deleteBlob   bool
 }
 
+type flagWritePreflight struct {
+	Plan  flagWritePlan
+	Write plannedFlagWrite
+}
+
 func flagCreateCmd(f *cliFlags) *cobra.Command {
 	opts := flagWriteOptions{action: "create"}
 	cmd := &cobra.Command{
@@ -168,51 +173,49 @@ func runFlagSingleWrite(ctx context.Context, f *cliFlags, opts flagWriteOptions)
 	if err != nil {
 		return err
 	}
-	backend, store, ctxMeta, err := buildFlagStore(f)
+	backendRead, err := runFlagWritePreflight(
+		ctx,
+		f,
+		opts,
+		safety.R1,
+		map[string]any{"localKey": flag.Key(local)},
+		func(current flagSetResult) ([]flag.FeatureFlag, error) {
+			return planSingleFlagSet(opts, current.Flags, local)
+		},
+	)
 	if err != nil {
 		return err
 	}
-	current, err := readFlagSet(ctx, backend, store, opts.app)
-	if err != nil {
-		return err
-	}
-	next, err := planSingleFlagSet(opts, current.Flags, local)
-	if err != nil {
-		return err
-	}
-	write, plan, err := plannedFlagSetWrite(store, opts.app, safety.R1, opts.action, current, next)
-	if err != nil {
-		return err
-	}
+	backend, ctxMeta := backendRead.Backend, backendRead.Context
+	write, plan := backendRead.Value.Write, backendRead.Value.Plan
 	applyExpectedFlagRevision(opts.expectedRevision, &write, &plan)
-	write.backupBefore = opts.action == "update" || current.Count > 0
-	return applyFlagWrites(ctx, f, backend, ctxMeta, plan, []plannedFlagWrite{write}, safety.R1, "")
+	write.backupBefore = opts.action == "update" || write.current.Count > 0
+	return applyFlagWrites(ctx, f, backend, ctxMeta, plan, []plannedFlagWrite{write}, safety.R1, "", backendRead.ContextName)
 }
 
 func runFlagDelete(ctx context.Context, f *cliFlags, opts flagWriteOptions) error {
 	if opts.all == (opts.key != "") {
 		return apperrors.New(apperrors.CodeUsageError, "exactly one of --key or --all is required", nil)
 	}
-	backend, store, ctxMeta, err := buildFlagStore(f)
+	backendRead, err := runFlagWritePreflight(
+		ctx,
+		f,
+		opts,
+		safety.R2,
+		map[string]any{"key": opts.key, "all": opts.all},
+		func(current flagSetResult) ([]flag.FeatureFlag, error) {
+			return planDeleteFlagSet(opts, current.Flags)
+		},
+	)
 	if err != nil {
 		return err
 	}
-	current, err := readFlagSet(ctx, backend, store, opts.app)
-	if err != nil {
-		return err
-	}
-	next, err := planDeleteFlagSet(opts, current.Flags)
-	if err != nil {
-		return err
-	}
-	write, plan, err := plannedFlagSetWrite(store, opts.app, safety.R2, opts.action, current, next)
-	if err != nil {
-		return err
-	}
+	backend, ctxMeta := backendRead.Backend, backendRead.Context
+	write, plan := backendRead.Value.Write, backendRead.Value.Plan
 	applyExpectedFlagRevision(opts.expectedRevision, &write, &plan)
-	write.backupBefore = current.Count > 0
+	write.backupBefore = write.current.Count > 0
 	write.deleteBlob = opts.all
-	return applyFlagWrites(ctx, f, backend, ctxMeta, plan, []plannedFlagWrite{write}, safety.R2, allowProductionFlagDelete)
+	return applyFlagWrites(ctx, f, backend, ctxMeta, plan, []plannedFlagWrite{write}, safety.R2, allowProductionFlagDelete, backendRead.ContextName)
 }
 
 func runFlagImport(ctx context.Context, f *cliFlags, opts flagWriteOptions) error {
@@ -235,21 +238,75 @@ func runFlagSetUpsert(ctx context.Context, f *cliFlags, opts flagWriteOptions, a
 	if len(next) == 0 && action == "import" {
 		return apperrors.New(apperrors.CodeUsageError, "no feature flags found", nil)
 	}
-	backend, store, ctxMeta, err := buildFlagStore(f)
+	backendRead, err := runFlagWritePreflight(
+		ctx,
+		f,
+		opts,
+		safety.R1,
+		map[string]any{"nextCount": len(next), "nextSha256": flagSetSHA256(next)},
+		func(flagSetResult) ([]flag.FeatureFlag, error) {
+			return next, nil
+		},
+	)
 	if err != nil {
 		return err
 	}
-	current, err := readFlagSet(ctx, backend, store, opts.app)
-	if err != nil {
-		return err
-	}
-	write, plan, err := plannedFlagSetWrite(store, opts.app, safety.R1, action, current, next)
-	if err != nil {
-		return err
-	}
+	backend, ctxMeta := backendRead.Backend, backendRead.Context
+	write, plan := backendRead.Value.Write, backendRead.Value.Plan
 	applyExpectedFlagRevision(opts.expectedRevision, &write, &plan)
-	write.backupBefore = action == "rollback" || current.Count > 0
-	return applyFlagWrites(ctx, f, backend, ctxMeta, plan, []plannedFlagWrite{write}, safety.R1, "")
+	write.backupBefore = action == "rollback" || write.current.Count > 0
+	return applyFlagWrites(ctx, f, backend, ctxMeta, plan, []plannedFlagWrite{write}, safety.R1, "", backendRead.ContextName)
+}
+
+func runFlagWritePreflight(
+	ctx context.Context,
+	f *cliFlags,
+	opts flagWriteOptions,
+	risk safety.Risk,
+	request map[string]any,
+	next func(flagSetResult) ([]flag.FeatureFlag, error),
+) (mandatoryBackendReadResult[flagWritePreflight], error) {
+	request["action"] = opts.action
+	request["app"] = opts.app
+	request["expectedRevisionSha256"] = mutationAuditFingerprint(
+		"flag."+opts.action+".expected-revision",
+		[]byte(opts.expectedRevision),
+	)
+	return runMandatoryBackendRead(
+		f,
+		"flag."+opts.action+".plan",
+		"flag",
+		opts.app,
+		request,
+		func(backend cfgov.Backend, _ cfgovctx.Context) (flagWritePreflight, error) {
+			backend, store, err := ensureFlagStore(backend)
+			if err != nil {
+				return flagWritePreflight{}, err
+			}
+			current, err := readFlagSet(ctx, backend, store, opts.app)
+			if err != nil {
+				return flagWritePreflight{}, err
+			}
+			nextFlags, err := next(current)
+			if err != nil {
+				return flagWritePreflight{}, err
+			}
+			write, plan, err := plannedFlagSetWrite(store, opts.app, risk, opts.action, current, nextFlags)
+			if err != nil {
+				return flagWritePreflight{}, err
+			}
+			return flagWritePreflight{Plan: plan, Write: write}, nil
+		},
+		func(flagWritePreflight) int { return 1 },
+	)
+}
+
+func flagSetSHA256(items []flag.FeatureFlag) string {
+	data, err := marshalFlagSet(items)
+	if err != nil {
+		return ""
+	}
+	return sha256Bytes(data)
 }
 
 func readOneFlagForWrite(path string) (flag.FeatureFlag, error) {
@@ -337,12 +394,19 @@ func plannedFlagSetWrite(store cfgov.FlagStore, app string, risk safety.Risk, ac
 	return plannedFlagWrite{coord: coord, current: current, next: next, payload: payload, planItem: item}, plan, nil
 }
 
-func applyFlagWrites(ctx context.Context, f *cliFlags, backend cfgov.Backend, ctxMeta cfgovctx.Context, plan flagWritePlan, writes []plannedFlagWrite, risk safety.Risk, required safety.AllowFlag) error { //nolint:gocyclo // Preview, policy, backup, intent/outcome, and ordered writes are one governed transaction flow.
+func applyFlagWrites(ctx context.Context, f *cliFlags, backend cfgov.Backend, ctxMeta cfgovctx.Context, plan flagWritePlan, writes []plannedFlagWrite, risk safety.Risk, required safety.AllowFlag, contextNames ...string) error { //nolint:gocyclo // Preview, policy, backup, intent/outcome, and ordered writes are one governed transaction flow.
+	contextName := f.contextName()
+	if len(contextNames) > 0 && contextNames[0] != "" {
+		contextName = contextNames[0]
+	}
+	if err := validateFlagWriteCapabilities(backend.Capabilities(), writes); err != nil {
+		return err
+	}
 	plan.DryRun = isPlanOnly(f)
 	if plan.DryRun {
 		markPreview(f)
 		appendFlagAudit(f, ctxMeta, plan.Action, plan.App, audit.StatusSuccess, flagWriteAudit(plan), nil)
-		return targetJSONData(f, "ChangePlan", plan, operationTargetFromBackend(f, backend), operationTargetWrite)
+		return targetJSONData(f, "ChangePlan", plan, operationTargetFromDescription(contextName, backend.Describe()), operationTargetWrite)
 	}
 	if err := validateBackupPolicy(f, ctxMeta); err != nil {
 		return err
@@ -350,7 +414,7 @@ func applyFlagWrites(ctx context.Context, f *cliFlags, backend cfgov.Backend, ct
 	if err := validateMandatoryFlagBackup(f, writes); err != nil {
 		return err
 	}
-	if err := authorize(f, risk, ctxMeta, required); err != nil {
+	if err := authorizeForContext(f, risk, ctxMeta, required, contextName); err != nil {
 		return err
 	}
 	mutation, err := beginSchemaMutationAudit(
@@ -364,6 +428,7 @@ func applyFlagWrites(ctx context.Context, f *cliFlags, backend cfgov.Backend, ct
 		plan.Summary.Create,
 		plan.Summary.Update,
 		plan.Summary.Delete,
+		contextName,
 	)
 	if err != nil {
 		return err
@@ -404,7 +469,24 @@ func applyFlagWrites(ctx context.Context, f *cliFlags, backend cfgov.Backend, ct
 		}
 	}
 	appendFlagAudit(f, ctxMeta, plan.Action, plan.App, audit.StatusSuccess, flagWriteAudit(plan), nil)
-	return targetJSONData(f, "ChangeResult", map[string]any{"resourceType": "flag", "action": plan.Action, "app": plan.App, "summary": plan.Summary, "items": plan.Items, "backup": backups}, operationTargetFromBackend(f, backend), operationTargetWrite)
+	return targetJSONData(f, "ChangeResult", map[string]any{"resourceType": "flag", "action": plan.Action, "app": plan.App, "summary": plan.Summary, "items": plan.Items, "backup": backups}, operationTargetFromDescription(contextName, backend.Describe()), operationTargetWrite)
+}
+
+func validateFlagWriteCapabilities(capabilities cfgov.Capabilities, writes []plannedFlagWrite) error {
+	if capabilities.SupportsCAS {
+		return nil
+	}
+	for _, write := range writes {
+		if write.planItem.Action == "skip" || write.current.Revision == "" {
+			continue
+		}
+		return apperrors.New(
+			apperrors.CodeNotImplemented,
+			fmt.Sprintf("%s does not support the atomic revision precondition required to modify an existing flag set", capabilities.Backend),
+			nil,
+		)
+	}
+	return nil
 }
 
 func validateMandatoryFlagBackup(f *cliFlags, writes []plannedFlagWrite) error {

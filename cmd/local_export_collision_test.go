@@ -178,7 +178,7 @@ func exportTestArgs(home string, serverURL string) []string {
 func assertNoExportMutationIntent(t *testing.T, home string) {
 	t.Helper()
 	for _, record := range readRawAuditRecords(t, home) {
-		if record["kind"] == mutationAuditKind || record["phase"] == mutationAuditPhaseIntent {
+		if record["kind"] == mutationAuditKind {
 			t.Fatalf("export preflight collision wrote mutation audit before validation: %#v", record)
 		}
 	}

@@ -3,6 +3,8 @@ package etcd
 import (
 	"context"
 	"errors"
+	"io"
+	"os"
 	"strings"
 	"testing"
 	"time"
@@ -10,9 +12,35 @@ import (
 	"github.com/JiangHe12/opskit-core/v2/apperrors"
 	"go.etcd.io/etcd/api/v3/mvccpb"
 	clientv3 "go.etcd.io/etcd/client/v3"
+	"google.golang.org/grpc/grpclog"
 
 	"github.com/JiangHe12/cfgov-cli/internal/cfgov"
 )
+
+func TestEtcdGRPCLibraryLoggerIsSilent(t *testing.T) {
+	reader, writer, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	oldStderr := os.Stderr
+	os.Stderr = writer
+	defer func() {
+		os.Stderr = oldStderr
+		_ = writer.Close()
+		_ = reader.Close()
+	}()
+
+	grpclog.Errorf("must not reach stderr: token=library-secret")
+	_ = writer.Close()
+	os.Stderr = oldStderr
+	output, err := io.ReadAll(reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(output) != 0 {
+		t.Fatalf("gRPC library logger wrote to stderr: %q", output)
+	}
+}
 
 func TestNewValidatesEtcdOptionsFailClosed(t *testing.T) {
 	t.Parallel()

@@ -147,6 +147,59 @@ func TestContextImportValidationAndLockedConflictWriteNoCredential(t *testing.T)
 	}
 }
 
+func TestContextImportReadIntentFailureDoesNotTouchCredentialBackend(t *testing.T) {
+	backend := &atomicImportCredentialBackend{values: map[string]string{}}
+	f, _, importPath := atomicImportTestSetup(t, backend, validAtomicImportContext("new-secret"))
+	f.mutationAudit = &mutationAuditRuntime{
+		appendRecord: func(string, mutationAuditRecord, audit.Options) (audit.AppendResult, error) {
+			return audit.AppendResult{State: audit.AppendCommitNotCommitted}, errors.New("injected read intent failure")
+		},
+		now:    func() time.Time { return time.Unix(1_700_000_000, 0).UTC() },
+		random: bytes.NewReader(bytes.Repeat([]byte{0x42}, 64)),
+	}
+
+	err := runCtxImport(f, importPath, "", false)
+	if got := apperrors.AsAppError(err).Code; got != apperrors.CodeLocalIOError {
+		t.Fatalf("runCtxImport() code = %s, want LOCAL_IO_ERROR (err=%v)", got, err)
+	}
+	if backend.gets != 0 || backend.puts != 0 || backend.deletes != 0 {
+		t.Fatalf("credential calls = get:%d put:%d delete:%d, want 0/0/0", backend.gets, backend.puts, backend.deletes)
+	}
+}
+
+func TestContextImportReadOutcomeFailureDoesNotMutateCredentialBackend(t *testing.T) {
+	backend := &atomicImportCredentialBackend{values: map[string]string{}}
+	f, _, importPath := atomicImportTestSetup(t, backend, validAtomicImportContext("new-secret"))
+	appendCalls := 0
+	f.mutationAudit = &mutationAuditRuntime{
+		appendRecord: func(string, mutationAuditRecord, audit.Options) (audit.AppendResult, error) {
+			appendCalls++
+			if appendCalls == 2 {
+				return audit.AppendResult{State: audit.AppendCommitNotCommitted}, errors.New("injected read outcome failure")
+			}
+			return audit.AppendResult{State: audit.AppendCommitCommitted}, nil
+		},
+		now:    func() time.Time { return time.Unix(1_700_000_000, int64(appendCalls)).UTC() },
+		random: bytes.NewReader(bytes.Repeat([]byte{0x43}, 64)),
+	}
+
+	err := runCtxImport(f, importPath, "", false)
+
+	if got := apperrors.AsAppError(err).Code; got != apperrors.CodeLocalIOError {
+		t.Fatalf("runCtxImport() code = %s, want LOCAL_IO_ERROR (err=%v)", got, err)
+	}
+	if backend.gets != 1 || backend.puts != 0 || backend.deletes != 0 {
+		t.Fatalf("credential calls = get:%d put:%d delete:%d, want 1/0/0", backend.gets, backend.puts, backend.deletes)
+	}
+	cfg, loadErr := cfgovctx.Load()
+	if loadErr != nil {
+		t.Fatal(loadErr)
+	}
+	if _, exists := cfg.Contexts["target"]; exists {
+		t.Fatalf("context was imported after failed credential read outcome")
+	}
+}
+
 func TestContextImportConfigFailureDeletesNewCredentialWithUncanceledCompensation(t *testing.T) {
 	backend := &atomicImportCredentialBackend{values: map[string]string{}}
 	item := validAtomicImportContext("new-secret")
@@ -980,10 +1033,16 @@ func assertCredentialMutationOutcome(
 	wantCompensation string,
 ) {
 	t.Helper()
-	if len(records) != 2 || records[1].Outcome == nil {
-		t.Fatalf("mutation records = %#v, want intent and outcome", records)
+	mutationRecords := make([]mutationAuditRecord, 0, 2)
+	for _, record := range records {
+		if record.Kind == mutationAuditKind {
+			mutationRecords = append(mutationRecords, record)
+		}
 	}
-	outcome := records[1].Outcome
+	if len(mutationRecords) != 2 || mutationRecords[1].Outcome == nil {
+		t.Fatalf("mutation records = %#v, want intent and outcome", mutationRecords)
+	}
+	outcome := mutationRecords[1].Outcome
 	if outcome.Status != wantStatus ||
 		outcome.ErrorCode != string(wantCode) ||
 		outcome.Succeeded != wantSucceeded ||
@@ -1036,7 +1095,7 @@ func atomicImportTestSetup(
 			return result, nil
 		},
 		now:    func() time.Time { return time.Unix(1_700_000_000, 0).UTC() },
-		random: bytes.NewReader(bytes.Repeat([]byte{0x41}, 16)),
+		random: bytes.NewReader(bytes.Repeat([]byte{0x41}, 4096)),
 	}
 	f.contextImport = &contextImportRuntime{
 		newCredentialBackend: func(cfgovctx.Context) (credstore.Backend, error) {

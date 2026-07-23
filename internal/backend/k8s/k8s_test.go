@@ -5,6 +5,9 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"io"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -16,10 +19,87 @@ import (
 	apiwatch "k8s.io/apimachinery/pkg/watch"
 	"k8s.io/client-go/kubernetes/fake"
 	k8stesting "k8s.io/client-go/testing"
+	"k8s.io/klog/v2"
 
 	"github.com/JiangHe12/cfgov-cli/internal/cfgov"
 	"github.com/JiangHe12/cfgov-cli/internal/rule"
 )
+
+func TestKubernetesGlobalLibraryLoggerIsSilent(t *testing.T) {
+	reader, writer, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	oldStderr := os.Stderr
+	os.Stderr = writer
+	defer func() {
+		os.Stderr = oldStderr
+		_ = writer.Close()
+		_ = reader.Close()
+	}()
+
+	klog.Errorf("must not reach stderr: token=library-secret")
+	_ = writer.Close()
+	os.Stderr = oldStderr
+	output, err := io.ReadAll(reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(output) != 0 {
+		t.Fatalf("Kubernetes library logger wrote to stderr: %q", output)
+	}
+}
+
+func TestKubernetesWarningsUseRedactedWriter(t *testing.T) {
+	t.Parallel()
+
+	const secret = "warning-secret"
+	var output bytes.Buffer
+	handler := redactedWarningHandler{out: &output}
+	handler.HandleWarningHeaderWithContext(context.Background(), 299, "kube-apiserver", "deprecated token="+secret)
+
+	got := output.String()
+	if strings.Contains(got, secret) || !strings.Contains(got, "[REDACTED]") {
+		t.Fatalf("Kubernetes warning was not redacted: %q", got)
+	}
+}
+
+func TestBuildRESTConfigRejectsExecCredentialPluginBeforeExecution(t *testing.T) {
+	t.Parallel()
+
+	path := filepath.Join(t.TempDir(), "kubeconfig")
+	config := `apiVersion: v1
+kind: Config
+clusters:
+- name: cluster
+  cluster:
+    server: https://kubernetes.example.invalid
+contexts:
+- name: selected
+  context:
+    cluster: cluster
+    user: exec-user
+current-context: selected
+users:
+- name: exec-user
+  user:
+    exec:
+      apiVersion: client.authentication.k8s.io/v1
+      command: must-not-be-executed
+      interactiveMode: Never
+`
+	if err := os.WriteFile(path, []byte(config), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	_, err := buildRESTConfig(path, "", time.Second)
+	if got := apperrors.AsAppError(err).Code; got != apperrors.CodeNotImplemented {
+		t.Fatalf("buildRESTConfig() error = %v, code = %s, want NOT_IMPLEMENTED", err, got)
+	}
+	if strings.Contains(err.Error(), "exec-user") || strings.Contains(err.Error(), "must-not-be-executed") {
+		t.Fatalf("exec credential rejection exposed kubeconfig details: %v", err)
+	}
+}
 
 func TestValidateKeyFailClosed(t *testing.T) {
 	t.Parallel()

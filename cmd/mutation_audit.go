@@ -28,6 +28,7 @@ const (
 	codeAuditIncomplete        apperrors.ErrorCode = "AUDIT_INCOMPLETE"
 	mutationAuditAPIVersion    string              = "cfgov-cli.io/mutation-audit/v1"
 	mutationAuditKind          string              = "MutationAuditRecord"
+	readAuditKind              string              = "ReadAuditRecord"
 	mutationAuditPhaseIntent   string              = "intent"
 	mutationAuditPhaseOutcome  string              = "outcome"
 	mutationAuditSpoolSuffix   string              = ".outcome-spool"
@@ -54,6 +55,7 @@ type mutationAuditOutcome struct {
 	Uncertain          int    `json:"uncertain,omitempty"`
 	Revision           string `json:"revision,omitempty"`
 	CompensationStatus string `json:"compensationStatus,omitempty"`
+	ResultCount        int    `json:"resultCount,omitempty"`
 }
 
 type mutationAuditSpec struct {
@@ -63,13 +65,15 @@ type mutationAuditSpec struct {
 	Target      audit.EventTarget
 	Metadata    mutationAuditMetadata
 	AuditPath   string
+	Read        bool
 }
 
 type mutationAuditRecord struct {
 	APIVersion string `json:"apiVersion"`
 	Kind       string `json:"kind"`
 	audit.Event
-	MutationID        string                `json:"mutationId"`
+	MutationID        string                `json:"mutationId,omitempty"`
+	OperationID       string                `json:"operationId,omitempty"`
 	Phase             string                `json:"phase"`
 	Action            string                `json:"action"`
 	TicketFingerprint string                `json:"ticketFingerprint,omitempty"`
@@ -265,15 +269,26 @@ func (handle *mutationAuditHandle) record(phase string, outcome *mutationAuditOu
 	if contextName == "" {
 		contextName = handle.f.contextName()
 	}
-	ticketFingerprint, ticketBytes := sensitiveAuditFingerprint("ticket", handle.f.Ticket)
-	reasonFingerprint, reasonBytes := sensitiveAuditFingerprint("reason", handle.f.Reason)
+	kind := mutationAuditKind
+	mutationID := handle.id
+	operationID := ""
+	ticketFingerprint, ticketBytes := "", 0
+	reasonFingerprint, reasonBytes := "", 0
+	if handle.spec.Read {
+		kind = readAuditKind
+		mutationID = ""
+		operationID = handle.id
+	} else {
+		ticketFingerprint, ticketBytes = sensitiveAuditFingerprint("ticket", handle.f.Ticket)
+		reasonFingerprint, reasonBytes = sensitiveAuditFingerprint("reason", handle.f.Reason)
+	}
 	status := audit.StatusPending
 	if outcome != nil {
 		status = outcome.Status
 	}
 	return mutationAuditRecord{
 		APIVersion: mutationAuditAPIVersion,
-		Kind:       mutationAuditKind,
+		Kind:       kind,
 		Event: audit.Event{
 			Timestamp: mutationAuditRuntimeFor(handle.f).now().UTC(),
 			EventType: audit.EventType(handle.spec.Action + "." + phase),
@@ -286,7 +301,8 @@ func (handle *mutationAuditHandle) record(phase string, outcome *mutationAuditOu
 			Target: handle.spec.Target,
 			Status: status,
 		},
-		MutationID:        handle.id,
+		MutationID:        mutationID,
+		OperationID:       operationID,
 		Phase:             phase,
 		Action:            handle.spec.Action,
 		TicketFingerprint: ticketFingerprint,
@@ -324,6 +340,7 @@ func beginSchemaMutationAudit(
 	creates int,
 	updates int,
 	deletes int,
+	contextNames ...string,
 ) (*mutationAuditHandle, error) {
 	if creates+updates+deletes == 0 {
 		return nil, nil
@@ -334,9 +351,14 @@ func beginSchemaMutationAudit(
 	metadata.Creates = creates
 	metadata.Updates = updates
 	metadata.Deletes = deletes
+	contextName := ""
+	if len(contextNames) > 0 {
+		contextName = contextNames[0]
+	}
 	return beginMutationAudit(f, mutationAuditSpec{
-		Action:  eventAction,
-		Context: contextMeta,
+		Action:      eventAction,
+		ContextName: contextName,
+		Context:     contextMeta,
 		Target: audit.EventTarget{
 			App:          app,
 			ResourceType: resourceType,
@@ -459,7 +481,7 @@ func writeMutationSpoolRecord(_ *cliFlags, spoolPath string, record mutationAudi
 	if err != nil {
 		return err
 	}
-	name := fmt.Sprintf("%020d-%s.json", sequence, record.MutationID)
+	name := fmt.Sprintf("%020d-%s.json", sequence, auditRecordID(record))
 	finalPath := filepath.Join(spoolPath, name)
 	tempPath := finalPath + ".tmp"
 	file, err := os.OpenFile(tempPath, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600) //nolint:gosec // Path is inside the validated owner-only spool.
@@ -593,22 +615,22 @@ func replayMutationAuditSpoolLocked(f *cliFlags, auditPath, spoolPath string) er
 		switch result.State {
 		case audit.AppendCommitCommitted:
 			if appendErr != nil {
-				return auditStateIncompleteError(record.MutationID, result.State)
+				return auditStateIncompleteError(auditRecordID(record), result.State)
 			}
 		case audit.AppendCommitCommittedPostCommitError:
 			if err := removeReplayedMutationSpool(path, spoolPath); err != nil {
 				return err
 			}
-			return auditStateIncompleteError(record.MutationID, result.State)
+			return auditStateIncompleteError(auditRecordID(record), result.State)
 		case audit.AppendCommitIndeterminate:
 			if err := markMutationSpoolIndeterminate(path, spoolPath); err != nil {
-				return auditIncompleteError(record.MutationID, true)
+				return auditIncompleteError(auditRecordID(record), true)
 			}
-			return auditStateIncompleteError(record.MutationID, result.State)
+			return auditStateIncompleteError(auditRecordID(record), result.State)
 		case audit.AppendCommitNotCommitted:
-			return auditIncompleteError(record.MutationID, false)
+			return auditIncompleteError(auditRecordID(record), false)
 		default:
-			return auditStateIncompleteError(record.MutationID, result.State)
+			return auditStateIncompleteError(auditRecordID(record), result.State)
 		}
 		if err := removeReplayedMutationSpool(path, spoolPath); err != nil {
 			return err
@@ -721,12 +743,17 @@ func readMutationSpoolRecord(path string) (mutationAuditRecord, error) {
 }
 
 func validateMutationSpoolRecord(record mutationAuditRecord) error { //nolint:gocyclo // The complete fail-closed spool schema is checked in one predicate.
+	recordID := auditRecordID(record)
+	isMutation := record.Kind == mutationAuditKind
+	isRead := record.Kind == readAuditKind
 	if record.APIVersion != mutationAuditAPIVersion ||
-		record.Kind != mutationAuditKind ||
+		(!isMutation && !isRead) ||
 		record.Phase != mutationAuditPhaseOutcome ||
 		record.Action == "" ||
 		len(record.Action) > 256 ||
-		len(record.MutationID) != 32 ||
+		len(recordID) != 32 ||
+		(isMutation && (record.MutationID == "" || record.OperationID != "")) ||
+		(isRead && (record.OperationID == "" || record.MutationID != "")) ||
 		record.Outcome == nil ||
 		record.Timestamp.IsZero() ||
 		record.EventType != audit.EventType(record.Action+"."+mutationAuditPhaseOutcome) ||
@@ -741,11 +768,11 @@ func validateMutationSpoolRecord(record mutationAuditRecord) error { //nolint:go
 		record.RoleFetch != nil {
 		return apperrors.New(apperrors.CodeLocalIOError, "invalid mutation outcome spool record", nil)
 	}
-	if record.MutationID != strings.ToLower(record.MutationID) {
-		return apperrors.New(apperrors.CodeLocalIOError, "invalid mutation outcome spool mutation id", nil)
+	if recordID != strings.ToLower(recordID) {
+		return apperrors.New(apperrors.CodeLocalIOError, "invalid mutation outcome spool record id", nil)
 	}
-	if _, err := hex.DecodeString(record.MutationID); err != nil {
-		return apperrors.New(apperrors.CodeLocalIOError, "invalid mutation outcome spool mutation id", nil)
+	if _, err := hex.DecodeString(recordID); err != nil {
+		return apperrors.New(apperrors.CodeLocalIOError, "invalid mutation outcome spool record id", nil)
 	}
 	if !validOptionalMutationAuditFingerprint(record.TicketFingerprint, record.TicketBytes) ||
 		!validOptionalMutationAuditFingerprint(record.ReasonFingerprint, record.ReasonBytes) ||
@@ -753,6 +780,7 @@ func validateMutationSpoolRecord(record mutationAuditRecord) error { //nolint:go
 		return apperrors.New(apperrors.CodeLocalIOError, "invalid mutation outcome spool fingerprint", nil)
 	}
 	if record.Metadata.Items < 0 ||
+		record.Metadata.Items > 1_000_000_000 ||
 		record.Metadata.Creates < 0 ||
 		record.Metadata.Updates < 0 ||
 		record.Metadata.Deletes < 0 ||
@@ -760,6 +788,8 @@ func validateMutationSpoolRecord(record mutationAuditRecord) error { //nolint:go
 		record.Outcome.Failed < 0 ||
 		record.Outcome.Skipped < 0 ||
 		record.Outcome.Uncertain < 0 ||
+		record.Outcome.ResultCount < 0 ||
+		record.Outcome.ResultCount > 1_000_000_000 ||
 		len(record.Metadata.Revision) > 256 ||
 		len(record.Outcome.Revision) > 256 ||
 		len(record.Outcome.ErrorCode) > 128 ||
@@ -771,6 +801,27 @@ func validateMutationSpoolRecord(record mutationAuditRecord) error { //nolint:go
 		len(record.Target.ResourceType) > 512 ||
 		len(record.Target.Resource) > 512 {
 		return apperrors.New(apperrors.CodeLocalIOError, "invalid mutation outcome spool fields", nil)
+	}
+	if isRead &&
+		(record.TicketFingerprint != "" ||
+			record.TicketBytes != 0 ||
+			record.ReasonFingerprint != "" ||
+			record.ReasonBytes != 0 ||
+			record.Metadata.PayloadBytes > 1_000_000_000 ||
+			record.Metadata.Revision != "" ||
+			record.Metadata.Creates != 0 ||
+			record.Metadata.Updates != 0 ||
+			record.Metadata.Deletes != 0 ||
+			record.Outcome.Revision != "" ||
+			record.Outcome.CompensationStatus != "" ||
+			record.Outcome.Uncertain != 0 ||
+			record.Target.App != "" ||
+			record.Target.ResourceType == "" ||
+			!validReadAuditTarget(record.Target.Resource)) {
+		return apperrors.New(apperrors.CodeLocalIOError, "invalid read outcome spool record", nil)
+	}
+	if isMutation && record.Outcome.ResultCount != 0 {
+		return apperrors.New(apperrors.CodeLocalIOError, "invalid mutation outcome result count", nil)
 	}
 	total := uint64(record.Outcome.Succeeded) +
 		uint64(record.Outcome.Failed) +
@@ -792,6 +843,25 @@ func validateMutationSpoolRecord(record mutationAuditRecord) error { //nolint:go
 		return apperrors.New(apperrors.CodeLocalIOError, "invalid mutation outcome spool outcome", nil)
 	}
 	return nil
+}
+
+func auditRecordID(record mutationAuditRecord) string {
+	if record.Kind == readAuditKind {
+		return record.OperationID
+	}
+	return record.MutationID
+}
+
+func validReadAuditTarget(value string) bool {
+	if len(value) != len("sha256:")+sha256.Size*2 || !strings.HasPrefix(value, "sha256:") {
+		return false
+	}
+	encoded := strings.TrimPrefix(value, "sha256:")
+	if encoded != strings.ToLower(encoded) {
+		return false
+	}
+	decoded, err := hex.DecodeString(encoded)
+	return err == nil && len(decoded) == sha256.Size
 }
 
 func validCredentialCompensationStatus(status string) bool {

@@ -12,16 +12,20 @@ import (
 	"github.com/JiangHe12/cfgov-cli/internal/rule"
 )
 
-func TestCapabilitiesDoNotDeclareBackupCleanRiskContract(t *testing.T) {
+func TestCapabilitiesDeclareBackupCleanRiskContract(t *testing.T) {
 	t.Parallel()
 	data := buildCapabilities(newDefaultFlags(), currentBackendCapabilities(&cliFlags{Backend: "nacos"}))
 	if strings.Join(data.Domain.OutputFormats, ",") != "table,json,plain" {
 		t.Fatalf("outputFormats = %#v", data.Domain.OutputFormats)
 	}
+	foundClean := false
 	for _, item := range data.Domain.Commands {
-		if item.Noun == "backup" && item.Verb == "clean" {
-			t.Fatalf("backup clean must not be in R0-R3 risk table: %#v", item)
+		if item.Noun == "backup" && item.Verb == "clean" && item.Risk == "R3" && item.AllowFlag == "allow-backup-clean" {
+			foundClean = true
 		}
+	}
+	if !foundClean {
+		t.Fatal("backup clean R3 contract missing")
 	}
 	foundList := false
 	for _, item := range data.Domain.Commands {
@@ -31,6 +35,13 @@ func TestCapabilitiesDoNotDeclareBackupCleanRiskContract(t *testing.T) {
 	}
 	if !foundList {
 		t.Fatal("backup list R0 contract missing")
+	}
+	if data.Domain.Backend.SupportsExistingRuleWrites || data.Domain.Backend.SupportsExistingFlagWrites {
+		t.Fatal("Nacos capabilities claim existing rule/flag writes without CAS")
+	}
+	casData := buildCapabilities(newDefaultFlags(), currentBackendCapabilities(&cliFlags{Backend: "etcd"}))
+	if !casData.Domain.Backend.SupportsExistingRuleWrites || !casData.Domain.Backend.SupportsExistingFlagWrites {
+		t.Fatal("etcd capabilities hide CAS-backed existing rule/flag writes")
 	}
 }
 

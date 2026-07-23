@@ -55,8 +55,25 @@ CGO_ENABLED=1 go test -race -count=1 ./...
 
 - R0 reads are free but audited. R1 needs `--yes`. R2 also needs a non-empty
   `--ticket`. R3 also needs the exact command-specific `--allow-*` flag.
-- Protected contexts raise every operation one tier; authorization must go
-  through `opskit-core/safety` (`EffectiveRisk` + `Authorize`).
+- Backend-backed R0 resource reads are fail-closed: persist a `ReadAuditRecord`
+  intent before backend client construction or any other backend access and a
+  paired outcome with the same `operationId` before releasing any result or
+  file content. After intent and before construction, enforce R0 roles for all
+  involved contexts; unknown operators and remote role sources fail closed and
+  receive an outcome. Intent failure makes zero backend build/call attempts;
+  outcome failure withholds the result and returns `LOCAL_IO_ERROR` while
+  preserving any backend error in the cause chain. Backend and credential-store
+  reads used by config, rule, flag, namespace, and context write preflights
+  follow the same rule. Construct clients only from the exact context snapshot
+  authorized by the read intent; later config changes must not redirect them.
+  Mutations without a remote preflight authorize and persist their mutation
+  intent before client construction. One logical batch or bounded listen uses
+  one pair; reject listen counts above 1000 before allocation. Persist only
+  fingerprinted target/request metadata and bounded counts, never returned
+  bodies or lists.
+- Protected contexts raise mutating operations one tier; R0 role checks remain
+  R0. Authorization must go through `opskit-core/safety`
+  (`EffectiveRisk` + `Authorize`).
 - `cfgclass` is the only config-write risk source and must stay fail-closed and
   structure-aware: unknown/uncertain inputs escalate, never fall to R0.
 - Rule writes pass shallow validation; create/update/import/rollback also run
@@ -67,6 +84,9 @@ CGO_ENABLED=1 go test -race -count=1 ./...
   separate optional interface, not a new Backend method.
 - Destructive writes back up current remote content first and abort if backup
   fails; protected contexts require an explicit `--backup`/`--no-backup`.
+- Confirmed `backup clean` is a fixed R3 local mutation requiring `--confirm`,
+  `--yes`, a ticket, and `--allow-backup-clean`; preview returns before
+  authorization.
 - AI agents never auto-fill `--ticket`, `--allow-*`, or a high-risk `--yes`.
   Blast radius comes from `--dry-run`/`--plan`/`--diff`, never a model guess.
 - Authorization and audit identity comes from the local OS user plus hostname;
@@ -111,6 +131,12 @@ CGO_ENABLED=1 go test -race -count=1 ./...
   `ctx set --password` with a non-plain credstore backend. URL userinfo in
   `--server` remains compatible, but explicit `--password` or `CFGOV_PASSWORD`
   takes precedence.
+- Nacos trace never emits request/response bodies, remote response bodies are
+  never echoed in public errors, and no environment variable may disable TLS
+  certificate verification.
+- Nacos and Apollo report no CAS support. Existing rule/flag blob mutations
+  fail `NOT_IMPLEMENTED` before authorization or side effects; never drop the
+  revision binding to turn them into unconditional writes.
 
 ## Code Conventions
 

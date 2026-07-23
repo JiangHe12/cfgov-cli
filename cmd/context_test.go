@@ -354,11 +354,15 @@ func TestPlanPreventsContextAndCredentialMutations(t *testing.T) {
 	cfgovctx.SetConfigPath(configPath)
 	t.Cleanup(func() { cfgovctx.SetConfigPath("") })
 	t.Setenv("CFGOV_CREDENTIAL_PASSPHRASE", "test-passphrase")
+	operator, err := trustedOperator(newDefaultFlags())
+	if err != nil {
+		t.Fatal(err)
+	}
 	if err := cfgovctx.Set("dev", cfgovctx.Context{
 		Base: corectx.Base{
 			Server:   "http://127.0.0.1:8848",
 			Password: "literal-secret",
-			Roles:    map[string]string{"alice": safety.RoleReader},
+			Roles:    map[string]string{"alice": safety.RoleReader, operator: safety.RoleReader},
 		},
 		Backend: "nacos",
 	}); err != nil {

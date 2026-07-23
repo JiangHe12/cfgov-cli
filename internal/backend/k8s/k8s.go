@@ -22,6 +22,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/go-logr/logr"
 	corev1 "k8s.io/api/core/v1"
 	k8serrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -30,8 +31,11 @@ import (
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/rest"
 	"k8s.io/client-go/tools/clientcmd"
+	clientcmdapi "k8s.io/client-go/tools/clientcmd/api"
+	"k8s.io/klog/v2"
 
 	"github.com/JiangHe12/opskit-core/v2/apperrors"
+	"github.com/JiangHe12/opskit-core/v2/redact"
 
 	"github.com/JiangHe12/cfgov-cli/internal/cfgov"
 	"github.com/JiangHe12/cfgov-cli/internal/flag"
@@ -86,6 +90,13 @@ var (
 	_ cfgov.FlagStore = (*Backend)(nil)
 )
 
+func init() {
+	// client-go has a small number of process-global klog paths (notably exec
+	// credential refresh) that cannot be routed through a per-client writer.
+	// Suppress those here; cfgov emits its own redacted warnings and traces.
+	klog.SetLogger(logr.Discard())
+}
+
 func New(opts Options) (*Backend, error) {
 	namespace := firstNonEmpty(opts.Namespace, defaultNamespace)
 	if err := validateNamespace(namespace); err != nil {
@@ -101,6 +112,7 @@ func New(opts Options) (*Backend, error) {
 		if err != nil {
 			return nil, err
 		}
+		config.WarningHandlerWithContext = redactedWarningHandler{out: out}
 		client, err = kubernetes.NewForConfig(config)
 		if err != nil {
 			return nil, apperrors.New(apperrors.CodeBackendError, "failed to create Kubernetes client", err)
@@ -114,6 +126,17 @@ func New(opts Options) (*Backend, error) {
 		trace:      opts.Trace,
 		traceOut:   out,
 	}, nil
+}
+
+type redactedWarningHandler struct {
+	out io.Writer
+}
+
+func (handler redactedWarningHandler) HandleWarningHeaderWithContext(_ context.Context, code int, _ string, message string) {
+	if code != 299 || message == "" {
+		return
+	}
+	_, _ = fmt.Fprintf(handler.out, "warning: kubernetes API: %s\n", redact.String(message))
 }
 
 func (b *Backend) ValidateKey(key string) error {
@@ -636,7 +659,15 @@ func buildRESTConfig(kubeconfig, contextName string, timeout time.Duration) (*re
 		rules.ExplicitPath = path
 	}
 	overrides := &clientcmd.ConfigOverrides{CurrentContext: contextName}
-	config, err := clientcmd.NewNonInteractiveDeferredLoadingClientConfig(rules, overrides).ClientConfig()
+	loadingConfig := clientcmd.NewNonInteractiveDeferredLoadingClientConfig(rules, overrides)
+	rawConfig, err := loadingConfig.RawConfig()
+	if err != nil {
+		return nil, apperrors.New(apperrors.CodeUsageError, "failed to load Kubernetes kubeconfig", err)
+	}
+	if err := rejectExecCredentialPlugin(rawConfig, contextName); err != nil {
+		return nil, err
+	}
+	config, err := loadingConfig.ClientConfig()
 	if err != nil {
 		return nil, apperrors.New(apperrors.CodeUsageError, "failed to load Kubernetes kubeconfig", err)
 	}
@@ -644,6 +675,26 @@ func buildRESTConfig(kubeconfig, contextName string, timeout time.Duration) (*re
 		config.Timeout = timeout
 	}
 	return config, nil
+}
+
+func rejectExecCredentialPlugin(config clientcmdapi.Config, contextName string) error {
+	selectedContext := contextName
+	if selectedContext == "" {
+		selectedContext = config.CurrentContext
+	}
+	contextConfig := config.Contexts[selectedContext]
+	if contextConfig == nil {
+		return nil
+	}
+	authInfo := config.AuthInfos[contextConfig.AuthInfo]
+	if authInfo == nil || authInfo.Exec == nil {
+		return nil
+	}
+	return apperrors.New(
+		apperrors.CodeNotImplemented,
+		"Kubernetes exec credential plugins are unsupported because their stderr cannot be governed",
+		nil,
+	).WithSuggestion("use a static bearer token or client certificate in the selected kubeconfig context")
 }
 
 func (c coordinate) coord() cfgov.Coordinate {

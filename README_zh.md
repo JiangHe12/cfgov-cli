@@ -48,6 +48,11 @@
 | 🩺 **运维与体验** | `doctor` 诊断、shell `completion` 补全、OpenTelemetry 链路/指标、输错命令的「您是不是想…」提示、处处可 JSON 输出。 |
 | 🔏 **可信供应链** | 二进制经 **cosign 签名**,npm 包带 **provenance 溯源**,安装器校验 **SHA-256**。 |
 
+Nacos 与 Apollo 会报告 `supportsCas=false`。规则和特性开关仍可读取和新建
+blob，但修改或删除已有 rule/flag blob 需要原子 revision 前置条件，因此在
+这两个后端会返回 `NOT_IMPLEMENTED`。`supportsExistingRuleWrites` 与
+`supportsExistingFlagWrites` 能力字段会明确暴露这一边界。
+
 ---
 
 ## 📦 安装
@@ -127,11 +132,16 @@ cfgov 使用本机 OS 用户名加 hostname 生成授权与审计操作者身份
 
 `--plan` 是后端写入和本地目标变更的强制零副作用开关,覆盖上下文 / RBAC / 凭据、pull / export、审计 repair / prune、备份清理和 Skill 安装。它的优先级高于 `--confirm`;命令自己的 `--dry-run` 标志仍然有效,写命令用 `--diff` 返回 `ChangePlan` 时也属于预览。每次成功完成的预览只写一条 `command.preview` 审计,其 `status=skipped`,并显式带有 `preview=true` / `dryRun=true`;若该记录无法追加,命令会失败。受治理的审计日志(包括真实发生读取时的资源读取审计)是预览唯一允许修改的本地目标。
 
+访问后端资源的 R0 读取采用 fail-closed 审计。cfgov 会在构造后端客户端或进行其他后端访问前持久写入 `ReadAuditRecord` intent，并在打印结果或写出文件内容前持久写入具有相同 `operationId` 的 outcome。每个相关上下文的 R0 角色授权都在 intent 之后、客户端构造之前执行；未知 operator 或配置了尚未实现的远程角色源都会被拒绝，拒绝本身也会闭合失败 outcome。intent 失败时不会构造后端；outcome 失败时不会释放结果，并返回 `LOCAL_IO_ERROR`。后端失败也会写入失败 outcome；若此时 outcome 同样失败，原后端错误仍保留在 cause chain 中。config、rule、flag、namespace 与 context 写计划或执行预检使用的后端 / 凭据存储读取遵守同一规则。客户端只能由该 read intent 已授权的上下文快照构造，因此后续上下文文件变化不能把操作重定向到新目标；没有远端预检的 mutation 则先完成高级授权并持久写入 mutation intent，随后才构造客户端。一个批量读取或一次有界的 `config listen` 逻辑操作只使用一组记录；`--max-events` 会在分配内存前被限制为最多 1000。资源专属审计元数据只保留域隔离的目标 / 请求指纹与有界计数，绝不保存返回正文或资源列表。纯本地校验、静态 `capabilities` / `version` 以及不访问后端的 dry-run 不在此要求内。`capabilities` 通过 `supported.readAudit = "required-intent-outcome"` 和 `limits.maxListenEvents = 1000` 声明该契约。
+
 `config export`、`rule export` 和 `flag export` 只允许新建文件。命令会在 mutation intent 前检查所有生成名称和目标路径;名称碰撞或目标文件已存在时,plan 与实际执行都会失败,实际落盘还使用排他创建,因此导出绝不会覆盖已有文件。
 
 每个真实的后端、凭据、上下文、RBAC 或本地文件变更，都会在授权与最终校验之后、第一次目标写入之前同步写入一条 `MutationAuditRecord` intent，并在返回普通成功之前写入 outcome。批量命令只使用一组 intent / outcome，并汇总 `succeeded` / `failed` / `skipped` 计数。core v2 的提交状态是权威依据：只有明确未提交的 outcome 才会原子写入并 fsync 到仅所有者可访问的 `<audit.log>.outcome-spool`；已提交但收尾失败或提交状态不确定的 outcome 不会被盲目排队。明确未提交的条目仍按至少一次语义重放；若重放结果不确定，该条目会改名为 `.indeterminate` 并阻断后续自动重放，直至按 `mutationId + phase` 人工核对。所有不完整路径均返回 `AUDIT_INCOMPLETE`；intent 写入失败时目标保持不变。
 
 新的审计与遥测记录不包含明文 ticket、reason、配置 / 规则 / 特性开关正文或完整错误文本，只保留域隔离 SHA-256 指纹、字节 / 条目计数、revision 与机器错误码。`audit query` 输出历史记录时也会移除旧的明文 ticket / reason / diff / error message。
+
+Nacos trace 只输出请求/响应元数据，绝不输出请求或响应正文；HTTP 与业务错误
+同样不会回显远端响应正文。TLS 证书校验不能通过隐藏环境变量关闭。
 
 ---
 
@@ -236,7 +246,8 @@ cfgov service deregister --service <name> --ip <ip> --port <port> --yes --ticket
 ```bash
 # 本地备份库
 cfgov backup list  [--context-filter <c>] [--namespace <n>] [--data-id <k>] -o json
-cfgov backup clean (--before <30d|RFC3339|YYYY-MM-DD> | --keep-last <n>) [--confirm]   # 不加 --confirm 即 dry-run
+cfgov backup clean (--before <30d|RFC3339|YYYY-MM-DD> | --keep-last <n>)              # dry-run
+cfgov backup clean (--before <…> | --keep-last <n>) --confirm --yes --ticket <t> --allow-backup-clean # R3
 
 # 审计(防篡改)
 cfgov audit query  [--since 24h] [--type <t>] [--operator <o>] [--status <s>] [--limit 100] -o json
@@ -258,6 +269,8 @@ cfgov ctx set <name> --backend consul --server <host:port> [--consul-key-prefix 
                      [--consul-ca-cert <f>] [--consul-client-cert <f>] [--consul-client-key <f>]
 cfgov ctx use|list|current|delete|export|import|migrate-credentials|test
 cfgov ctx role set|unset|list <context>
+#   Kubernetes exec 凭据插件会被 fail-closed 拒绝，因为 client-go 会把插件 stderr 直连当前进程；
+#   请在选中的 kubeconfig context 中使用静态 bearer token 或客户端证书。
 #   context 创建/替换/切换/import/凭据迁移均为 R3:
 #     --yes --ticket <人工工单> --allow-context-change
 #   context 删除为 R3: --yes --ticket <人工工单> --allow-context-delete
@@ -284,7 +297,7 @@ cfgov install <agent> --skills  # 把 cfgov AI 技能装进某个智能体(claud
 cfgov version
 ```
 
-> `backup clean` 和 `audit prune` **只删本地文件**,并默认 **dry-run**。确认执行的审计 prune 与 repair 是固定 R3 的证据变更:必须同时提供 `--confirm`、`--yes`、非空 `--ticket` 及精确的 `--allow-audit-prune` / `--allow-audit-repair`。授权使用持久化 current context 策略(没有 current 时为空策略),`--context` 不能替换该策略。预览会在授权前返回,不删除或重写审计证据。core v2 会持有审计路径锁、把确认绑定到精确预览集合、完整验证历史，并在集合变化时返回 `CONFLICT`。prune 支持认证 v2 历史，并在删除前持久推进 checkpoint；repair 仍只支持 legacy 历史。两种操作的 mutation intent/outcome 都写入同目录 sibling `.<audit-base>-control`，避免转换目标日志或让 control rotation 污染目标日志命名空间。
+> `backup clean` 和 `audit prune` **只删本地文件**,并默认 **dry-run**。确认执行的 backup clean 是固定 R3 变更，必须同时提供 `--confirm`、`--yes`、非空 `--ticket` 和 `--allow-backup-clean`。确认执行的审计 prune 与 repair 也是固定 R3 证据变更，需要同类输入及精确的 `--allow-audit-prune` / `--allow-audit-repair`。三者都使用持久化 current context 策略授权(没有 current 时为空策略),`--context` 不能替换该策略。预览会在授权前返回,不删除或重写目标。core v2 会为审计 prune/repair 持有审计路径锁、把确认绑定到精确预览集合、完整验证历史，并在集合变化时返回 `CONFLICT`。prune 支持认证 v2 历史，并在删除前持久推进 checkpoint；repair 仍只支持 legacy 历史。审计 prune/repair 的 mutation intent/outcome 写入同目录 sibling `.<audit-base>-control`，避免转换目标日志或让 control rotation 污染目标日志命名空间。
 </details>
 
 ---
@@ -311,7 +324,7 @@ cfgov install claude --skills     # 也支持:codex、opencode、copilot、curso
 - **已验证发布标签**——仅当 signed annotated tag 经 GitHub 验证，且精确匹配 `package.json`、`CHANGELOG.md` 与最新拉取的 `origin/main` 时才开始发布；CI 与真实集成会在该标签提交上重跑。
 - **签名二进制**——每个发布产物都用 [cosign](https://github.com/sigstore/cosign) 无密钥(OIDC)签名;`checksums.txt` 覆盖全平台并同样签名。
 - **npm provenance**——npm 包由 CI 经 OpenID Connect 发布,带 [provenance 溯源声明](https://docs.npmjs.com/generating-provenance-statements),将其与本仓库及工作流精确关联。
-- **校验式安装**——npm postinstall 通过白名单主机下载二进制,并在安装前对照已签名的 `checksums.txt` 校验 SHA-256。
+- **校验式安装**——npm postinstall 只信任受 npm provenance 绑定、嵌入 `package.json` 的六个平台 SHA-256 摘要。镜像只能提供二进制字节,不能提供校验数据;校验后的文件会先 fsync,再原子替换旧文件,且不存在跳过校验的开关。
 - **防篡改审计**——`cfgov audit verify --strict` 会重走哈希链,报告任何断裂或改动。
 
 ---

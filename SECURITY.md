@@ -33,6 +33,13 @@ user-provided URLs, npm mirrors, or model-generated authorization values.
   where the backend supports compare-and-set.
 - Audit and telemetry persist fingerprints and bounded metadata, not raw
   configuration, rule, flag, ticket, reason, credential, or backend error text.
+- Kubernetes exec credential plugins are rejected because client-go connects
+  plugin stderr directly to the process, outside cfgov's audit-gated diagnostic
+  writer. Use static token or client-certificate authentication instead.
+- The upstream etcd client parses `ETCD_CLIENT_DEBUG` during package
+  initialization. An invalid value can emit one fixed, non-data-bearing warning
+  before command audit initialization; leave it unset or use a valid level.
+  cfgov suppresses the client's subsequent process-global gRPC logging.
 - Prefer keychain or encrypted-file storage; protect contexts, backups, exports,
   and audit evidence with owner-only access.
 
@@ -42,6 +49,11 @@ requires an external verifier or a separately protected operator identity.
 
 ## Supply Chain
 
-Release binaries are built by GitHub Actions, signed, and published with
-checksums. Use canonical releases and do not disable installer verification in
-production automation.
+Release binaries are built and signed by GitHub Actions. Before GitHub Release
+and npm publication, the workflow verifies `checksums.txt` and all six binary
+signatures against this repository's exact `release.yml` identity, release ref,
+and GitHub Actions OIDC issuer. The npm package embeds those six verified
+digests in `package.json`, covered by npm provenance. The installer trusts only
+that package-bound manifest; mirrors can supply bytes but cannot replace
+verification data. There is no verification bypass, and a failed install leaves
+the previous binary unchanged.

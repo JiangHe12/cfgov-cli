@@ -909,7 +909,7 @@ func TestPrepareImportedCredentialRejectsEmptyReferenceBackend(t *testing.T) {
 				Base:    corectx.Base{Password: tt.password},
 				Backend: "nacos",
 			}
-			_, _, err := planImportedCredential(newDefaultFlags(), "imported", item)
+			_, _, err := planImportedCredential("imported", item)
 			if apperrors.AsAppError(err).Code != apperrors.CodeUsageError {
 				t.Fatalf("error = %v, want usage error", err)
 			}
@@ -934,7 +934,7 @@ func TestPortableContextLegalCredentialReferenceValidationDoesNotWrite(t *testin
 		},
 		Backend: "nacos",
 	}
-	prepared, _, err := planImportedCredential(newDefaultFlags(), "imported", item)
+	prepared, _, err := planImportedCredential("imported", item)
 	if err != nil {
 		t.Fatalf("planImportedCredential() error = %v", err)
 	}

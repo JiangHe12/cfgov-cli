@@ -3,6 +3,10 @@ package cfgclass
 import (
 	"bytes"
 	"encoding/json"
+	"encoding/xml"
+	"errors"
+	"fmt"
+	"io"
 	"strings"
 
 	"github.com/JiangHe12/opskit-core/v2/safety"
@@ -43,19 +47,85 @@ func classifyPush(content []byte, contentType string) Result {
 		}
 		return Result{Risk: safety.R1, Reason: "text config write"}
 	case "json":
-		var v any
-		if err := json.Unmarshal(content, &v); err != nil {
+		if err := ValidateStructured(content, contentType); err != nil {
 			return Result{Risk: safety.R3, Reason: "invalid json config payload"}
 		}
 		return Result{Risk: safety.R1, Reason: "structured json config write"}
 	case "yaml", "yml":
-		var v any
-		dec := yaml.NewDecoder(bytes.NewReader(content))
-		if err := dec.Decode(&v); err != nil {
+		if err := ValidateStructured(content, contentType); err != nil {
 			return Result{Risk: safety.R3, Reason: "invalid yaml config payload"}
 		}
 		return Result{Risk: safety.R1, Reason: "structured yaml config write"}
+	case "xml":
+		if err := ValidateStructured(content, contentType); err != nil {
+			return Result{Risk: safety.R3, Reason: "invalid xml config payload"}
+		}
+		return Result{Risk: safety.R1, Reason: "structured xml config write"}
 	default:
 		return Result{Risk: safety.R3, Reason: "unknown config content type"}
 	}
+}
+
+// ValidateStructured validates every document in a supported structured config
+// payload. Callers wrap the returned parse error in their public error contract.
+func ValidateStructured(content []byte, contentType string) error {
+	switch strings.ToLower(strings.TrimSpace(contentType)) {
+	case "json":
+		var value any
+		return json.Unmarshal(content, &value)
+	case "yaml", "yml":
+		decoder := yaml.NewDecoder(bytes.NewReader(content))
+		for {
+			var value any
+			err := decoder.Decode(&value)
+			if errors.Is(err, io.EOF) {
+				return nil
+			}
+			if err != nil {
+				return err
+			}
+		}
+	case "xml":
+		return validateXML(content)
+	default:
+		return fmt.Errorf("unsupported structured config type %q", contentType)
+	}
+}
+
+func validateXML(content []byte) error {
+	decoder := xml.NewDecoder(bytes.NewReader(content))
+	seenRoot := false
+	depth := 0
+	for {
+		token, err := decoder.Token()
+		if errors.Is(err, io.EOF) {
+			break
+		}
+		if err != nil {
+			return err
+		}
+		switch value := token.(type) {
+		case xml.StartElement:
+			if depth == 0 {
+				if seenRoot {
+					return errors.New("XML payload contains multiple root elements")
+				}
+				seenRoot = true
+			}
+			depth++
+		case xml.EndElement:
+			if depth == 0 {
+				return errors.New("XML payload contains an unmatched end element")
+			}
+			depth--
+		case xml.CharData:
+			if depth == 0 && strings.TrimSpace(string(value)) != "" {
+				return errors.New("XML payload contains text outside the root element")
+			}
+		}
+	}
+	if !seenRoot || depth != 0 {
+		return errors.New("XML payload must contain exactly one complete root element")
+	}
+	return nil
 }

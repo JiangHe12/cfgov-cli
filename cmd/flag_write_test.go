@@ -111,6 +111,92 @@ func TestMandatoryFlagBackupRejectsNoBackup(t *testing.T) {
 	}
 }
 
+func TestFlagExistingWritesRequireBackendCAS(t *testing.T) {
+	t.Parallel()
+	write := plannedFlagWrite{
+		current:  flagSetResult{Revision: "rev1"},
+		planItem: flagPlanItem{Action: "update"},
+	}
+	err := validateFlagWriteCapabilities(
+		cfgov.Capabilities{Backend: "apollo", SupportsFlags: true, SupportsCAS: false},
+		[]plannedFlagWrite{write},
+	)
+	if apperrors.AsAppError(err).Code != apperrors.CodeNotImplemented {
+		t.Fatalf("Apollo existing flag write error = %v, want not implemented", err)
+	}
+	if err := validateFlagWriteCapabilities(
+		cfgov.Capabilities{Backend: "consul", SupportsFlags: true, SupportsCAS: true},
+		[]plannedFlagWrite{write},
+	); err != nil {
+		t.Fatalf("CAS-capable flag write rejected: %v", err)
+	}
+	write.planItem.Action = "skip"
+	if err := validateFlagWriteCapabilities(
+		cfgov.Capabilities{Backend: "nacos", SupportsFlags: true, SupportsCAS: false},
+		[]plannedFlagWrite{write},
+	); err != nil {
+		t.Fatalf("idempotent flag skip rejected: %v", err)
+	}
+}
+
+func TestUnsupportedSchemaCASStopsBeforeAuditAndBackend(t *testing.T) {
+	backend := newFlagWriteBackend([]byte(`[{"key":"checkout","enabled":true}]`))
+	backend.supportsCAS = false
+	appendCalls := 0
+	f := mutationAuditTestFlags()
+	f.Yes = true
+	f.mutationAudit = &mutationAuditRuntime{
+		appendRecord: func(string, mutationAuditRecord, audit.Options) (audit.AppendResult, error) {
+			appendCalls++
+			return audit.AppendResult{State: audit.AppendCommitCommitted}, nil
+		},
+	}
+
+	flagWrite := plannedFlagWrite{
+		current:  flagSetResult{Revision: "rev1"},
+		planItem: flagPlanItem{Action: "update"},
+	}
+	err := applyFlagWrites(
+		context.Background(),
+		f,
+		backend,
+		cfgovctx.Context{},
+		flagWritePlan{Action: "update"},
+		[]plannedFlagWrite{flagWrite},
+		safety.R1,
+		"",
+	)
+	if apperrors.AsAppError(err).Code != apperrors.CodeNotImplemented {
+		t.Fatalf("applyFlagWrites() error = %v, want not implemented", err)
+	}
+
+	ruleWrite := plannedRuleWrite{
+		current:  ruleSetResult{Revision: "rev1"},
+		planItem: rulePlanItem{Action: "update"},
+	}
+	err = applyRuleWrites(
+		context.Background(),
+		f,
+		backend,
+		cfgovctx.Context{},
+		ruleWritePlan{Action: "update"},
+		[]plannedRuleWrite{ruleWrite},
+		safety.R1,
+		"",
+	)
+	if apperrors.AsAppError(err).Code != apperrors.CodeNotImplemented {
+		t.Fatalf("applyRuleWrites() error = %v, want not implemented", err)
+	}
+	if appendCalls != 0 || backend.puts != 0 || backend.deletes != 0 {
+		t.Fatalf(
+			"unsupported CAS caused side effects: audit=%d put=%d delete=%d",
+			appendCalls,
+			backend.puts,
+			backend.deletes,
+		)
+	}
+}
+
 func TestApplyFlagWritesCASConflict(t *testing.T) {
 	backend := newFlagWriteBackend([]byte(`[{"key":"checkout","enabled":true}]`))
 	current := flagSetResult{App: "app", Count: 1, Key: "FEATURE_FLAG_GROUP/app-flags", Revision: "rev1", SHA256: sha256Bytes(backend.content), Flags: []flag.FeatureFlag{{Key: "checkout", Enabled: true}}}
@@ -312,15 +398,16 @@ func (fakeFlagStore) FlagCoordinate(app string) (cfgov.Coordinate, error) {
 }
 
 type flagWriteBackend struct {
-	content  []byte
-	revision string
-	puts     int
-	deletes  int
-	onPut    func()
+	content     []byte
+	revision    string
+	supportsCAS bool
+	puts        int
+	deletes     int
+	onPut       func()
 }
 
 func newFlagWriteBackend(content []byte) *flagWriteBackend {
-	return &flagWriteBackend{content: append([]byte(nil), content...), revision: "rev1"}
+	return &flagWriteBackend{content: append([]byte(nil), content...), revision: "rev1", supportsCAS: true}
 }
 
 func (b *flagWriteBackend) FlagCoordinate(app string) (cfgov.Coordinate, error) {
@@ -382,5 +469,5 @@ func (b *flagWriteBackend) Describe() cfgov.Description {
 }
 
 func (b *flagWriteBackend) Capabilities() cfgov.Capabilities {
-	return cfgov.Capabilities{SupportsFlags: true}
+	return cfgov.Capabilities{Backend: "fake", SupportsFlags: true, SupportsCAS: b.supportsCAS}
 }

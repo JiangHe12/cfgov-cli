@@ -47,6 +47,12 @@ type configArchiveEntry struct {
 	Revision string `json:"revision,omitempty"`
 }
 
+type configExportReadResult struct {
+	Archive     configArchive
+	ExportFiles map[string][]byte
+	ExportNames []string
+}
+
 type configPlan struct {
 	ResourceType string      `json:"resourceType"`
 	Action       string      `json:"action"`
@@ -59,6 +65,18 @@ type configPlan struct {
 	Skip         []planItem  `json:"skip"`
 	Conflict     []planItem  `json:"conflict"`
 	DryRun       bool        `json:"dryRun"`
+}
+
+type configPromoteReadResult struct {
+	Locals []localConfig
+	Plan   configPlan
+}
+
+type configRollbackReadResult struct {
+	Content    []byte
+	Remote     cfgov.Blob
+	Coordinate cfgov.Coordinate
+	Key        string
 }
 
 type planSummary struct {
@@ -108,58 +126,78 @@ func configExportCmd(f *cliFlags) *cobra.Command {
 		Short: "Export configs from the current namespace",
 		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			backend, ctxMeta, err := buildBackend(f)
-			if err != nil {
-				return err
-			}
-			items, err := backend.List(cmd.Context(), cfgov.ListOptions{Namespace: backend.Describe().Namespace, Group: group, Prefix: prefix, Limit: limit})
-			if err != nil {
-				appendAuditWarn(f, audit.EventType("config.export"), ctxMeta, audit.EventTarget{ResourceType: "config"}, audit.StatusFailed, "", err)
-				return err
-			}
 			planOnly := isPlanOnly(f)
-			archive := configArchive{APIVersion: apiVersion, Kind: "ConfigExport"}
-			exportFiles := make(map[string][]byte, len(items)+1)
-			exportNames := make([]string, 0, len(items)+1)
-			seenExportNames := make(map[string]string, len(items)+1)
-			for _, item := range items {
-				blob, err := backend.Get(cmd.Context(), item.Coordinate)
-				if err != nil {
-					appendAuditWarn(f, audit.EventType("config.export"), ctxMeta, audit.EventTarget{ResourceType: "config", Resource: item.Coordinate.Key}, audit.StatusFailed, "", err)
-					return err
-				}
-				file := archiveFileName(item.Coordinate.Key)
-				if err := registerExportFileName(seenExportNames, file); err != nil {
-					appendAuditWarn(f, audit.EventType("config.export"), ctxMeta, audit.EventTarget{ResourceType: "config"}, audit.StatusFailed, "", err)
-					return err
-				}
-				exportFiles[file] = blob.Content
-				exportNames = append(exportNames, file)
-				archive.Items = append(archive.Items, configArchiveEntry{
-					Key:      item.Coordinate.Key,
-					File:     file,
-					SHA256:   sha256Bytes(blob.Content),
-					Bytes:    len(blob.Content),
-					Type:     item.Type,
-					Revision: blob.Revision,
-				})
-			}
-			manifest, err := json.MarshalIndent(archive, "", "  ")
+			backendRead, err := runMandatoryBackendRead(
+				f,
+				"config.export",
+				"config",
+				firstNonEmpty(f.Namespace, "*"),
+				map[string]any{"group": group, "prefix": prefix, "limit": limit, "dir": dir},
+				func(backend cfgov.Backend, _ cfgovctx.Context) (configExportReadResult, error) {
+					options := cfgov.ListOptions{
+						Namespace: backend.Describe().Namespace,
+						Group:     group,
+						Prefix:    prefix,
+						Limit:     limit,
+					}
+					items, listErr := backend.List(cmd.Context(), options)
+					if listErr != nil {
+						return configExportReadResult{}, listErr
+					}
+					result := configExportReadResult{
+						Archive: configArchive{APIVersion: apiVersion, Kind: "ConfigExport"},
+					}
+					result.ExportFiles = make(map[string][]byte, len(items)+1)
+					result.ExportNames = make([]string, 0, len(items)+1)
+					seenExportNames := make(map[string]string, len(items)+1)
+					for _, item := range items {
+						blob, getErr := backend.Get(cmd.Context(), item.Coordinate)
+						if getErr != nil {
+							return configExportReadResult{}, getErr
+						}
+						file := archiveFileName(item.Coordinate.Key)
+						if registerErr := registerExportFileName(seenExportNames, file); registerErr != nil {
+							return configExportReadResult{}, registerErr
+						}
+						result.ExportFiles[file] = blob.Content
+						result.ExportNames = append(result.ExportNames, file)
+						result.Archive.Items = append(result.Archive.Items, configArchiveEntry{
+							Key:      item.Coordinate.Key,
+							File:     file,
+							SHA256:   sha256Bytes(blob.Content),
+							Bytes:    len(blob.Content),
+							Type:     item.Type,
+							Revision: blob.Revision,
+						})
+					}
+					manifest, marshalErr := json.MarshalIndent(result.Archive, "", "  ")
+					if marshalErr != nil {
+						return configExportReadResult{}, apperrors.New(apperrors.CodeLocalIOError, "failed to marshal export manifest", marshalErr)
+					}
+					if registerErr := registerExportFileName(seenExportNames, exportManifestName); registerErr != nil {
+						return configExportReadResult{}, registerErr
+					}
+					result.ExportFiles[exportManifestName] = append(manifest, '\n')
+					result.ExportNames = append(result.ExportNames, exportManifestName)
+					sort.Strings(result.ExportNames)
+					if preflightErr := preflightNewLocalFiles(dir, result.ExportNames); preflightErr != nil {
+						return configExportReadResult{}, preflightErr
+					}
+					return result, nil
+				},
+				func(result configExportReadResult) int { return len(result.Archive.Items) },
+			)
 			if err != nil {
-				return apperrors.New(apperrors.CodeLocalIOError, "failed to marshal export manifest", err)
-			}
-			if err := registerExportFileName(seenExportNames, exportManifestName); err != nil {
 				return err
 			}
-			exportFiles[exportManifestName] = append(manifest, '\n')
-			exportNames = append(exportNames, exportManifestName)
-			sort.Strings(exportNames)
-			if err := preflightNewLocalFiles(dir, exportNames); err != nil {
-				appendAuditWarn(f, audit.EventType("config.export"), ctxMeta, audit.EventTarget{ResourceType: "file", Resource: dir}, audit.StatusFailed, "", err)
-				return err
-			}
+			readResult := backendRead.Value
+			ctxMeta := backendRead.Context
+			ctxName := backendRead.ContextName
+			target := backendRead.operationTarget()
+			archive := readResult.Archive
+			exportFiles := readResult.ExportFiles
+			exportNames := readResult.ExportNames
 			if planOnly {
-				appendAuditWarn(f, audit.EventType("config.export"), ctxMeta, audit.EventTarget{ResourceType: "config"}, audit.StatusSuccess, archiveAuditSummary(archive.Items), nil)
 				markPreview(f)
 				return targetJSONData(f, "ChangePlan", map[string]any{
 					"resourceType": "file",
@@ -168,16 +206,17 @@ func configExportCmd(f *cliFlags) *cobra.Command {
 					"count":        len(archive.Items),
 					"items":        archive.Items,
 					"dryRun":       true,
-				}, operationTargetFromBackend(f, backend), operationTargetRead)
+				}, target, operationTargetRead)
 			}
 			metadata := mutationValueMetadata("config.export", archive)
 			metadata.Items = len(exportFiles)
 			metadata.Creates = len(exportFiles)
 			mutation, err := beginMutationAudit(f, mutationAuditSpec{
-				Action:   "config.export",
-				Context:  ctxMeta,
-				Target:   audit.EventTarget{ResourceType: "file", Resource: dir},
-				Metadata: metadata,
+				Action:      "config.export",
+				ContextName: ctxName,
+				Context:     ctxMeta,
+				Target:      audit.EventTarget{ResourceType: "file", Resource: dir},
+				Metadata:    metadata,
 			})
 			if err != nil {
 				return err
@@ -198,8 +237,7 @@ func configExportCmd(f *cliFlags) *cobra.Command {
 			if err := finishMutationAudit(mutation, mutationAuditOutcome{Succeeded: succeeded}, nil); err != nil {
 				return err
 			}
-			appendAuditWarn(f, audit.EventType("config.export"), ctxMeta, audit.EventTarget{ResourceType: "config"}, audit.StatusSuccess, archiveAuditSummary(archive.Items), nil)
-			return targetJSONData(f, "ExportResult", map[string]any{"dir": dir, "count": len(archive.Items), "items": archive.Items}, operationTargetFromBackend(f, backend), operationTargetRead)
+			return targetJSONData(f, "ExportResult", map[string]any{"dir": dir, "count": len(archive.Items), "items": archive.Items}, target, operationTargetRead)
 		},
 	}
 	cmd.Flags().StringVar(&dir, "dir", "", "Output directory")
@@ -218,10 +256,6 @@ func configImportCmd(f *cliFlags) *cobra.Command { //nolint:gocyclo // Cobra wir
 		Short: "Import configs from a local directory",
 		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			backend, ctxMeta, err := buildBackend(f)
-			if err != nil {
-				return err
-			}
 			if skipExisting && overwrite {
 				return apperrors.New(apperrors.CodeUsageError, "--skip-existing and --overwrite are mutually exclusive", nil)
 			}
@@ -229,25 +263,48 @@ func configImportCmd(f *cliFlags) *cobra.Command { //nolint:gocyclo // Cobra wir
 			if err != nil {
 				return err
 			}
-			plan, err := buildUpsertPlan(cmd.Context(), backend, backend.Describe().Namespace, locals, upsertPlanOptions{
-				Action:       "import",
-				SkipExisting: skipExisting,
-				Overwrite:    overwrite,
-				Validate:     validate,
-			})
+			backendRead, err := runMandatoryBackendRead(
+				f,
+				"config.import.plan",
+				"config",
+				firstNonEmpty(f.Namespace, "*"),
+				map[string]any{
+					"dir":          dir,
+					"skipExisting": skipExisting,
+					"overwrite":    overwrite,
+					"validate":     validate,
+					"items":        localConfigReadFingerprints(locals),
+				},
+				func(backend cfgov.Backend, _ cfgovctx.Context) (configPlan, error) {
+					plan, planErr := buildUpsertPlan(cmd.Context(), backend, backend.Describe().Namespace, locals, upsertPlanOptions{
+						Action:       "import",
+						SkipExisting: skipExisting,
+						Overwrite:    overwrite,
+						Validate:     validate,
+					})
+					if planErr != nil {
+						return configPlan{}, planErr
+					}
+					if gateErr := enforcePlanLimit(plan, forceLarge, "import"); gateErr != nil {
+						return configPlan{}, gateErr
+					}
+					if !configPlanHasChanges(plan) && isStrictNoChange(f) {
+						return configPlan{}, apperrors.New(apperrors.CodeNoChangeRequired, "no changes to apply", nil)
+					}
+					return plan, nil
+				},
+				func(plan configPlan) int { return plan.Summary.Total },
+			)
 			if err != nil {
 				return err
 			}
-			if err := enforcePlanLimit(plan, forceLarge, "import"); err != nil {
-				return err
-			}
-			if !configPlanHasChanges(plan) && isStrictNoChange(f) {
-				return apperrors.New(apperrors.CodeNoChangeRequired, "no changes to apply", nil)
-			}
+			backend, ctxMeta, plan := backendRead.Backend, backendRead.Context, backendRead.Value
+			ctxName := backendRead.ContextName
+			target := backendRead.operationTarget()
 			if isPlanOnly(f) {
 				markPreview(f)
 				plan.DryRun = true
-				return targetJSONData(f, "ChangePlan", plan, operationTargetFromBackend(f, backend), operationTargetWrite)
+				return targetJSONData(f, "ChangePlan", plan, target, operationTargetWrite)
 			}
 			if len(plan.Conflict) > 0 {
 				return apperrors.New(apperrors.CodeConflict, fmt.Sprintf("%d config(s) conflict; use --overwrite or --skip-existing", len(plan.Conflict)), nil)
@@ -260,21 +317,22 @@ func configImportCmd(f *cliFlags) *cobra.Command { //nolint:gocyclo // Cobra wir
 			}
 			changes := localsForPlannedItems(locals, plan.Create, plan.Update)
 			if len(changes) > 0 {
-				if err := authorize(f, configUpsertRisk(changes), ctxMeta, ""); err != nil {
+				if err := authorizeForContext(f, configUpsertRisk(changes), ctxMeta, "", ctxName); err != nil {
 					return err
 				}
 			}
 			appendConfigSkippedAudits(f, ctxMeta, audit.EventType("config.import"), plan.Skip)
 			if len(changes) == 0 {
-				return targetJSONData(f, "ChangeResult", map[string]any{"action": "config import", "summary": plan.Summary}, operationTargetFromBackend(f, backend), operationTargetWrite)
+				return targetJSONData(f, "ChangeResult", map[string]any{"action": "config import", "summary": plan.Summary}, target, operationTargetWrite)
 			}
 			metadata := mutationValueMetadata("config.import", plan)
 			metadata.Items = len(changes) + len(plan.Skip)
 			metadata.Creates = len(plan.Create)
 			metadata.Updates = len(plan.Update)
 			mutation, err := beginMutationAudit(f, mutationAuditSpec{
-				Action:  "config.import",
-				Context: ctxMeta,
+				Action:      "config.import",
+				ContextName: ctxName,
+				Context:     ctxMeta,
 				Target: audit.EventTarget{
 					ResourceType: "config",
 					Resource:     backend.Describe().Namespace,
@@ -310,7 +368,7 @@ func configImportCmd(f *cliFlags) *cobra.Command { //nolint:gocyclo // Cobra wir
 			if err := finishBatchMutationAudit(mutation, total, succeeded, len(plan.Skip), nil); err != nil {
 				return err
 			}
-			return targetJSONData(f, "ChangeResult", map[string]any{"action": "config import", "summary": plan.Summary}, operationTargetFromBackend(f, backend), operationTargetWrite)
+			return targetJSONData(f, "ChangeResult", map[string]any{"action": "config import", "summary": plan.Summary}, target, operationTargetWrite)
 		},
 	}
 	cmd.Flags().StringVar(&dir, "dir", "", "Input directory")
@@ -333,38 +391,72 @@ func configPromoteCmd(f *cliFlags) *cobra.Command { //nolint:gocyclo // Cobra wi
 			if key == "" && prefix == "" {
 				return apperrors.New(apperrors.CodeUsageError, "specify --key or --prefix", nil)
 			}
-			target, ctxMeta, err := buildBackend(f)
+			sourceMeta, err := loadNamedContext(sourceContext)
 			if err != nil {
 				return err
 			}
-			source, err := buildBackendFromNamedContext(cmd.Context(), f, sourceContext)
+			backendRead, err := runMandatoryBackendRead(
+				f,
+				"config.promote.plan",
+				"config",
+				sourceContext+"\x00"+firstNonEmpty(key, prefix),
+				map[string]any{
+					"sourceContext": sourceContext,
+					"key":           key,
+					"prefix":        prefix,
+					"contentType":   contentType,
+					"validate":      validateSource,
+					"overwrite":     overwrite,
+				},
+				func(target cfgov.Backend, _ cfgovctx.Context) (configPromoteReadResult, error) {
+					source, sourceErr := buildBackendFromNamedContext(cmd.Context(), f, sourceContext, sourceMeta)
+					if sourceErr != nil {
+						return configPromoteReadResult{}, sourceErr
+					}
+					locals, sourceReadErr := sourceConfigs(cmd.Context(), source, key, prefix)
+					if sourceReadErr != nil {
+						return configPromoteReadResult{}, sourceReadErr
+					}
+					if contentType != "" {
+						locals = withConfigType(locals, contentType)
+					}
+					if validateSource {
+						if validationErr := validateLocalConfigs(locals); validationErr != nil {
+							return configPromoteReadResult{}, validationErr
+						}
+					}
+					plan, planErr := buildUpsertPlan(
+						cmd.Context(),
+						target,
+						target.Describe().Namespace,
+						locals,
+						upsertPlanOptions{Action: "promote", Overwrite: overwrite},
+					)
+					if planErr != nil {
+						return configPromoteReadResult{}, planErr
+					}
+					if !configPlanHasChanges(plan) && isStrictNoChange(f) {
+						return configPromoteReadResult{}, apperrors.New(apperrors.CodeNoChangeRequired, "no changes to promote", nil)
+					}
+					return configPromoteReadResult{Locals: locals, Plan: plan}, nil
+				},
+				func(result configPromoteReadResult) int {
+					return boundedReadAuditCount(len(result.Locals) + result.Plan.Summary.Total)
+				},
+				readAuditAuthorization{ContextName: sourceContext, Context: sourceMeta},
+			)
 			if err != nil {
 				return err
 			}
-			locals, err := sourceConfigs(cmd.Context(), source, key, prefix)
-			if err != nil {
-				return err
-			}
-			if contentType != "" {
-				locals = withConfigType(locals, contentType)
-			}
-			if validateSource {
-				if err := validateLocalConfigs(locals); err != nil {
-					return err
-				}
-			}
-			plan, err := buildUpsertPlan(cmd.Context(), target, target.Describe().Namespace, locals, upsertPlanOptions{Action: "promote", Overwrite: overwrite})
-			if err != nil {
-				return err
-			}
-			if !configPlanHasChanges(plan) && isStrictNoChange(f) {
-				return apperrors.New(apperrors.CodeNoChangeRequired, "no changes to promote", nil)
-			}
+			target, ctxMeta := backendRead.Backend, backendRead.Context
+			ctxName := backendRead.ContextName
+			locals, plan := backendRead.Value.Locals, backendRead.Value.Plan
+			operationTarget := backendRead.operationTarget()
 			planOnly := isPlanOnly(f)
 			if planOnly || f.Diff {
 				markPreview(f)
 				plan.DryRun = planOnly
-				return targetJSONData(f, "ChangePlan", plan, operationTargetFromBackend(f, target), operationTargetWrite)
+				return targetJSONData(f, "ChangePlan", plan, operationTarget, operationTargetWrite)
 			}
 			if err := validateBackupPolicy(f, ctxMeta); err != nil {
 				return err
@@ -377,21 +469,22 @@ func configPromoteCmd(f *cliFlags) *cobra.Command { //nolint:gocyclo // Cobra wi
 			}
 			changes := localsForPlannedItems(locals, plan.Create, plan.Update)
 			if len(changes) > 0 {
-				if err := authorize(f, configUpsertRisk(changes), ctxMeta, ""); err != nil {
+				if err := authorizeForContext(f, configUpsertRisk(changes), ctxMeta, "", ctxName); err != nil {
 					return err
 				}
 			}
 			appendConfigSkippedAudits(f, ctxMeta, audit.EventType("config.promote"), plan.Skip)
 			if len(changes) == 0 {
-				return targetJSONData(f, "ChangeResult", map[string]any{"action": "config promote", "summary": plan.Summary}, operationTargetFromBackend(f, target), operationTargetWrite)
+				return targetJSONData(f, "ChangeResult", map[string]any{"action": "config promote", "summary": plan.Summary}, operationTarget, operationTargetWrite)
 			}
 			metadata := mutationValueMetadata("config.promote", plan)
 			metadata.Items = len(changes) + len(plan.Skip)
 			metadata.Creates = len(plan.Create)
 			metadata.Updates = len(plan.Update)
 			mutation, err := beginMutationAudit(f, mutationAuditSpec{
-				Action:  "config.promote",
-				Context: ctxMeta,
+				Action:      "config.promote",
+				ContextName: ctxName,
+				Context:     ctxMeta,
 				Target: audit.EventTarget{
 					ResourceType: "config",
 					Resource:     target.Describe().Namespace,
@@ -411,7 +504,7 @@ func configPromoteCmd(f *cliFlags) *cobra.Command { //nolint:gocyclo // Cobra wi
 			); err != nil {
 				return err
 			}
-			return targetJSONData(f, "ChangeResult", map[string]any{"action": "config promote", "summary": plan.Summary}, operationTargetFromBackend(f, target), operationTargetWrite)
+			return targetJSONData(f, "ChangeResult", map[string]any{"action": "config promote", "summary": plan.Summary}, operationTarget, operationTargetWrite)
 		},
 	}
 	cmd.Flags().StringVar(&sourceContext, "source-context", "", "Source context")
@@ -424,7 +517,7 @@ func configPromoteCmd(f *cliFlags) *cobra.Command { //nolint:gocyclo // Cobra wi
 	return cmd
 }
 
-func configRollbackCmd(f *cliFlags) *cobra.Command {
+func configRollbackCmd(f *cliFlags) *cobra.Command { //nolint:gocyclo // Local/history read auditing, plan gates, and mutation flow share one Cobra handler.
 	var key, backupFile, backupID, historyID string
 	var validateTarget bool
 	cmd := &cobra.Command{
@@ -435,26 +528,63 @@ func configRollbackCmd(f *cliFlags) *cobra.Command {
 			if countNonEmpty(backupFile, backupID, historyID) != 1 {
 				return apperrors.New(apperrors.CodeUsageError, "specify exactly one of --backup-file, --backup-id, or --history-id", nil)
 			}
-			backend, ctxMeta, err := buildBackend(f)
+			backendRead, err := runMandatoryBackendRead(
+				f,
+				"config.rollback.plan",
+				"config",
+				key,
+				map[string]any{
+					"key":              key,
+					"backupFileSet":    backupFile != "",
+					"backupIdSet":      backupID != "",
+					"historyIdSet":     historyID != "",
+					"validateTarget":   validateTarget,
+					"backupFileSha256": mutationAuditFingerprint("config.rollback.backup-file", []byte(backupFile)),
+					"backupIdSha256":   mutationAuditFingerprint("config.rollback.backup-id", []byte(backupID)),
+					"historyIdSha256":  mutationAuditFingerprint("config.rollback.history-id", []byte(historyID)),
+				},
+				func(backend cfgov.Backend, _ cfgovctx.Context) (configRollbackReadResult, error) {
+					normalizedKey, keyErr := validateConfigKey(backend, key)
+					if keyErr != nil {
+						return configRollbackReadResult{}, keyErr
+					}
+					content, contentErr := rollbackContent(cmd.Context(), backend, normalizedKey, backupFile, backupID, historyID)
+					if contentErr != nil {
+						return configRollbackReadResult{}, contentErr
+					}
+					coord := cfgov.Coordinate{Namespace: backend.Describe().Namespace, Key: normalizedKey}
+					remote, getErr := backend.Get(cmd.Context(), coord)
+					if getErr != nil && apperrors.AsAppError(getErr).Code != apperrors.CodeResourceNotFound {
+						return configRollbackReadResult{}, getErr
+					}
+					return configRollbackReadResult{
+						Content:    content,
+						Remote:     remote,
+						Coordinate: coord,
+						Key:        normalizedKey,
+					}, nil
+				},
+				func(configRollbackReadResult) int {
+					if historyID != "" {
+						return 2
+					}
+					return 1
+				},
+			)
 			if err != nil {
 				return err
 			}
-			key, err = validateConfigKey(backend, key)
-			if err != nil {
-				return err
-			}
-			content, err := rollbackContent(cmd.Context(), backend, key, backupFile, backupID, historyID)
-			if err != nil {
-				return err
-			}
+			backend, ctxMeta := backendRead.Backend, backendRead.Context
+			ctxName := backendRead.ContextName
+			content, remote := backendRead.Value.Content, backendRead.Value.Remote
+			key = backendRead.Value.Key
+			target := backendRead.operationTarget()
 			if validateTarget {
 				if err := validateContent(content, inferType(key)); err != nil {
 					return err
 				}
 			}
 			local := localConfig{Key: key, Content: content, Type: inferType(key)}
-			coord := cfgov.Coordinate{Namespace: backend.Describe().Namespace, Key: key}
-			remote, _ := backend.Get(cmd.Context(), coord)
 			plan := configPlan{ResourceType: "config", Action: "rollback", Risk: safety.R1, Update: []planItem{{
 				Key: key, LocalSHA256: sha256Bytes(content), RemoteSHA256: sha256Bytes(remote.Content), Bytes: len(content),
 			}}}
@@ -466,22 +596,23 @@ func configRollbackCmd(f *cliFlags) *cobra.Command {
 			if planOnly || f.Diff {
 				markPreview(f)
 				plan.DryRun = planOnly
-				return targetJSONData(f, "ChangePlan", plan, operationTargetFromBackend(f, backend), operationTargetWrite)
+				return targetJSONData(f, "ChangePlan", plan, target, operationTargetWrite)
 			}
 			if err := validateBackupPolicy(f, ctxMeta); err != nil {
 				return err
 			}
-			if err := authorize(f, configUpsertRisk([]localConfig{local}), ctxMeta, ""); err != nil {
+			if err := authorizeForContext(f, configUpsertRisk([]localConfig{local}), ctxMeta, "", ctxName); err != nil {
 				return err
 			}
 			metadata := mutationPayloadMetadata("config.rollback", content)
 			metadata.Items = 1
 			metadata.Updates = 1
 			mutation, err := beginMutationAudit(f, mutationAuditSpec{
-				Action:   "config.rollback",
-				Context:  ctxMeta,
-				Target:   audit.EventTarget{ResourceType: "config", Resource: key},
-				Metadata: metadata,
+				Action:      "config.rollback",
+				ContextName: ctxName,
+				Context:     ctxMeta,
+				Target:      audit.EventTarget{ResourceType: "config", Resource: key},
+				Metadata:    metadata,
 			})
 			if err != nil {
 				return err
@@ -490,7 +621,7 @@ func configRollbackCmd(f *cliFlags) *cobra.Command {
 			if err := finishBatchMutationAudit(mutation, 1, succeeded, 0, operationErr); err != nil {
 				return err
 			}
-			return targetJSONData(f, "ChangeResult", map[string]any{"action": "config rollback", "summary": plan.Summary}, operationTargetFromBackend(f, backend), operationTargetWrite)
+			return targetJSONData(f, "ChangeResult", map[string]any{"action": "config rollback", "summary": plan.Summary}, target, operationTargetWrite)
 		},
 	}
 	cmd.Flags().StringVar(&key, "key", "", "Config key")
@@ -511,29 +642,54 @@ func configReconcileCmd(f *cliFlags) *cobra.Command { //nolint:gocyclo // Planni
 		Short: "Reconcile remote configs with a local directory",
 		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			backend, ctxMeta, err := buildBackend(f)
-			if err != nil {
-				return err
-			}
 			locals, err := readLocalConfigs(dir)
 			if err != nil {
 				return err
 			}
-			plan, err := buildReconcilePlan(cmd.Context(), backend, backend.Describe().Namespace, locals, reconcilePlanOptions{
-				Prune:       prune,
-				PruneScopes: pruneScopes,
-				Overwrite:   overwrite,
-			})
+			backendRead, err := runMandatoryBackendRead(
+				f,
+				"config.reconcile.plan",
+				"config",
+				firstNonEmpty(f.Namespace, "*"),
+				map[string]any{
+					"dir":         dir,
+					"prune":       prune,
+					"pruneScopes": pruneScopes,
+					"overwrite":   overwrite,
+					"items":       localConfigReadFingerprints(locals),
+				},
+				func(backend cfgov.Backend, _ cfgovctx.Context) (configPlan, error) {
+					plan, planErr := buildReconcilePlan(
+						cmd.Context(),
+						backend,
+						backend.Describe().Namespace,
+						locals,
+						reconcilePlanOptions{
+							Prune:       prune,
+							PruneScopes: pruneScopes,
+							Overwrite:   overwrite,
+						},
+					)
+					if planErr != nil {
+						return configPlan{}, planErr
+					}
+					if gateErr := enforceReconcilePlanGates(f, plan, forceLarge); gateErr != nil {
+						return configPlan{}, gateErr
+					}
+					return plan, nil
+				},
+				func(plan configPlan) int { return plan.Summary.Total },
+			)
 			if err != nil {
 				return err
 			}
-			if err := enforceReconcilePlanGates(f, plan, forceLarge); err != nil {
-				return err
-			}
+			backend, ctxMeta, plan := backendRead.Backend, backendRead.Context, backendRead.Value
+			ctxName := backendRead.ContextName
+			target := backendRead.operationTarget()
 			if isPlanOnly(f) {
 				markPreview(f)
 				plan.DryRun = true
-				return targetJSONData(f, "ChangePlan", plan, operationTargetFromBackend(f, backend), operationTargetWrite)
+				return targetJSONData(f, "ChangePlan", plan, target, operationTargetWrite)
 			}
 			if len(plan.Conflict) > 0 {
 				return apperrors.New(apperrors.CodeConflict, fmt.Sprintf("%d config(s) conflict; use --overwrite", len(plan.Conflict)), nil)
@@ -553,14 +709,14 @@ func configReconcileCmd(f *cliFlags) *cobra.Command { //nolint:gocyclo // Planni
 			if upsertRisk := configUpsertRisk(upserts); upsertRisk > risk {
 				risk = upsertRisk
 			}
-			if err := authorizeReconcile(f, risk, ctxMeta, required); err != nil {
+			if err := authorizeReconcile(f, risk, ctxMeta, required, ctxName); err != nil {
 				return err
 			}
 			appendConfigSkippedAudits(f, ctxMeta, audit.EventType("config.reconcile"), plan.Skip)
 			deletes := append(append([]planItem(nil), plan.Delete...), plan.Prune...)
 			changeCount := len(upserts) + len(deletes)
 			if changeCount == 0 {
-				return targetJSONData(f, "ChangeResult", map[string]any{"action": "config reconcile", "summary": plan.Summary}, operationTargetFromBackend(f, backend), operationTargetWrite)
+				return targetJSONData(f, "ChangeResult", map[string]any{"action": "config reconcile", "summary": plan.Summary}, target, operationTargetWrite)
 			}
 			metadata := mutationValueMetadata("config.reconcile", plan)
 			metadata.Items = changeCount + len(plan.Skip)
@@ -568,8 +724,9 @@ func configReconcileCmd(f *cliFlags) *cobra.Command { //nolint:gocyclo // Planni
 			metadata.Updates = len(plan.Update)
 			metadata.Deletes = len(deletes)
 			mutation, err := beginMutationAudit(f, mutationAuditSpec{
-				Action:  "config.reconcile",
-				Context: ctxMeta,
+				Action:      "config.reconcile",
+				ContextName: ctxName,
+				Context:     ctxMeta,
 				Target: audit.EventTarget{
 					ResourceType: "config",
 					Resource:     backend.Describe().Namespace,
@@ -602,7 +759,7 @@ func configReconcileCmd(f *cliFlags) *cobra.Command { //nolint:gocyclo // Planni
 			if err := finishBatchMutationAudit(mutation, total, succeeded, len(plan.Skip), nil); err != nil {
 				return err
 			}
-			return targetJSONData(f, "ChangeResult", map[string]any{"action": "config reconcile", "summary": plan.Summary}, operationTargetFromBackend(f, backend), operationTargetWrite)
+			return targetJSONData(f, "ChangeResult", map[string]any{"action": "config reconcile", "summary": plan.Summary}, target, operationTargetWrite)
 		},
 	}
 	cmd.Flags().StringVar(&dir, "dir", "", "Input directory")
@@ -614,11 +771,15 @@ func configReconcileCmd(f *cliFlags) *cobra.Command { //nolint:gocyclo // Planni
 	return cmd
 }
 
-func authorizeReconcile(f *cliFlags, base safety.Risk, meta cfgovctx.Context, required safety.AllowFlag) error {
+func authorizeReconcile(f *cliFlags, base safety.Risk, meta cfgovctx.Context, required safety.AllowFlag, contextNames ...string) error {
 	if required == "" && meta.Protected {
 		required = allowProductionReconcile
 	}
-	return authorize(f, base, meta, required)
+	contextName := f.contextName()
+	if len(contextNames) > 0 && contextNames[0] != "" {
+		contextName = contextNames[0]
+	}
+	return authorizeForContext(f, base, meta, required, contextName)
 }
 
 func applyUpserts(ctx context.Context, f *cliFlags, backend cfgov.Backend, meta cfgovctx.Context, items []localConfig, eventType audit.EventType) (int, error) {
@@ -911,15 +1072,7 @@ func rollbackContentFromBackupID(backupID string) ([]byte, error) {
 	return nil, apperrors.New(apperrors.CodeResourceNotFound, "backup-id not found", nil)
 }
 
-func buildBackendFromNamedContext(parent context.Context, f *cliFlags, name string) (cfgov.Backend, error) { //nolint:gocyclo // Backend construction branches are kept explicit and local.
-	cfg, err := cfgovctx.Load()
-	if err != nil {
-		return nil, err
-	}
-	item, ok := cfg.Contexts[name]
-	if !ok {
-		return nil, apperrors.New(apperrors.CodeUsageError, "source context not found", nil)
-	}
+func buildBackendFromNamedContext(parent context.Context, f *cliFlags, name string, item cfgovctx.Context) (cfgov.Backend, error) { //nolint:gocyclo // Backend construction branches are kept explicit and local.
 	if item.Backend != "" && item.Backend != "nacos" && item.Backend != "apollo" && item.Backend != "etcd" && item.Backend != "consul" && item.Backend != "k8s" {
 		return nil, apperrors.New(apperrors.CodeNotImplemented, "backend is not supported", nil)
 	}
@@ -940,7 +1093,7 @@ func buildBackendFromNamedContext(parent context.Context, f *cliFlags, name stri
 			Reason:        f.Reason,
 			Timeout:       f.Timeout,
 			Trace:         f.Debug || f.Trace,
-			TraceOut:      os.Stderr,
+			TraceOut:      diagnosticWriter(f),
 		})
 	}
 	if item.Backend == "etcd" {
@@ -956,7 +1109,7 @@ func buildBackendFromNamedContext(parent context.Context, f *cliFlags, name stri
 			ClientKey:     item.EtcdClientKey,
 			Timeout:       f.Timeout,
 			Trace:         f.Debug || f.Trace,
-			TraceOut:      os.Stderr,
+			TraceOut:      diagnosticWriter(f),
 		})
 	}
 	if item.Backend == "consul" {
@@ -971,7 +1124,7 @@ func buildBackendFromNamedContext(parent context.Context, f *cliFlags, name stri
 			ClientKey:     item.ConsulClientKey,
 			Timeout:       f.Timeout,
 			Trace:         f.Debug || f.Trace,
-			TraceOut:      os.Stderr,
+			TraceOut:      diagnosticWriter(f),
 		})
 	}
 	if item.Backend == "k8s" {
@@ -981,7 +1134,7 @@ func buildBackendFromNamedContext(parent context.Context, f *cliFlags, name stri
 			Namespace:  item.Namespace,
 			Timeout:    f.Timeout,
 			Trace:      f.Debug || f.Trace,
-			TraceOut:   os.Stderr,
+			TraceOut:   diagnosticWriter(f),
 		})
 	}
 	server, username, password, err := resolveNacosAuth(parent, f, name, item, item.Server)
@@ -989,8 +1142,20 @@ func buildBackendFromNamedContext(parent context.Context, f *cliFlags, name stri
 		return nil, err
 	}
 	client := api.NewClient(server, username, password, item.Namespace, f.Timeout)
-	client.SetTrace(api.TraceOptions{Debug: f.Debug, Trace: f.Trace, BodyLimit: f.TraceBodyLim, Writer: os.Stderr})
+	client.SetTrace(api.TraceOptions{Debug: f.Debug, Trace: f.Trace, BodyLimit: f.TraceBodyLim, Writer: diagnosticWriter(f)})
 	return nacos.New(client, server), nil
+}
+
+func loadNamedContext(name string) (cfgovctx.Context, error) {
+	cfg, err := cfgovctx.Load()
+	if err != nil {
+		return cfgovctx.Context{}, err
+	}
+	item, ok := cfg.Contexts[name]
+	if !ok {
+		return cfgovctx.Context{}, apperrors.New(apperrors.CodeUsageError, "context not found", nil)
+	}
+	return item, nil
 }
 
 func archiveFileName(key string) string {
@@ -1001,6 +1166,18 @@ func orderedLocals(items []localConfig) []localConfig {
 	out := append([]localConfig(nil), items...)
 	sort.Slice(out, func(i, j int) bool { return out[i].Key < out[j].Key })
 	return out
+}
+
+func localConfigReadFingerprints(items []localConfig) []planItem {
+	fingerprints := make([]planItem, 0, len(items))
+	for _, item := range orderedLocals(items) {
+		fingerprints = append(fingerprints, planItem{
+			Key:         item.Key,
+			LocalSHA256: sha256Bytes(item.Content),
+			Bytes:       len(item.Content),
+		})
+	}
+	return fingerprints
 }
 
 func localsForPlannedItems(locals []localConfig, creates, updates []planItem) []localConfig {
@@ -1171,15 +1348,6 @@ func pruneScopeContains(scopes []pruneScope, namespace, key string) bool {
 		}
 	}
 	return false
-}
-
-func archiveAuditSummary(items []configArchiveEntry) string {
-	hashes := make([]string, 0, len(items))
-	for _, item := range items {
-		hashes = append(hashes, item.Key+"="+item.SHA256)
-	}
-	sort.Strings(hashes)
-	return fmt.Sprintf("count=%d sha256=[%s]", len(items), strings.Join(hashes, ","))
 }
 
 func itemAudit(item localConfig) string {

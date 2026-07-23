@@ -7,7 +7,6 @@ package api
 import (
 	"bytes"
 	"context"
-	"crypto/tls"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -75,9 +74,6 @@ func NewClient(baseURL, username, password, namespace string, timeout ...time.Du
 	}
 	transport := defaultTransport.Clone()
 	transport.MaxIdleConnsPerHost = 16
-	if strings.EqualFold(os.Getenv("NACOS_CLI_INSECURE_SKIP_VERIFY"), "true") || os.Getenv("NACOS_CLI_INSECURE_SKIP_VERIFY") == "1" {
-		transport.TLSClientConfig = &tls.Config{InsecureSkipVerify: true} //nolint:gosec // explicit opt-in for private Nacos deployments
-	}
 	return &Client{
 		baseURL:    strings.TrimRight(baseURL, "/"),
 		username:   username,
@@ -125,7 +121,7 @@ func (c *Client) loginWithSlowWarning(ctx context.Context, warnSlow bool) error 
 		if err != nil {
 			return err
 		}
-		traced, err := c.doRequest(req, params.Encode())
+		traced, err := c.doRequest(req)
 		if err != nil {
 			if attempt < getMaxRetries && isRetryableNetErr(err) {
 				c.retryDebug(http.MethodPost, "/nacos/v1/auth/login", attempt, err)
@@ -217,7 +213,7 @@ func (c *Client) do(ctx context.Context, method, path string, params url.Values,
 		if err != nil {
 			return nil, err
 		}
-		traced, err := c.doRequest(req, requestBodyFor(method, params))
+		traced, err := c.doRequest(req)
 		if err != nil {
 			// Network error (DNS, timeout, connection refused, etc.)
 			if retryable && attempt < getMaxRetries && isRetryableNetErr(err) {
@@ -316,7 +312,7 @@ func (c *Client) retryDebug(method, path string, attempt int, err error) {
 	t := c.trace
 	c.traceMu.RUnlock()
 	if t.Debug || t.Trace {
-		c.tracef("[debug] retry %d/%d for %s %s due to: %s\n", attempt+1, getMaxRetries, method, redactURL(path), err)
+		c.tracef("[debug] retry %d/%d for %s %s due to: %s\n", attempt+1, getMaxRetries, method, redactURL(path), redactFreeText(err.Error()))
 	}
 }
 
@@ -378,7 +374,7 @@ func (c *Client) handleAuthRetry(ctx context.Context, usedToken string, operatio
 
 func (c *Client) warnSlowAuth(elapsed time.Duration) {
 	if elapsed > time.Second {
-		_, _ = fmt.Fprintf(os.Stderr, "warning: nacos authentication took %s (consider checking nacos auth latency)\n", elapsed.Round(time.Millisecond))
+		c.tracef("warning: nacos authentication took %s (consider checking nacos auth latency)\n", elapsed.Round(time.Millisecond))
 	}
 }
 
@@ -394,7 +390,7 @@ func (c *Client) ensureToken(ctx context.Context) error {
 	return c.login(ctx)
 }
 
-func (c *Client) doRequest(req *http.Request, body string) (*tracedResponse, error) {
+func (c *Client) doRequest(req *http.Request) (*tracedResponse, error) {
 	c.traceMu.RLock()
 	t := c.trace
 	c.traceMu.RUnlock()
@@ -404,11 +400,8 @@ func (c *Client) doRequest(req *http.Request, body string) (*tracedResponse, err
 		for _, key := range sortedHeaderKeys(req.Header) {
 			values := req.Header.Values(key)
 			for _, value := range values {
-				c.tracef("[trace]     %s: %s\n", key, redactIfSensitive(key, value))
+				c.tracef("[trace]     %s: %s\n", key, redactHeaderValue(key, value))
 			}
-		}
-		if body != "" {
-			c.tracef("[trace]     Body: %s\n", truncateTrace(redactFormBody(body), c.traceLimit()))
 		}
 	}
 	resp, err := c.httpClient.Do(req) //nolint:bodyclose // reason: body is closed in readResponse via tracedResponse
@@ -446,34 +439,17 @@ func (c *Client) readResponse(traced *tracedResponse) ([]byte, error) {
 		for _, key := range sortedHeaderKeys(resp.Header) {
 			values := resp.Header.Values(key)
 			for _, value := range values {
-				c.tracef("[trace]     %s: %s\n", key, redactIfSensitive(key, value))
+				c.tracef("[trace]     %s: %s\n", key, redactHeaderValue(key, value))
 			}
-		}
-		if len(body) > 0 {
-			c.tracef("[trace]     Body: %s\n", truncateTrace(redactFormBody(string(body)), c.traceLimit()))
 		}
 	}
 	if resp.StatusCode >= 400 {
-		message := strings.TrimSpace(string(body))
-		if message == "" {
-			message = fmt.Sprintf("HTTP %d", resp.StatusCode)
-		}
-		return nil, apperrors.FromHTTP(resp.StatusCode, message)
+		return nil, apperrors.FromHTTP(
+			resp.StatusCode,
+			fmt.Sprintf("nacos API returned HTTP %d", resp.StatusCode),
+		)
 	}
 	return body, nil
-}
-
-func (c *Client) traceLimit() int {
-	c.traceMu.RLock()
-	bl := c.trace.BodyLimit
-	c.traceMu.RUnlock()
-	if bl == 0 {
-		return 0
-	}
-	if bl < 0 {
-		return 2048
-	}
-	return bl
 }
 
 func (c *Client) tracef(format string, args ...any) {
@@ -484,13 +460,6 @@ func (c *Client) tracef(format string, args ...any) {
 		w = os.Stderr
 	}
 	_, _ = fmt.Fprintf(w, format, args...)
-}
-
-func requestBodyFor(method string, params url.Values) string {
-	if method == http.MethodPost || method == http.MethodPut {
-		return params.Encode()
-	}
-	return ""
 }
 
 func redactURL(raw string) string {
@@ -552,6 +521,16 @@ func redactIfSensitive(key, value string) string {
 	return redactedMask
 }
 
+func redactHeaderValue(key, value string) string {
+	lower := strings.ToLower(key)
+	for _, sensitive := range []string{"authorization", "cookie", "credential", "key", "secret", "session", "token"} {
+		if strings.Contains(lower, sensitive) {
+			return redactedMask
+		}
+	}
+	return redactFreeText(value)
+}
+
 func redactFreeText(s string) string {
 	// Replace `<key>=<value>` only at word boundaries to avoid mangling
 	// substrings (e.g. "mypassword=" should not match "password=").
@@ -605,14 +584,6 @@ func sortedHeaderKeys(header http.Header) []string {
 	return keys
 }
 
-func truncateTrace(s string, limit int) string {
-	if limit == 0 || len(s) <= limit {
-		return s
-	}
-	totalKB := (len(s) + 1023) / 1024
-	return s[:limit] + fmt.Sprintf("...[truncated, total %dkb]", totalKB)
-}
-
 func unexpectedMutationResponse(action string, body []byte) error {
 	message := strings.TrimSpace(string(body))
 	if message == "" {
@@ -625,7 +596,7 @@ func unexpectedMutationResponse(action string, body []byte) error {
 	if nacosErr := parseNacosBusinessError(action, message); nacosErr != nil {
 		return nacosErr
 	}
-	return apperrors.New(apperrors.CodeServerError, fmt.Sprintf("%s failed, server returned: %s", action, message), nil)
+	return apperrors.New(apperrors.CodeServerError, action+" failed with an unexpected Nacos response", nil)
 }
 
 // parseNacosBusinessError detects the Nacos 2.x business envelope
@@ -653,38 +624,28 @@ func parseNacosBusinessError(action, body string) error { //nolint:gocyclo // Ha
 		return nil
 	}
 	if err := json.Unmarshal([]byte(body), &envelope); err != nil {
-		return apperrors.New(apperrors.CodeServerError, fmt.Sprintf("%s failed, server returned malformed JSON business error: %s", action, body), err)
+		return apperrors.New(apperrors.CodeServerError, action+" failed with a malformed Nacos business error", err)
 	}
 
 	// Nacos 2.x variant: {"success":false,"errorCode":"...","errorMessage":"..."}
 	// errorCode is a string, not an integer code.
 	if envelope.Success != nil && !*envelope.Success && envelope.ErrorCode != "" {
-		msg := envelope.ErrorMessage
-		if msg == "" {
-			msg = fmt.Sprintf("nacos business error: %s", envelope.ErrorCode)
-		}
-		full := fmt.Sprintf("%s: %s", action, msg)
-		return apperrors.New(nacosErrorCodeToAppCode(envelope.ErrorCode), full, nil)
+		return apperrors.New(
+			nacosErrorCodeToAppCode(envelope.ErrorCode),
+			action+" failed with a Nacos business error",
+			nil,
+		)
 	}
 
 	// success explicitly false with code == 0 and a message — treat as error.
 	if envelope.Success != nil && !*envelope.Success && envelope.Code == 0 {
-		msg := envelope.Message
-		if msg == "" {
-			msg = "nacos business error: success=false"
-		}
-		full := fmt.Sprintf("%s: %s", action, msg)
-		return apperrors.New(apperrors.CodeServerError, full, nil)
+		return apperrors.New(apperrors.CodeServerError, action+" failed with Nacos success=false", nil)
 	}
 
 	if envelope.Code == 0 || (envelope.Code >= 200 && envelope.Code < 300) {
 		return nil
 	}
-	msg := envelope.Message
-	if msg == "" {
-		msg = fmt.Sprintf("nacos business error code=%d", envelope.Code)
-	}
-	full := fmt.Sprintf("%s: %s", action, msg)
+	full := fmt.Sprintf("%s failed with Nacos business error code=%d", action, envelope.Code)
 	switch {
 	case envelope.Code == 400 || envelope.Code == 422:
 		return apperrors.New(apperrors.CodeValidationFailed, full, nil)
@@ -696,7 +657,7 @@ func parseNacosBusinessError(action, body string) error { //nolint:gocyclo // Ha
 		return apperrors.New(apperrors.CodeResourceNotFound, full, nil)
 	case envelope.Code == 409:
 		// Nacos uses 409 for "already exists" (e.g. namespace duplication).
-		lower := strings.ToLower(msg)
+		lower := strings.ToLower(envelope.Message)
 		if strings.Contains(lower, "exist") {
 			return apperrors.New(apperrors.CodeResourceAlreadyExists, full, nil)
 		}
@@ -753,7 +714,7 @@ func (c *Client) Ping(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	traced, err := c.doRequest(req, "")
+	traced, err := c.doRequest(req)
 	if err != nil {
 		return apperrors.New(apperrors.CodeNetworkError, "network error", err)
 	}

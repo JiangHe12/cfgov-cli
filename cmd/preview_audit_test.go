@@ -58,7 +58,7 @@ func TestGlobalPreviewFlagsWriteOneExplicitAuditWithoutBackendMutation(t *testin
 			if mutations.Load() != 0 {
 				t.Fatalf("backend mutation calls = %d, want 0", mutations.Load())
 			}
-			assertSingleExplicitPreviewAudit(t, home, "cfgov-cli.config.push")
+			assertReadPairAndPreview(t, home, "config.push.preflight", "cfgov-cli.config.push")
 		})
 	}
 	t.Cleanup(func() { cfgovctx.SetConfigPath("") })
@@ -160,7 +160,7 @@ func TestDiffOnlyChangePlanWritesExplicitPreviewAudit(t *testing.T) {
 	if mutations.Load() != 0 {
 		t.Fatalf("config rollback --diff mutation calls = %d, want 0", mutations.Load())
 	}
-	assertSingleExplicitPreviewAudit(t, home, "cfgov-cli.config.rollback")
+	assertReadPairAndPreview(t, home, "config.rollback.plan", "cfgov-cli.config.rollback")
 	t.Cleanup(func() { cfgovctx.SetConfigPath("") })
 }
 
@@ -194,15 +194,13 @@ func TestConfigPullPlanKeepsReadAuditAndAddsPreviewAudit(t *testing.T) {
 		t.Fatalf("config pull plan created target file: %v", err)
 	}
 	records := readRawAuditRecords(t, home)
-	if len(records) != 2 {
-		t.Fatalf("config pull plan audit count = %d, want read + preview: %#v", len(records), records)
+	if len(records) != 3 {
+		t.Fatalf("config pull plan audit count = %d, want read pair + preview: %#v", len(records), records)
 	}
-	if records[0]["eventType"] != "config.read" || records[0]["status"] != coreaudit.StatusSuccess {
-		t.Fatalf("config pull read audit = %#v", records[0])
-	}
-	if records[1]["eventType"] != "command.preview" || records[1]["status"] != auditStatusSkipped ||
-		records[1]["preview"] != true || records[1]["dryRun"] != true {
-		t.Fatalf("config pull preview audit = %#v", records[1])
+	assertRequiredReadPair(t, records[:2], "config.pull")
+	if records[2]["eventType"] != "command.preview" || records[2]["status"] != auditStatusSkipped ||
+		records[2]["preview"] != true || records[2]["dryRun"] != true {
+		t.Fatalf("config pull preview audit = %#v", records[2])
 	}
 	t.Cleanup(func() { cfgovctx.SetConfigPath("") })
 }
@@ -262,21 +260,59 @@ func TestExportPlansKeepReadAuditAndAddPreviewAudit(t *testing.T) {
 				t.Fatalf("%s plan error = %v; out=%s", tt.name, err, out)
 			}
 			records := readRawAuditRecords(t, home)
-			if len(records) != 2 {
-				t.Fatalf("%s plan audit count = %d, want read + preview: %#v", tt.name, len(records), records)
+			if len(records) != 3 {
+				t.Fatalf("%s plan audit count = %d, want read pair + preview: %#v", tt.name, len(records), records)
 			}
-			if records[0]["eventType"] != tt.eventType || records[0]["status"] != coreaudit.StatusSuccess {
-				t.Fatalf("%s read audit = %#v", tt.name, records[0])
-			}
-			if records[1]["eventType"] != "command.preview" ||
-				records[1]["status"] != auditStatusSkipped ||
-				records[1]["preview"] != true ||
-				records[1]["dryRun"] != true {
-				t.Fatalf("%s preview audit = %#v", tt.name, records[1])
+			assertRequiredReadPair(t, records[:2], tt.eventType)
+			if records[2]["eventType"] != "command.preview" ||
+				records[2]["status"] != auditStatusSkipped ||
+				records[2]["preview"] != true ||
+				records[2]["dryRun"] != true {
+				t.Fatalf("%s preview audit = %#v", tt.name, records[2])
 			}
 		})
 	}
 	t.Cleanup(func() { cfgovctx.SetConfigPath("") })
+}
+
+func assertRequiredReadPair(t *testing.T, records []map[string]any, action string) {
+	t.Helper()
+	if len(records) != 2 {
+		t.Fatalf("read records = %#v, want intent and outcome", records)
+	}
+	operationID, ok := records[0]["operationId"].(string)
+	if !ok || operationID == "" ||
+		records[0]["kind"] != readAuditKind ||
+		records[0]["eventType"] != action+".intent" ||
+		records[0]["phase"] != mutationAuditPhaseIntent ||
+		records[0]["status"] != coreaudit.StatusPending {
+		t.Fatalf("read intent = %#v", records[0])
+	}
+	if records[1]["kind"] != readAuditKind ||
+		records[1]["operationId"] != operationID ||
+		records[1]["eventType"] != action+".outcome" ||
+		records[1]["phase"] != mutationAuditPhaseOutcome ||
+		records[1]["status"] != coreaudit.StatusSuccess {
+		t.Fatalf("read outcome = %#v", records[1])
+	}
+}
+
+func assertReadPairAndPreview(t *testing.T, home, action, command string) {
+	t.Helper()
+	records := readRawAuditRecords(t, home)
+	if len(records) != 3 {
+		t.Fatalf("audit count = %d, want read pair + preview: %#v", len(records), records)
+	}
+	assertRequiredReadPair(t, records[:2], action)
+	preview := records[2]
+	target, _ := preview["target"].(map[string]any)
+	if preview["eventType"] != "command.preview" ||
+		preview["status"] != auditStatusSkipped ||
+		preview["preview"] != true ||
+		preview["dryRun"] != true ||
+		target["resource"] != command {
+		t.Fatalf("preview audit = %#v", preview)
+	}
 }
 
 func TestPlanFlagOnSensitiveReadKeepsSpecificReadAudit(t *testing.T) {

@@ -28,6 +28,7 @@ import (
 
 	"github.com/JiangHe12/opskit-core/v2/apperrors"
 	capi "github.com/hashicorp/consul/api"
+	"github.com/hashicorp/go-hclog"
 
 	"github.com/JiangHe12/cfgov-cli/internal/cfgov"
 	"github.com/JiangHe12/cfgov-cli/internal/flag"
@@ -168,7 +169,7 @@ func consulConfig(opts Options) (string, *capi.Config, error) {
 	if err != nil {
 		return "", nil, err
 	}
-	cfg := capi.DefaultConfig()
+	cfg := capi.DefaultConfigWithLogger(hclog.NewNullLogger())
 	cfg.Address = parsed.Host
 	cfg.Scheme = parsed.Scheme
 	cfg.Token = opts.Token

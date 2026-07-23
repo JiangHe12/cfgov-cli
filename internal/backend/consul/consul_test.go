@@ -3,6 +3,8 @@ package consul
 import (
 	"context"
 	"errors"
+	"io"
+	"os"
 	"strings"
 	"testing"
 
@@ -11,6 +13,35 @@ import (
 
 	"github.com/JiangHe12/cfgov-cli/internal/cfgov"
 )
+
+func TestConsulConfigSuppressesLibraryEnvironmentWarnings(t *testing.T) {
+	t.Setenv("CONSUL_HTTP_SSL", "not-a-boolean")
+
+	reader, writer, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	oldStderr := os.Stderr
+	os.Stderr = writer
+	defer func() {
+		os.Stderr = oldStderr
+		_ = writer.Close()
+		_ = reader.Close()
+	}()
+
+	if _, _, err := consulConfig(Options{Server: "127.0.0.1:8500"}); err != nil {
+		t.Fatalf("consulConfig() error = %v", err)
+	}
+	_ = writer.Close()
+	os.Stderr = oldStderr
+	output, err := io.ReadAll(reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(output) != 0 {
+		t.Fatalf("Consul library wrote to stderr: %q", output)
+	}
+}
 
 func TestNewValidatesConsulOptionsFailClosed(t *testing.T) {
 	t.Parallel()

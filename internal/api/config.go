@@ -338,11 +338,10 @@ func (c *Client) listenConfigOnce(ctx context.Context, dataID, group, md5 string
 		}
 	}
 	if resp.StatusCode >= 400 {
-		message := strings.TrimSpace(string(body))
-		if message == "" {
-			message = fmt.Sprintf("HTTP %d", resp.StatusCode)
-		}
-		return false, apperrors.FromHTTP(resp.StatusCode, message)
+		return false, apperrors.FromHTTP(
+			resp.StatusCode,
+			fmt.Sprintf("nacos config listener returned HTTP %d", resp.StatusCode),
+		)
 	}
 	return strings.TrimSpace(string(body)) != "", nil
 }

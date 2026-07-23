@@ -8,6 +8,7 @@ import (
 	"github.com/JiangHe12/opskit-core/v2/apperrors"
 	"github.com/JiangHe12/opskit-core/v2/safety"
 
+	"github.com/JiangHe12/cfgov-cli/internal/cfgov"
 	"github.com/JiangHe12/cfgov-cli/internal/cfgovctx"
 	"github.com/JiangHe12/cfgov-cli/internal/rule"
 )
@@ -90,5 +91,33 @@ func TestClassifyRuleChangeSkipWhenHashesMatch(t *testing.T) {
 	t.Parallel()
 	if got := classifyRuleChange([]map[string]any{{"resource": "r"}}, []map[string]any{{"resource": "r"}}, "abc", "abc"); got != "skip" {
 		t.Fatalf("classifyRuleChange() = %q, want skip", got)
+	}
+}
+
+func TestRuleExistingWritesRequireBackendCAS(t *testing.T) {
+	t.Parallel()
+	write := plannedRuleWrite{
+		current:  ruleSetResult{Revision: "rev1"},
+		planItem: rulePlanItem{Action: "update"},
+	}
+	err := validateRuleWriteCapabilities(
+		cfgov.Capabilities{Backend: "nacos", SupportsRules: true, SupportsCAS: false},
+		[]plannedRuleWrite{write},
+	)
+	if apperrors.AsAppError(err).Code != apperrors.CodeNotImplemented {
+		t.Fatalf("Nacos existing rule write error = %v, want not implemented", err)
+	}
+	if err := validateRuleWriteCapabilities(
+		cfgov.Capabilities{Backend: "etcd", SupportsRules: true, SupportsCAS: true},
+		[]plannedRuleWrite{write},
+	); err != nil {
+		t.Fatalf("CAS-capable rule write rejected: %v", err)
+	}
+	write.planItem.Action = "skip"
+	if err := validateRuleWriteCapabilities(
+		cfgov.Capabilities{Backend: "apollo", SupportsRules: true, SupportsCAS: false},
+		[]plannedRuleWrite{write},
+	); err != nil {
+		t.Fatalf("idempotent rule skip rejected: %v", err)
 	}
 }

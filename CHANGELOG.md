@@ -2,6 +2,46 @@
 
 All notable changes to this project are documented in this file.
 
+## v0.6.3
+
+### Security
+
+- Made backend-backed R0 reads fail closed with a durable intent before client
+  construction or backend access, R0 authorization bound to the exact context
+  snapshot, and a durable outcome before releasing results or file content.
+  Read diagnostics are redacted and bounded, and `config listen --max-events`
+  is capped at 1000.
+- Removed Nacos request/response bodies from trace output and public errors,
+  removed the TLS-verification bypass, suppressed unmanaged dependency logging,
+  and rejected Kubernetes exec credential plugins whose stderr cannot pass
+  through cfgov's governed diagnostic boundary.
+- Bound npm installs to the six provenance-covered binary digests embedded in
+  the package manifest. Release assets and signatures are verified against the
+  exact workflow identity before GitHub and npm publication; downloads are
+  bounded, timeout-controlled, fsynced, and atomically installed without a
+  verification bypass.
+- Structured config validation now fails closed for invalid JSON, requires
+  exactly one YAML document, and rejects XML payloads without exactly one
+  complete root element.
+
+### Changed
+
+- Confirmed `backup clean` is now a fixed R3 mutation requiring `--confirm`,
+  `--yes`, a non-empty ticket, and `--allow-backup-clean`.
+- Capabilities now expose mandatory read auditing, the listen-event limit, and
+  whether each backend supports writes to existing rule and flag blobs.
+- Updated to `opskit-core/v2` v2.0.2 for shared secure-file persistence across
+  context, credential, and trust stores.
+- Upgraded `golang.org/x/crypto`, `x/net`, `x/sys`, and `x/term` to their
+  current patched releases.
+
+### Fixed
+
+- Nacos and Apollo now fail `NOT_IMPLEMENTED` before authorization or side
+  effects when an existing rule or flag mutation would require unsupported CAS.
+- Context and credential preflights now preserve audit ordering and construct
+  clients only from the context state that was actually authorized.
+
 ## v0.6.2
 
 ### Security

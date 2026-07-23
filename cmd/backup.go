@@ -69,7 +69,7 @@ func backupCleanCmd(f *cliFlags) *cobra.Command {
 	cmd.Flags().StringVar(&opts.dataID, "data-id", "", "Filter by dataId")
 	cmd.Flags().StringVar(&opts.before, "before", "", "Clean backups before this time (30d / RFC3339 / YYYY-MM-DD)")
 	cmd.Flags().IntVar(&opts.keepLast, "keep-last", -1, "Keep the newest N matching backups (0 = delete all matching backups)")
-	cmd.Flags().BoolVar(&opts.confirm, "confirm", false, "Actually delete matched backups")
+	cmd.Flags().BoolVar(&opts.confirm, "confirm", false, "Confirm deletion; R3 authorization also requires --yes, --ticket, and --allow-backup-clean")
 	return cmd
 }
 
@@ -110,35 +110,37 @@ func runBackupClean(f *cliFlags, opts backupCleanOptions) error {
 		appendBackupCleanAudit(f, result, audit.StatusSuccess, nil)
 		return printBackupClean(f, result)
 	}
-	metadata := mutationValueMetadata("backup.prune", preview)
-	metadata.Items = total
-	metadata.Deletes = total
-	mutation, err := beginMutationAudit(f, mutationAuditSpec{
-		Action:   string(audit.EventBackupPrune),
-		Target:   audit.EventTarget{ResourceType: "backup", Resource: root},
-		Metadata: metadata,
+	return withAuditControlPolicyLock(f, allowBackupClean, func() error {
+		metadata := mutationValueMetadata("backup.prune", preview)
+		metadata.Items = total
+		metadata.Deletes = total
+		mutation, err := beginMutationAudit(f, mutationAuditSpec{
+			Action:   string(audit.EventBackupPrune),
+			Target:   audit.EventTarget{ResourceType: "backup", Resource: root},
+			Metadata: metadata,
+		})
+		if err != nil {
+			return err
+		}
+		result, err := backup.Clean(root, cleanOpts)
+		if err != nil {
+			result.DryRun = !cleanOpts.Apply
+		}
+		status := audit.StatusSuccess
+		if err != nil {
+			status = audit.StatusFailed
+		}
+		appendBackupCleanAudit(f, result, status, err)
+		operationErr := err
+		if operationErr != nil {
+			operationErr = apperrors.New(apperrors.CodeLocalIOError, "failed to clean backups", operationErr)
+		}
+		succeeded := len(result.Deleted) + len(result.Removed)
+		if auditErr := finishBatchMutationAudit(mutation, total, succeeded, 0, operationErr); auditErr != nil {
+			return auditErr
+		}
+		return printBackupClean(f, result)
 	})
-	if err != nil {
-		return err
-	}
-	result, err := backup.Clean(root, cleanOpts)
-	if err != nil {
-		result.DryRun = !cleanOpts.Apply
-	}
-	status := audit.StatusSuccess
-	if err != nil {
-		status = audit.StatusFailed
-	}
-	appendBackupCleanAudit(f, result, status, err)
-	operationErr := err
-	if operationErr != nil {
-		operationErr = apperrors.New(apperrors.CodeLocalIOError, "failed to clean backups", operationErr)
-	}
-	succeeded := len(result.Deleted) + len(result.Removed)
-	if auditErr := finishBatchMutationAudit(mutation, total, succeeded, 0, operationErr); auditErr != nil {
-		return auditErr
-	}
-	return printBackupClean(f, result)
 }
 
 func backupCleanRequest(opts backupCleanOptions) (backup.CleanOptions, error) {
@@ -220,7 +222,7 @@ func printBackupClean(f *cliFlags, result backup.CleanResult) error {
 		return err
 	}
 	if result.DryRun {
-		return p.Info(fmt.Sprintf("(dry-run: pass --confirm to delete %d backup file(s))", len(result.Deleted)))
+		return p.Info(fmt.Sprintf("(dry-run: deleting %d backup file(s) requires --confirm --yes --ticket <ticket> --allow-backup-clean)", len(result.Deleted)))
 	}
 	return nil
 }

@@ -73,6 +73,52 @@ func TestBackupCleanPlanDoesNotDelete(t *testing.T) {
 	}
 }
 
+func TestBackupCleanRequiresFixedR3Authorization(t *testing.T) {
+	tests := []struct {
+		name    string
+		prepare func(*cliFlags)
+	}{
+		{name: "missing yes", prepare: func(f *cliFlags) {
+			f.Ticket = "TEST-1"
+			f.AllowBackupClean = true
+		}},
+		{name: "missing ticket", prepare: func(f *cliFlags) {
+			f.Yes = true
+			f.AllowBackupClean = true
+		}},
+		{name: "missing allow", prepare: func(f *cliFlags) {
+			f.Yes = true
+			f.Ticket = "TEST-1"
+			f.AllowAuditPrune = true
+		}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			home := t.TempDir()
+			prepareMutationAuditTestParent(t, home)
+			t.Setenv("HOME", home)
+			t.Setenv("USERPROFILE", home)
+			root := filepath.Join(home, ".cfgov-cli", "backups")
+			written, err := backup.Write(root, backup.Request{
+				Context: "dev", DataID: "app.yaml", Content: []byte("enabled: true\n"), Operator: "tester",
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			f := mutationAuditTestFlags()
+			f.NonInter = true
+			tt.prepare(f)
+			err = runBackupClean(f, backupCleanOptions{keepLast: 0, confirm: true})
+			if apperrors.AsAppError(err).Code != apperrors.CodeAuthorizationRequired {
+				t.Fatalf("runBackupClean() error = %v, want authorization required", err)
+			}
+			if _, statErr := os.Stat(written.Path); statErr != nil {
+				t.Fatalf("unauthorized cleanup changed backup: %v", statErr)
+			}
+		})
+	}
+}
+
 func TestBackupCleanPartialFailureAuditsCompletedDeletionCount(t *testing.T) {
 	home := t.TempDir()
 	prepareMutationAuditTestParent(t, home)
@@ -126,6 +172,9 @@ func TestBackupCleanPartialFailureAuditsCompletedDeletionCount(t *testing.T) {
 	var records []mutationAuditRecord
 	f := mutationAuditTestFlags()
 	f.Output = "plain"
+	f.Yes = true
+	f.Ticket = "TEST-1"
+	f.AllowBackupClean = true
 	f.mutationAuditPath = filepath.Join(home, "audit.log")
 	f.mutationAudit = &mutationAuditRuntime{
 		appendRecord: func(_ string, record mutationAuditRecord, _ audit.Options) (audit.AppendResult, error) {

@@ -43,16 +43,29 @@ func serviceListCmd(f *cliFlags) *cobra.Command {
 		Short:   "List services",
 		Args:    cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			registry, ctxMeta, err := buildServiceRegistry(f)
+			readResult, err := runMandatoryBackendRead(
+				f,
+				"service.list",
+				"service",
+				"*",
+				map[string]int{
+					"page":     page,
+					"pageSize": pageSize,
+				},
+				func(backend cfgov.Backend, _ cfgovctx.Context) (cfgov.ServiceList, error) {
+					registry, registryErr := serviceRegistry(backend)
+					if registryErr != nil {
+						return cfgov.ServiceList{}, registryErr
+					}
+					return registry.ListServices(cmd.Context(), page, pageSize)
+				},
+				func(result cfgov.ServiceList) int { return len(result.Names) },
+			)
 			if err != nil {
 				return err
 			}
-			result, err := registry.ListServices(cmd.Context(), page, pageSize)
-			appendServiceAudit(f, ctxMeta, "list", "", auditStatus(err), "", err)
-			if err != nil {
-				return err
-			}
-			target := operationTargetFromContext(f, ctxMeta)
+			result := readResult.Value
+			target := readResult.operationTarget()
 			p := newPrinter(f)
 			if f.Output == "json" {
 				return targetJSONData(f, "ServiceList", result, target, operationTargetRead)
@@ -82,16 +95,27 @@ func serviceGetCmd(f *cliFlags) *cobra.Command {
 			if err := validateServiceName(service); err != nil {
 				return err
 			}
-			registry, ctxMeta, err := buildServiceRegistry(f)
+			readResult, err := runMandatoryBackendRead(
+				f,
+				"service.get",
+				"service",
+				service,
+				map[string]string{
+					"service": service,
+				},
+				func(backend cfgov.Backend, _ cfgovctx.Context) (map[string]any, error) {
+					registry, registryErr := serviceRegistry(backend)
+					if registryErr != nil {
+						return nil, registryErr
+					}
+					return registry.GetService(cmd.Context(), service)
+				},
+				func(map[string]any) int { return 1 },
+			)
 			if err != nil {
 				return err
 			}
-			result, err := registry.GetService(cmd.Context(), service)
-			appendServiceAudit(f, ctxMeta, "get", service, auditStatus(err), "", err)
-			if err != nil {
-				return err
-			}
-			return targetJSONData(f, "ServiceItem", result, operationTargetFromContext(f, ctxMeta), operationTargetRead)
+			return targetJSONData(f, "ServiceItem", readResult.Value, readResult.operationTarget(), operationTargetRead)
 		},
 	}
 	cmd.Flags().StringVarP(&service, "service", "s", "", "Service name")
@@ -109,16 +133,29 @@ func serviceInstancesCmd(f *cliFlags) *cobra.Command {
 			if err := validateServiceName(service); err != nil {
 				return err
 			}
-			registry, ctxMeta, err := buildServiceRegistry(f)
+			readResult, err := runMandatoryBackendRead(
+				f,
+				"service.instances",
+				"service",
+				service,
+				map[string]string{
+					"service": service,
+					"group":   group,
+				},
+				func(backend cfgov.Backend, _ cfgovctx.Context) ([]cfgov.ServiceInstance, error) {
+					registry, registryErr := serviceRegistry(backend)
+					if registryErr != nil {
+						return nil, registryErr
+					}
+					return registry.ListInstances(cmd.Context(), service, group)
+				},
+				func(items []cfgov.ServiceInstance) int { return len(items) },
+			)
 			if err != nil {
 				return err
 			}
-			items, err := registry.ListInstances(cmd.Context(), service, group)
-			appendServiceAudit(f, ctxMeta, "instances", service, auditStatus(err), "", err)
-			if err != nil {
-				return err
-			}
-			target := operationTargetFromContext(f, ctxMeta)
+			items := readResult.Value
+			target := readResult.operationTarget()
 			p := newPrinter(f)
 			if f.Output == "json" {
 				return targetJSONList(f, "ServiceInstanceList", items, len(items), 1, len(items), target)
@@ -146,40 +183,39 @@ func serviceRegisterCmd(f *cliFlags) *cobra.Command {
 		Short: "Register a service instance",
 		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			registry, ctxMeta, plan, err := serviceMutationInputs(f, opts, "register", safety.R1)
+			ctxMeta, ctxName, plan, err := serviceMutationInputs(f, opts, "register", safety.R1)
 			if err != nil {
 				return err
 			}
 			if isPlanOnly(f) {
 				markPreview(f)
 				plan.DryRun = true
-				return targetJSONData(f, "ChangePlan", plan, operationTargetFromContext(f, ctxMeta), operationTargetWrite)
+				return targetJSONData(f, "ChangePlan", plan, operationTargetFromResolvedContext(f, ctxMeta, ctxName), operationTargetWrite)
 			}
 			if err := validateBackupPolicy(f, ctxMeta); err != nil {
-				return err
-			}
-			if err := authorize(f, safety.R1, ctxMeta, ""); err != nil {
 				return err
 			}
 			metadata := mutationValueMetadata("service.register", plan)
 			metadata.Items = 1
 			metadata.Creates = 1
-			mutation, err := beginMutationAudit(f, mutationAuditSpec{
+			execution, err := runAuthorizedBackendMutation(f, ctxMeta, ctxName, safety.R1, "", mutationAuditSpec{
 				Action:   "service.register",
-				Context:  ctxMeta,
 				Target:   audit.EventTarget{ResourceType: "service", Resource: plan.Service},
 				Metadata: metadata,
+			}, func(backend cfgov.Backend, _ cfgovctx.Context) error {
+				registry, registryErr := serviceRegistry(backend)
+				if registryErr != nil {
+					return registryErr
+				}
+				warnEphemeralServiceRegister(plan.Options)
+				operationErr := registry.RegisterInstance(cmd.Context(), plan.Service, plan.IP, plan.Port, plan.Options)
+				appendServiceAudit(f, ctxMeta, "register", plan.Service, auditStatus(operationErr), plan.Impact, operationErr)
+				return operationErr
 			})
 			if err != nil {
 				return err
 			}
-			warnEphemeralServiceRegister(plan.Options)
-			err = registry.RegisterInstance(cmd.Context(), plan.Service, plan.IP, plan.Port, plan.Options)
-			appendServiceAudit(f, ctxMeta, "register", plan.Service, auditStatus(err), plan.Impact, err)
-			if auditErr := finishMutationAudit(mutation, mutationAuditOutcome{}, err); auditErr != nil {
-				return auditErr
-			}
-			return targetJSONData(f, "ChangeResult", map[string]any{"resourceType": "service", "action": "register", "service": plan.Service, "ip": plan.IP, "port": plan.Port}, operationTargetFromContext(f, ctxMeta), operationTargetWrite)
+			return targetJSONData(f, "ChangeResult", map[string]any{"resourceType": "service", "action": "register", "service": plan.Service, "ip": plan.IP, "port": plan.Port}, operationTargetFromDescription(execution.ContextName, execution.Backend.Describe()), operationTargetWrite)
 		},
 	}
 	opts.bind(cmd)
@@ -193,39 +229,38 @@ func serviceDeregisterCmd(f *cliFlags) *cobra.Command {
 		Short: "Deregister a service instance",
 		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			registry, ctxMeta, plan, err := serviceMutationInputs(f, opts, "deregister", safety.R2)
+			ctxMeta, ctxName, plan, err := serviceMutationInputs(f, opts, "deregister", safety.R2)
 			if err != nil {
 				return err
 			}
 			if isPlanOnly(f) {
 				markPreview(f)
 				plan.DryRun = true
-				return targetJSONData(f, "ChangePlan", plan, operationTargetFromContext(f, ctxMeta), operationTargetWrite)
+				return targetJSONData(f, "ChangePlan", plan, operationTargetFromResolvedContext(f, ctxMeta, ctxName), operationTargetWrite)
 			}
 			if err := validateBackupPolicy(f, ctxMeta); err != nil {
-				return err
-			}
-			if err := authorizeServiceDeregister(f, ctxMeta); err != nil {
 				return err
 			}
 			metadata := mutationValueMetadata("service.deregister", plan)
 			metadata.Items = 1
 			metadata.Deletes = 1
-			mutation, err := beginMutationAudit(f, mutationAuditSpec{
+			execution, err := runAuthorizedBackendMutation(f, ctxMeta, ctxName, safety.R2, allowProductionServiceDereg, mutationAuditSpec{
 				Action:   "service.deregister",
-				Context:  ctxMeta,
 				Target:   audit.EventTarget{ResourceType: "service", Resource: plan.Service},
 				Metadata: metadata,
+			}, func(backend cfgov.Backend, _ cfgovctx.Context) error {
+				registry, registryErr := serviceRegistry(backend)
+				if registryErr != nil {
+					return registryErr
+				}
+				operationErr := registry.DeregisterInstance(cmd.Context(), plan.Service, plan.IP, plan.Port, plan.Options)
+				appendServiceAudit(f, ctxMeta, "deregister", plan.Service, auditStatus(operationErr), plan.Impact, operationErr)
+				return operationErr
 			})
 			if err != nil {
 				return err
 			}
-			err = registry.DeregisterInstance(cmd.Context(), plan.Service, plan.IP, plan.Port, plan.Options)
-			appendServiceAudit(f, ctxMeta, "deregister", plan.Service, auditStatus(err), plan.Impact, err)
-			if auditErr := finishMutationAudit(mutation, mutationAuditOutcome{}, err); auditErr != nil {
-				return auditErr
-			}
-			return targetJSONData(f, "ChangeResult", map[string]any{"resourceType": "service", "action": "deregister", "service": plan.Service, "ip": plan.IP, "port": plan.Port}, operationTargetFromContext(f, ctxMeta), operationTargetWrite)
+			return targetJSONData(f, "ChangeResult", map[string]any{"resourceType": "service", "action": "deregister", "service": plan.Service, "ip": plan.IP, "port": plan.Port}, operationTargetFromDescription(execution.ContextName, execution.Backend.Describe()), operationTargetWrite)
 		},
 	}
 	opts.bind(cmd)
@@ -259,26 +294,26 @@ func (s *instanceFlagSet) bind(cmd *cobra.Command) {
 	_ = cmd.MarkFlagRequired("port")
 }
 
-func serviceMutationInputs(f *cliFlags, flags instanceFlagSet, action string, risk safety.Risk) (cfgov.ServiceRegistry, cfgovctx.Context, servicePlan, error) {
+func serviceMutationInputs(f *cliFlags, flags instanceFlagSet, action string, risk safety.Risk) (cfgovctx.Context, string, servicePlan, error) {
 	if err := validateServiceName(flags.service); err != nil {
-		return nil, cfgovctx.Context{}, servicePlan{}, err
+		return cfgovctx.Context{}, "", servicePlan{}, err
 	}
 	if net.ParseIP(flags.ip) == nil {
-		return nil, cfgovctx.Context{}, servicePlan{}, apperrors.New(apperrors.CodeUsageError, "invalid instance IP", nil)
+		return cfgovctx.Context{}, "", servicePlan{}, apperrors.New(apperrors.CodeUsageError, "invalid instance IP", nil)
 	}
 	if flags.port <= 0 || flags.port > 65535 {
-		return nil, cfgovctx.Context{}, servicePlan{}, apperrors.New(apperrors.CodeUsageError, "--port must be between 1 and 65535", nil)
+		return cfgovctx.Context{}, "", servicePlan{}, apperrors.New(apperrors.CodeUsageError, "--port must be between 1 and 65535", nil)
 	}
 	options, err := instanceOptions(flags)
 	if err != nil {
-		return nil, cfgovctx.Context{}, servicePlan{}, err
+		return cfgovctx.Context{}, "", servicePlan{}, err
 	}
-	registry, ctxMeta, err := buildServiceRegistry(f)
+	ctxMeta, ctxName, err := resolvedContext(f)
 	if err != nil {
-		return nil, cfgovctx.Context{}, servicePlan{}, err
+		return cfgovctx.Context{}, "", servicePlan{}, err
 	}
 	impact := fmt.Sprintf("%s service instance %s %s:%d", action, flags.service, flags.ip, flags.port)
-	return registry, ctxMeta, servicePlan{
+	return ctxMeta, ctxName, servicePlan{
 		ResourceType: "service",
 		Action:       action,
 		Service:      flags.service,
@@ -319,18 +354,6 @@ func parseMetadata(values []string) (map[string]string, error) {
 		out[key] = val
 	}
 	return out, nil
-}
-
-func buildServiceRegistry(f *cliFlags) (cfgov.ServiceRegistry, cfgovctx.Context, error) {
-	backend, ctxMeta, err := buildBackend(f)
-	if err != nil {
-		return nil, cfgovctx.Context{}, err
-	}
-	registry, err := serviceRegistry(backend)
-	if err != nil {
-		return nil, cfgovctx.Context{}, err
-	}
-	return registry, ctxMeta, nil
 }
 
 func serviceRegistry(backend cfgov.Backend) (cfgov.ServiceRegistry, error) {

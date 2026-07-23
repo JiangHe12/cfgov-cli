@@ -26,10 +26,6 @@ type operationTarget struct {
 	Namespace string `json:"namespace"`
 }
 
-func operationTargetFromBackend(f *cliFlags, backend cfgov.Backend) operationTarget {
-	return operationTargetFromDescription(f.contextName(), backend.Describe())
-}
-
 func operationTargetFromDescription(contextName string, desc cfgov.Description) operationTarget {
 	return operationTarget{
 		Context:   contextName,
@@ -40,9 +36,13 @@ func operationTargetFromDescription(contextName string, desc cfgov.Description) 
 }
 
 func operationTargetFromContext(f *cliFlags, meta cfgovctx.Context) operationTarget {
+	return operationTargetFromResolvedContext(f, meta, f.contextName())
+}
+
+func operationTargetFromResolvedContext(f *cliFlags, meta cfgovctx.Context, contextName string) operationTarget {
 	backendName := firstNonEmpty(f.Backend, meta.Backend, "nacos")
 	return operationTarget{
-		Context:   f.contextName(),
+		Context:   contextName,
 		Backend:   backendName,
 		Server:    sanitizeTargetServer(firstNonEmpty(f.Server, backendServerEnv(backendName), meta.Server)),
 		Namespace: targetNamespace(f, meta, backendName),

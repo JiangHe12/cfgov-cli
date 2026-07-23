@@ -78,6 +78,11 @@ type plannedRuleWrite struct {
 	deleteBlob   bool
 }
 
+type ruleWritePreflight struct {
+	Plan   ruleWritePlan
+	Writes []plannedRuleWrite
+}
+
 func ruleCreateCmd(f *cliFlags) *cobra.Command {
 	opts := ruleWriteOptions{action: "create"}
 	cmd := &cobra.Command{
@@ -176,29 +181,31 @@ func runRuleSingleWrite(ctx context.Context, f *cliFlags, opts ruleWriteOptions)
 	if err != nil {
 		return err
 	}
-	backend, store, ctxMeta, err := buildRuleStore(f)
+	backendRead, err := runRuleWritePreflight(
+		ctx,
+		f,
+		opts.app,
+		opts.action,
+		safety.R1,
+		[]rule.Type{ruleType},
+		false,
+		map[string]any{"type": ruleType, "localKey": rule.Key(local, ruleType)},
+		func(currentType rule.Type, current ruleSetResult) ([]map[string]any, error) {
+			return planSingleRuleSet(opts, currentType, current.Rules, local)
+		},
+	)
 	if err != nil {
 		return err
 	}
-	current, err := readRuleSet(ctx, backend, store, opts.app, ruleType)
-	if err != nil {
-		return err
-	}
-	next, err := planSingleRuleSet(opts, ruleType, current.Rules, local)
-	if err != nil {
-		return err
-	}
-	write, plan, err := plannedRuleSetWrite(store, opts.app, ruleType, safety.R1, opts.action, current, next)
-	if err != nil {
-		return err
-	}
+	backend, ctxMeta := backendRead.Backend, backendRead.Context
+	write, plan := backendRead.Value.Writes[0], backendRead.Value.Plan
 	if opts.expectedRevision != "" {
 		write.current.Revision = opts.expectedRevision
 		write.planItem.Revision = opts.expectedRevision
 		plan.Items[0].Revision = opts.expectedRevision
 	}
-	write.backupBefore = opts.action == "update" || current.Count > 0
-	return applyRuleWrites(ctx, f, backend, ctxMeta, plan, []plannedRuleWrite{write}, safety.R1, "")
+	write.backupBefore = opts.action == "update" || write.current.Count > 0
+	return applyRuleWrites(ctx, f, backend, ctxMeta, plan, []plannedRuleWrite{write}, safety.R1, "", backendRead.ContextName)
 }
 
 func runRuleDelete(ctx context.Context, f *cliFlags, opts ruleWriteOptions) error {
@@ -209,30 +216,32 @@ func runRuleDelete(ctx context.Context, f *cliFlags, opts ruleWriteOptions) erro
 	if err != nil {
 		return err
 	}
-	backend, store, ctxMeta, err := buildRuleStore(f)
+	backendRead, err := runRuleWritePreflight(
+		ctx,
+		f,
+		opts.app,
+		opts.action,
+		safety.R2,
+		[]rule.Type{ruleType},
+		false,
+		map[string]any{"type": ruleType, "resource": opts.resource, "all": opts.all},
+		func(_ rule.Type, current ruleSetResult) ([]map[string]any, error) {
+			return planDeleteRuleSet(opts, current.Rules)
+		},
+	)
 	if err != nil {
 		return err
 	}
-	current, err := readRuleSet(ctx, backend, store, opts.app, ruleType)
-	if err != nil {
-		return err
-	}
-	next, err := planDeleteRuleSet(opts, current.Rules)
-	if err != nil {
-		return err
-	}
-	write, plan, err := plannedRuleSetWrite(store, opts.app, ruleType, safety.R2, opts.action, current, next)
-	if err != nil {
-		return err
-	}
+	backend, ctxMeta := backendRead.Backend, backendRead.Context
+	write, plan := backendRead.Value.Writes[0], backendRead.Value.Plan
 	if opts.expectedRevision != "" {
 		write.current.Revision = opts.expectedRevision
 		write.planItem.Revision = opts.expectedRevision
 		plan.Items[0].Revision = opts.expectedRevision
 	}
-	write.backupBefore = current.Count > 0
+	write.backupBefore = write.current.Count > 0
 	write.deleteBlob = opts.all
-	return applyRuleWrites(ctx, f, backend, ctxMeta, plan, []plannedRuleWrite{write}, safety.R2, allowProductionRuleDelete)
+	return applyRuleWrites(ctx, f, backend, ctxMeta, plan, []plannedRuleWrite{write}, safety.R2, allowProductionRuleDelete, backendRead.ContextName)
 }
 
 func runRuleImport(ctx context.Context, f *cliFlags, opts ruleWriteOptions) error {
@@ -255,29 +264,98 @@ func runRuleBatchUpsert(ctx context.Context, f *cliFlags, app, action string, lo
 	if len(locals) == 0 {
 		return apperrors.New(apperrors.CodeUsageError, "no rule files found", nil)
 	}
-	backend, store, ctxMeta, err := buildRuleStore(f)
+	risk := safety.R1
+	types := sortedRuleTypes(locals)
+	backendRead, err := runRuleWritePreflight(
+		ctx,
+		f,
+		app,
+		action,
+		risk,
+		types,
+		true,
+		map[string]any{"locals": ruleLocalFingerprints(locals)},
+		func(ruleType rule.Type, _ ruleSetResult) ([]map[string]any, error) {
+			return locals[ruleType], nil
+		},
+	)
 	if err != nil {
 		return err
 	}
-	risk := safety.R1
-	writes := make([]plannedRuleWrite, 0, len(locals))
-	plan := ruleWritePlan{ResourceType: "rule", Action: action, App: app, Risk: risk, DryRun: isPlanOnly(f)}
-	for _, ruleType := range sortedRuleTypes(locals) {
-		current, err := readRuleSet(ctx, backend, store, app, ruleType)
-		if err != nil {
-			return err
-		}
-		write, _, err := plannedRuleSetWrite(store, app, ruleType, risk, action, current, locals[ruleType])
-		if err != nil {
-			return err
-		}
-		write.backupBefore = action == "rollback" || current.Count > 0
-		writes = append(writes, write)
-		plan.Items = append(plan.Items, write.planItem)
-		addRulePlanSummary(&plan.Summary, write.planItem.Action)
-		plan.Warnings = append(plan.Warnings, ruleWarnings(map[rule.Type][]map[string]any{ruleType: locals[ruleType]})...)
+	backend, ctxMeta := backendRead.Backend, backendRead.Context
+	plan, writes := backendRead.Value.Plan, backendRead.Value.Writes
+	for index := range writes {
+		writes[index].backupBefore = action == "rollback" || writes[index].current.Count > 0
 	}
-	return applyRuleWrites(ctx, f, backend, ctxMeta, plan, writes, risk, "")
+	return applyRuleWrites(ctx, f, backend, ctxMeta, plan, writes, risk, "", backendRead.ContextName)
+}
+
+func runRuleWritePreflight(
+	ctx context.Context,
+	f *cliFlags,
+	app string,
+	action string,
+	risk safety.Risk,
+	ruleTypes []rule.Type,
+	batch bool,
+	request map[string]any,
+	next func(rule.Type, ruleSetResult) ([]map[string]any, error),
+) (mandatoryBackendReadResult[ruleWritePreflight], error) {
+	request["action"] = action
+	request["app"] = app
+	return runMandatoryBackendRead(
+		f,
+		"rule."+action+".plan",
+		"rule",
+		app,
+		request,
+		func(backend cfgov.Backend, _ cfgovctx.Context) (ruleWritePreflight, error) {
+			backend, store, err := ensureRuleStore(backend)
+			if err != nil {
+				return ruleWritePreflight{}, err
+			}
+			result := ruleWritePreflight{
+				Plan: ruleWritePlan{ResourceType: "rule", Action: action, App: app, Risk: risk, DryRun: isPlanOnly(f)},
+			}
+			for _, ruleType := range ruleTypes {
+				current, readErr := readRuleSet(ctx, backend, store, app, ruleType)
+				if readErr != nil {
+					return ruleWritePreflight{}, readErr
+				}
+				nextRules, nextErr := next(ruleType, current)
+				if nextErr != nil {
+					return ruleWritePreflight{}, nextErr
+				}
+				write, itemPlan, planErr := plannedRuleSetWrite(store, app, ruleType, risk, action, current, nextRules)
+				if planErr != nil {
+					return ruleWritePreflight{}, planErr
+				}
+				result.Writes = append(result.Writes, write)
+				if !batch {
+					result.Plan = itemPlan
+					continue
+				}
+				result.Plan.Items = append(result.Plan.Items, write.planItem)
+				addRulePlanSummary(&result.Plan.Summary, write.planItem.Action)
+				result.Plan.Warnings = append(result.Plan.Warnings, ruleWarnings(map[rule.Type][]map[string]any{ruleType: nextRules})...)
+			}
+			return result, nil
+		},
+		func(result ruleWritePreflight) int { return len(result.Writes) },
+	)
+}
+
+func ruleLocalFingerprints(locals map[rule.Type][]map[string]any) []map[string]any {
+	result := make([]map[string]any, 0, len(locals))
+	for _, ruleType := range sortedRuleTypes(locals) {
+		payload, _ := marshalRuleSet(locals[ruleType])
+		result = append(result, map[string]any{
+			"type":   ruleType,
+			"count":  len(locals[ruleType]),
+			"sha256": sha256Bytes(payload),
+		})
+	}
+	return result
 }
 
 func readOneRuleForWrite(opts ruleWriteOptions) (rule.Type, map[string]any, error) {
@@ -370,12 +448,19 @@ func plannedRuleSetWrite(store cfgov.RuleStore, app string, ruleType rule.Type, 
 	return plannedRuleWrite{ruleType: ruleType, coord: coord, current: current, next: next, payload: payload, planItem: item}, plan, nil
 }
 
-func applyRuleWrites(ctx context.Context, f *cliFlags, backend cfgov.Backend, ctxMeta cfgovctx.Context, plan ruleWritePlan, writes []plannedRuleWrite, risk safety.Risk, required safety.AllowFlag) error { //nolint:gocyclo // Preview, policy, backup, intent/outcome, and ordered writes are one governed transaction flow.
+func applyRuleWrites(ctx context.Context, f *cliFlags, backend cfgov.Backend, ctxMeta cfgovctx.Context, plan ruleWritePlan, writes []plannedRuleWrite, risk safety.Risk, required safety.AllowFlag, contextNames ...string) error { //nolint:gocyclo // Preview, policy, backup, intent/outcome, and ordered writes are one governed transaction flow.
+	contextName := f.contextName()
+	if len(contextNames) > 0 && contextNames[0] != "" {
+		contextName = contextNames[0]
+	}
+	if err := validateRuleWriteCapabilities(backend.Capabilities(), writes); err != nil {
+		return err
+	}
 	plan.DryRun = isPlanOnly(f)
 	if plan.DryRun {
 		markPreview(f)
 		appendRuleAudit(f, ctxMeta, plan.Action, plan.App, plan.Type, audit.StatusSuccess, ruleWriteAudit(plan), nil)
-		return targetJSONData(f, "ChangePlan", plan, operationTargetFromBackend(f, backend), operationTargetWrite)
+		return targetJSONData(f, "ChangePlan", plan, operationTargetFromDescription(contextName, backend.Describe()), operationTargetWrite)
 	}
 	if err := validateBackupPolicy(f, ctxMeta); err != nil {
 		return err
@@ -383,7 +468,7 @@ func applyRuleWrites(ctx context.Context, f *cliFlags, backend cfgov.Backend, ct
 	if err := validateMandatoryRuleBackup(f, writes); err != nil {
 		return err
 	}
-	if err := authorize(f, risk, ctxMeta, required); err != nil {
+	if err := authorizeForContext(f, risk, ctxMeta, required, contextName); err != nil {
 		return err
 	}
 	mutation, err := beginSchemaMutationAudit(
@@ -397,6 +482,7 @@ func applyRuleWrites(ctx context.Context, f *cliFlags, backend cfgov.Backend, ct
 		plan.Summary.Create,
 		plan.Summary.Update,
 		plan.Summary.Delete,
+		contextName,
 	)
 	if err != nil {
 		return err
@@ -438,7 +524,24 @@ func applyRuleWrites(ctx context.Context, f *cliFlags, backend cfgov.Backend, ct
 		}
 	}
 	appendRuleAudit(f, ctxMeta, plan.Action, plan.App, plan.Type, audit.StatusSuccess, ruleWriteAudit(plan), nil)
-	return targetJSONData(f, "ChangeResult", map[string]any{"resourceType": "rule", "action": plan.Action, "app": plan.App, "summary": plan.Summary, "items": plan.Items, "backup": backups}, operationTargetFromBackend(f, backend), operationTargetWrite)
+	return targetJSONData(f, "ChangeResult", map[string]any{"resourceType": "rule", "action": plan.Action, "app": plan.App, "summary": plan.Summary, "items": plan.Items, "backup": backups}, operationTargetFromDescription(contextName, backend.Describe()), operationTargetWrite)
+}
+
+func validateRuleWriteCapabilities(capabilities cfgov.Capabilities, writes []plannedRuleWrite) error {
+	if capabilities.SupportsCAS {
+		return nil
+	}
+	for _, write := range writes {
+		if write.planItem.Action == "skip" || write.current.Revision == "" {
+			continue
+		}
+		return apperrors.New(
+			apperrors.CodeNotImplemented,
+			fmt.Sprintf("%s does not support the atomic revision precondition required to modify an existing rule set", capabilities.Backend),
+			nil,
+		)
+	}
+	return nil
 }
 
 func validateMandatoryRuleBackup(f *cliFlags, writes []plannedRuleWrite) error {

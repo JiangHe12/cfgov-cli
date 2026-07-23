@@ -1,6 +1,6 @@
 {
   "name": "cfgov-cli",
-  "version": "0.6.2",
+  "version": "0.6.3",
   "description": "Governed configuration, Sentinel-rule, and feature-flag operations CLI for AI agents (Nacos, Apollo, etcd, Kubernetes, Consul)",
   "bin": {
     "cfgov": "bin/cfgov-cli.js",
@@ -13,7 +13,8 @@
     "LICENSE"
   ],
   "scripts": {
-    "postinstall": "node scripts/install.js"
+    "postinstall": "node scripts/install.js",
+    "test": "node --test test/install.test.js"
   },
   "keywords": [
     "config",
@@ -29,6 +30,12 @@
   "repository": {
     "type": "git",
     "url": "git+https://github.com/JiangHe12/cfgov-cli.git"
+  },
+  "binaryManifest": {
+    "schema": 1,
+    "repository": "JiangHe12/cfgov-cli",
+    "version": "0.6.3",
+    "binaries": {}
   },
   "homepage": "https://github.com/JiangHe12/cfgov-cli",
   "engines": {

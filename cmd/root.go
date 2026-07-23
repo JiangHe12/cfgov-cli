@@ -3,6 +3,7 @@ package cmd
 import (
 	"context"
 	"fmt"
+	"io"
 	"net/url"
 	"os"
 	"os/signal"
@@ -49,6 +50,7 @@ const (
 	allowContextChange          = safety.AllowFlag("allow-context-change")
 	allowContextDelete          = safety.AllowFlag("allow-context-delete")
 	allowRoleChange             = safety.AllowFlag("allow-role-change")
+	allowBackupClean            = safety.AllowFlag("allow-backup-clean")
 	allowAuditPrune             = safety.AllowFlag("allow-audit-prune")
 	allowAuditRepair            = safety.AllowFlag("allow-audit-repair")
 	auditStatusSkipped          = "skipped"
@@ -91,6 +93,7 @@ type cliFlags struct {
 	AllowCtxChange      bool
 	AllowCtxDelete      bool
 	AllowRoleChange     bool
+	AllowBackupClean    bool
 	AllowAuditPrune     bool
 	AllowAuditRepair    bool
 	K8sKubeconfig       string
@@ -114,6 +117,8 @@ type cliFlags struct {
 	mutationAudit       *mutationAuditRuntime
 	mutationAuditPath   string
 	contextImport       *contextImportRuntime
+	backendBuilder      func(*cliFlags, cfgovctx.Context, string) (cfgov.Backend, error)
+	diagnosticOut       io.Writer
 }
 
 var versionInfo = struct {
@@ -249,6 +254,7 @@ func newRootCmdWith(f *cliFlags) *cobra.Command {
 	cmd.PersistentFlags().BoolVar(&f.AllowCtxChange, "allow-context-change", false, "Allow an R3 context create, replace, switch, import, or credential migration")
 	cmd.PersistentFlags().BoolVar(&f.AllowCtxDelete, "allow-context-delete", false, "Allow an R3 context deletion")
 	cmd.PersistentFlags().BoolVar(&f.AllowRoleChange, "allow-role-change", false, "Allow an R3 context role assignment or removal")
+	cmd.PersistentFlags().BoolVar(&f.AllowBackupClean, "allow-backup-clean", false, "Allow an R3 local backup cleanup operation")
 	cmd.PersistentFlags().BoolVar(&f.AllowAuditPrune, "allow-audit-prune", false, "Allow an R3 audit evidence pruning operation")
 	cmd.PersistentFlags().BoolVar(&f.AllowAuditRepair, "allow-audit-repair", false, "Allow an R3 audit evidence repair operation")
 	cmd.PersistentFlags().StringVar(&f.K8sKubeconfig, "k8s-kubeconfig", "", "Kubernetes kubeconfig path")
@@ -347,10 +353,14 @@ func setSuggestionsRecursive(cmd *cobra.Command, distance int) {
 	}
 }
 
-func buildBackend(f *cliFlags) (cfgov.Backend, cfgovctx.Context, error) {
-	item, name, err := resolvedContext(f)
-	if err != nil {
-		return nil, cfgovctx.Context{}, err
+func buildBackendForResolvedContext(
+	f *cliFlags,
+	item cfgovctx.Context,
+	name string,
+) (cfgov.Backend, cfgovctx.Context, error) {
+	if f != nil && f.backendBuilder != nil {
+		backend, err := f.backendBuilder(f, item, name)
+		return backend, item, err
 	}
 	backendName := firstNonEmpty(f.Backend, item.Backend)
 	if backendName == "" {
@@ -388,7 +398,7 @@ func buildBackend(f *cliFlags) (cfgov.Backend, cfgovctx.Context, error) {
 	}
 	namespace := firstNonEmpty(f.Namespace, os.Getenv("NACOS_NAMESPACE"), item.Namespace)
 	client := api.NewClient(server, username, password, namespace, f.Timeout)
-	client.SetTrace(api.TraceOptions{Debug: f.Debug, Trace: f.Trace, BodyLimit: f.TraceBodyLim, Writer: os.Stderr})
+	client.SetTrace(api.TraceOptions{Debug: f.Debug, Trace: f.Trace, BodyLimit: f.TraceBodyLim, Writer: diagnosticWriter(f)})
 	return nacosbackend.New(client, server), item, nil
 }
 
@@ -414,7 +424,7 @@ func buildK8sBackend(f *cliFlags, item cfgovctx.Context) (cfgov.Backend, error) 
 		Namespace:  firstNonEmpty(f.Namespace, item.Namespace),
 		Timeout:    f.Timeout,
 		Trace:      f.Debug || f.Trace,
-		TraceOut:   os.Stderr,
+		TraceOut:   diagnosticWriter(f),
 	})
 	if err != nil {
 		return nil, err
@@ -443,7 +453,7 @@ func buildApolloBackend(f *cliFlags, contextName string, item cfgovctx.Context, 
 		Reason:        f.Reason,
 		Timeout:       f.Timeout,
 		Trace:         f.Debug || f.Trace,
-		TraceOut:      os.Stderr,
+		TraceOut:      diagnosticWriter(f),
 	})
 	if err != nil {
 		return nil, err
@@ -472,7 +482,7 @@ func buildEtcdBackend(f *cliFlags, contextName string, item cfgovctx.Context, se
 		ClientKey:     firstNonEmpty(os.Getenv("ETCD_CLIENT_KEY"), item.EtcdClientKey),
 		Timeout:       f.Timeout,
 		Trace:         f.Debug || f.Trace,
-		TraceOut:      os.Stderr,
+		TraceOut:      diagnosticWriter(f),
 	})
 	if err != nil {
 		return nil, err
@@ -500,7 +510,7 @@ func buildConsulBackend(f *cliFlags, contextName string, item cfgovctx.Context, 
 		ClientKey:     firstNonEmpty(os.Getenv("CONSUL_CLIENT_KEY"), item.ConsulClientKey),
 		Timeout:       f.Timeout,
 		Trace:         f.Debug || f.Trace,
-		TraceOut:      os.Stderr,
+		TraceOut:      diagnosticWriter(f),
 	})
 }
 
@@ -598,6 +608,7 @@ func authorizeForContext(f *cliFlags, base safety.Risk, meta cfgovctx.Context, r
 			allowContextChange:          f.AllowCtxChange,
 			allowContextDelete:          f.AllowCtxDelete,
 			allowRoleChange:             f.AllowRoleChange,
+			allowBackupClean:            f.AllowBackupClean,
 			allowAuditPrune:             f.AllowAuditPrune,
 			allowAuditRepair:            f.AllowAuditRepair,
 		},
@@ -671,7 +682,7 @@ func appendAuditWarnForContext(f *cliFlags, typ audit.EventType, contextName str
 	}
 	path, pathErr := configuredAuditPath(f)
 	if pathErr != nil {
-		_, _ = fmt.Fprintf(os.Stderr, "warning: audit path failed: %v\n", pathErr)
+		_, _ = fmt.Fprintf(diagnosticWriter(f), "warning: audit path failed: %s\n", redactedDiagnosticError(pathErr))
 		return
 	}
 	evt := audit.Event{
@@ -687,8 +698,22 @@ func appendAuditWarnForContext(f *cliFlags, typ audit.EventType, contextName str
 		evt.Error = &audit.EventError{Code: string(appErr.Code)}
 	}
 	if appendErr := appendQueuedAuditEvent(f, path, evt); appendErr != nil {
-		_, _ = fmt.Fprintf(os.Stderr, "warning: audit write failed: %v\n", appendErr)
+		_, _ = fmt.Fprintf(diagnosticWriter(f), "warning: audit write failed: %s\n", redactedDiagnosticError(appendErr))
 	}
+}
+
+func diagnosticWriter(f *cliFlags) io.Writer {
+	if f != nil && f.diagnosticOut != nil {
+		return f.diagnosticOut
+	}
+	return os.Stderr
+}
+
+func redactedDiagnosticError(err error) string {
+	if err == nil {
+		return ""
+	}
+	return redact.String(err.Error())
 }
 
 type previewAuditRecord struct {

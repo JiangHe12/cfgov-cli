@@ -53,6 +53,12 @@ type ruleValidationResult struct {
 	Issues   []rule.Issue      `json:"issues,omitempty"`
 }
 
+type ruleExportReadResult struct {
+	Items       []ruleSetResult
+	ExportFiles map[string][]byte
+	ExportNames []string
+}
+
 func newRuleCmd(f *cliFlags) *cobra.Command {
 	cmd := &cobra.Command{Use: "rule", Short: "Read and validate Sentinel rules", Args: requireSubcommand, RunE: runParentHelp}
 	cmd.AddCommand(
@@ -77,26 +83,42 @@ func ruleListCmd(f *cliFlags) *cobra.Command {
 		Short: "List Sentinel rule counts",
 		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			backend, store, ctxMeta, err := buildRuleStore(f)
-			if err != nil {
-				return err
-			}
 			ruleTypes, err := selectedRuleTypes(typeName)
 			if err != nil {
 				return err
 			}
-			items := make([]ruleSetResult, 0, len(ruleTypes))
-			for _, ruleType := range ruleTypes {
-				result, err := readRuleSet(cmd.Context(), backend, store, app, ruleType)
-				if err != nil {
-					appendRuleAudit(f, ctxMeta, "list", app, ruleType, audit.StatusFailed, "", err)
-					return err
-				}
-				result.Rules = nil
-				items = append(items, result)
+			readResult, err := runMandatoryBackendRead(
+				f,
+				"rule.list",
+				"rule",
+				app,
+				map[string]any{
+					"app":   app,
+					"types": ruleTypes,
+				},
+				func(backend cfgov.Backend, _ cfgovctx.Context) ([]ruleSetResult, error) {
+					_, store, storeErr := ensureRuleStore(backend)
+					if storeErr != nil {
+						return nil, storeErr
+					}
+					items := make([]ruleSetResult, 0, len(ruleTypes))
+					for _, ruleType := range ruleTypes {
+						result, readErr := readRuleSet(cmd.Context(), backend, store, app, ruleType)
+						if readErr != nil {
+							return nil, readErr
+						}
+						result.Rules = nil
+						items = append(items, result)
+					}
+					return items, nil
+				},
+				func(items []ruleSetResult) int { return len(items) },
+			)
+			if err != nil {
+				return err
 			}
-			appendRuleAudit(f, ctxMeta, "list", app, "", audit.StatusSuccess, ruleAuditSummary(items), nil)
-			target := operationTargetFromBackend(f, backend)
+			items := readResult.Value
+			target := readResult.operationTarget()
 			if f.Output == "json" {
 				return targetJSONList(f, "RuleList", items, len(items), 1, len(items), target)
 			}
@@ -128,19 +150,33 @@ func ruleGetCmd(f *cliFlags) *cobra.Command {
 			if err != nil {
 				return err
 			}
-			backend, store, ctxMeta, err := buildRuleStore(f)
+			readResult, err := runMandatoryBackendRead(
+				f,
+				"rule.get",
+				"rule",
+				app+"/"+string(ruleType),
+				map[string]any{
+					"app":      app,
+					"type":     ruleType,
+					"resource": resource,
+				},
+				func(backend cfgov.Backend, _ cfgovctx.Context) (ruleSetResult, error) {
+					_, store, storeErr := ensureRuleStore(backend)
+					if storeErr != nil {
+						return ruleSetResult{}, storeErr
+					}
+					result, readErr := readRuleSet(cmd.Context(), backend, store, app, ruleType)
+					if readErr != nil {
+						return ruleSetResult{}, readErr
+					}
+					return filterRuleSetByResource(result, resource), nil
+				},
+				func(result ruleSetResult) int { return result.Count },
+			)
 			if err != nil {
 				return err
 			}
-			result, err := readRuleSet(cmd.Context(), backend, store, app, ruleType)
-			appendRuleAudit(f, ctxMeta, "get", app, ruleType, auditStatus(err), ruleSetAudit(result), err)
-			if err != nil {
-				return err
-			}
-			if resource != "" {
-				result = filterRuleSetByResource(result, resource)
-			}
-			return targetJSONData(f, "RuleSet", result, operationTargetFromBackend(f, backend), operationTargetRead)
+			return targetJSONData(f, "RuleSet", readResult.Value, readResult.operationTarget(), operationTargetRead)
 		},
 	}
 	cmd.Flags().StringVar(&app, "app", "", "Sentinel app")
@@ -158,36 +194,59 @@ func ruleExportCmd(f *cliFlags) *cobra.Command {
 		Short: "Export Sentinel rule sets",
 		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			backend, store, ctxMeta, err := buildRuleStore(f)
+			planOnly := isPlanOnly(f)
+			backendRead, err := runMandatoryBackendRead(
+				f,
+				"rule.export",
+				"rule",
+				app,
+				map[string]any{
+					"app":   app,
+					"types": rule.AllTypes,
+					"dir":   dir,
+				},
+				func(backend cfgov.Backend, _ cfgovctx.Context) (ruleExportReadResult, error) {
+					_, store, storeErr := ensureRuleStore(backend)
+					if storeErr != nil {
+						return ruleExportReadResult{}, storeErr
+					}
+					result := ruleExportReadResult{
+						Items:       make([]ruleSetResult, 0, len(rule.AllTypes)),
+						ExportFiles: make(map[string][]byte, len(rule.AllTypes)),
+						ExportNames: make([]string, 0, len(rule.AllTypes)),
+					}
+					for _, ruleType := range rule.AllTypes {
+						item, readErr := readRuleSet(cmd.Context(), backend, store, app, ruleType)
+						if readErr != nil {
+							return ruleExportReadResult{}, readErr
+						}
+						content, marshalErr := json.MarshalIndent(item.Rules, "", "  ")
+						if marshalErr != nil {
+							return ruleExportReadResult{}, apperrors.New(apperrors.CodeLocalIOError, "failed to encode rules", marshalErr)
+						}
+						name := string(ruleType) + ".json"
+						result.ExportFiles[name] = append(content, '\n')
+						result.ExportNames = append(result.ExportNames, name)
+						item.Rules = nil
+						result.Items = append(result.Items, item)
+					}
+					if preflightErr := preflightNewLocalFiles(dir, result.ExportNames); preflightErr != nil {
+						return ruleExportReadResult{}, preflightErr
+					}
+					return result, nil
+				},
+				func(result ruleExportReadResult) int { return len(result.Items) },
+			)
 			if err != nil {
 				return err
 			}
-			planOnly := isPlanOnly(f)
-			items := make([]ruleSetResult, 0, len(rule.AllTypes))
-			exportFiles := make(map[string][]byte, len(rule.AllTypes))
-			exportNames := make([]string, 0, len(rule.AllTypes))
-			for _, ruleType := range rule.AllTypes {
-				result, err := readRuleSet(cmd.Context(), backend, store, app, ruleType)
-				if err != nil {
-					appendRuleAudit(f, ctxMeta, "export", app, ruleType, audit.StatusFailed, "", err)
-					return err
-				}
-				content, err := json.MarshalIndent(result.Rules, "", "  ")
-				if err != nil {
-					return apperrors.New(apperrors.CodeLocalIOError, "failed to encode rules", err)
-				}
-				name := string(ruleType) + ".json"
-				exportFiles[name] = append(content, '\n')
-				exportNames = append(exportNames, name)
-				result.Rules = nil
-				items = append(items, result)
-			}
-			if err := preflightNewLocalFiles(dir, exportNames); err != nil {
-				appendRuleAudit(f, ctxMeta, "export", app, "", audit.StatusFailed, "", err)
-				return err
-			}
+			readResult := backendRead.Value
+			ctxMeta := backendRead.Context
+			target := backendRead.operationTarget()
+			items := readResult.Items
+			exportFiles := readResult.ExportFiles
+			exportNames := readResult.ExportNames
 			if planOnly {
-				appendRuleAudit(f, ctxMeta, "export", app, "", audit.StatusSuccess, ruleAuditSummary(items), nil)
 				markPreview(f)
 				return targetJSONData(f, "ChangePlan", map[string]any{
 					"resourceType": "file",
@@ -196,7 +255,7 @@ func ruleExportCmd(f *cliFlags) *cobra.Command {
 					"dir":          dir,
 					"items":        items,
 					"dryRun":       true,
-				}, operationTargetFromBackend(f, backend), operationTargetRead)
+				}, target, operationTargetRead)
 			}
 			metadata := mutationValueMetadata("rule.export", items)
 			metadata.Items = len(exportFiles)
@@ -230,8 +289,7 @@ func ruleExportCmd(f *cliFlags) *cobra.Command {
 			if err := finishMutationAudit(mutation, mutationAuditOutcome{Succeeded: succeeded}, nil); err != nil {
 				return err
 			}
-			appendRuleAudit(f, ctxMeta, "export", app, "", audit.StatusSuccess, ruleAuditSummary(items), nil)
-			return targetJSONData(f, "RuleExport", map[string]any{"app": app, "dir": dir, "items": items}, operationTargetFromBackend(f, backend), operationTargetRead)
+			return targetJSONData(f, "RuleExport", map[string]any{"app": app, "dir": dir, "items": items}, target, operationTargetRead)
 		},
 	}
 	cmd.Flags().StringVar(&app, "app", "", "Sentinel app")
@@ -265,25 +323,44 @@ func ruleDiffCmd(f *cliFlags) *cobra.Command {
 			if err != nil {
 				return err
 			}
-			backend, store, ctxMeta, err := buildRuleStore(f)
+			readResult, err := runMandatoryBackendRead(
+				f,
+				"rule.diff",
+				"rule",
+				app+"/"+string(ruleType),
+				map[string]any{
+					"app":         app,
+					"type":        ruleType,
+					"localSha256": local.SHA256,
+					"localCount":  local.Count,
+				},
+				func(backend cfgov.Backend, _ cfgovctx.Context) (ruleDiffResult, error) {
+					_, store, storeErr := ensureRuleStore(backend)
+					if storeErr != nil {
+						return ruleDiffResult{}, storeErr
+					}
+					remote, readErr := readRuleSet(cmd.Context(), backend, store, app, ruleType)
+					if readErr != nil {
+						return ruleDiffResult{}, readErr
+					}
+					result := ruleDiffResult{
+						App:          app,
+						Type:         ruleType,
+						RemoteSHA256: remote.SHA256,
+						LocalSHA256:  local.SHA256,
+						RemoteCount:  remote.Count,
+						LocalCount:   local.Count,
+					}
+					result.Same = result.RemoteSHA256 == result.LocalSHA256 &&
+						result.RemoteCount == result.LocalCount
+					return result, nil
+				},
+				func(ruleDiffResult) int { return 1 },
+			)
 			if err != nil {
 				return err
 			}
-			remote, err := readRuleSet(cmd.Context(), backend, store, app, ruleType)
-			appendRuleAudit(f, ctxMeta, "diff", app, ruleType, auditStatus(err), ruleSetAudit(remote), err)
-			if err != nil {
-				return err
-			}
-			result := ruleDiffResult{
-				App:          app,
-				Type:         ruleType,
-				RemoteSHA256: remote.SHA256,
-				LocalSHA256:  local.SHA256,
-				RemoteCount:  remote.Count,
-				LocalCount:   local.Count,
-			}
-			result.Same = result.RemoteSHA256 == result.LocalSHA256 && result.RemoteCount == result.LocalCount
-			return targetJSONData(f, "RuleDiff", result, operationTargetFromBackend(f, backend), operationTargetRead)
+			return targetJSONData(f, "RuleDiff", readResult.Value, readResult.operationTarget(), operationTargetRead)
 		},
 	}
 	cmd.Flags().StringVar(&app, "app", "", "Sentinel app")
@@ -303,36 +380,55 @@ func ruleDiffDir(ctx context.Context, f *cliFlags, app, typeName, dir string) er
 	if err != nil {
 		return err
 	}
-	backend, store, ctxMeta, err := buildRuleStore(f)
+	readResult, err := runMandatoryBackendRead(
+		f,
+		"rule.diff",
+		"rule",
+		app,
+		map[string]any{
+			"app":   app,
+			"dir":   dir,
+			"types": ruleTypes,
+		},
+		func(backend cfgov.Backend, _ cfgovctx.Context) ([]ruleDiffResult, error) {
+			_, store, storeErr := ensureRuleStore(backend)
+			if storeErr != nil {
+				return nil, storeErr
+			}
+			items := make([]ruleDiffResult, 0, len(ruleTypes))
+			for _, ruleType := range ruleTypes {
+				localRules, ok := locals[ruleType]
+				if !ok {
+					continue
+				}
+				remote, readErr := readRuleSet(ctx, backend, store, app, ruleType)
+				if readErr != nil {
+					return nil, readErr
+				}
+				localPayload, marshalErr := json.Marshal(localRules)
+				if marshalErr != nil {
+					return nil, apperrors.New(apperrors.CodeLocalIOError, "failed to marshal local rules", marshalErr)
+				}
+				item := ruleDiffResult{
+					App:          app,
+					Type:         ruleType,
+					RemoteSHA256: remote.SHA256,
+					LocalSHA256:  sha256Bytes(localPayload),
+					RemoteCount:  remote.Count,
+					LocalCount:   len(localRules),
+				}
+				item.Same = item.RemoteSHA256 == item.LocalSHA256 &&
+					item.RemoteCount == item.LocalCount
+				items = append(items, item)
+			}
+			return items, nil
+		},
+		func(items []ruleDiffResult) int { return len(items) },
+	)
 	if err != nil {
 		return err
 	}
-	items := make([]ruleDiffResult, 0, len(ruleTypes))
-	for _, ruleType := range ruleTypes {
-		localRules, ok := locals[ruleType]
-		if !ok {
-			continue
-		}
-		remote, err := readRuleSet(ctx, backend, store, app, ruleType)
-		appendRuleAudit(f, ctxMeta, "diff", app, ruleType, auditStatus(err), ruleSetAudit(remote), err)
-		if err != nil {
-			return err
-		}
-		localPayload, err := json.Marshal(localRules)
-		if err != nil {
-			return apperrors.New(apperrors.CodeLocalIOError, "failed to marshal local rules", err)
-		}
-		item := ruleDiffResult{
-			App:          app,
-			Type:         ruleType,
-			RemoteSHA256: remote.SHA256,
-			LocalSHA256:  sha256Bytes(localPayload),
-			RemoteCount:  remote.Count,
-			LocalCount:   len(localRules),
-		}
-		item.Same = item.RemoteSHA256 == item.LocalSHA256 && item.RemoteCount == item.LocalCount
-		items = append(items, item)
-	}
+	items := readResult.Value
 	same := true
 	for _, item := range items {
 		if !item.Same {
@@ -340,7 +436,7 @@ func ruleDiffDir(ctx context.Context, f *cliFlags, app, typeName, dir string) er
 			break
 		}
 	}
-	return targetJSONData(f, "RuleDiff", map[string]any{"app": app, "dir": dir, "same": same, "items": items}, operationTargetFromBackend(f, backend), operationTargetRead)
+	return targetJSONData(f, "RuleDiff", map[string]any{"app": app, "dir": dir, "same": same, "items": items}, readResult.operationTarget(), operationTargetRead)
 }
 
 func ruleValidateCmd(f *cliFlags) *cobra.Command {
@@ -468,18 +564,6 @@ func selectedRuleTypes(typeName string) ([]rule.Type, error) {
 	return []rule.Type{ruleType}, nil
 }
 
-func buildRuleStore(f *cliFlags) (cfgov.Backend, cfgov.RuleStore, cfgovctx.Context, error) {
-	backend, ctxMeta, err := buildBackend(f)
-	if err != nil {
-		return nil, nil, cfgovctx.Context{}, err
-	}
-	backend, store, err := ensureRuleStore(backend)
-	if err != nil {
-		return nil, nil, cfgovctx.Context{}, err
-	}
-	return backend, store, ctxMeta, nil
-}
-
 func ensureRuleStore(backend cfgov.Backend) (cfgov.Backend, cfgov.RuleStore, error) {
 	store, ok := backend.(cfgov.RuleStore)
 	if !ok || !backend.Capabilities().SupportsRules {
@@ -529,21 +613,6 @@ func appendRuleAudit(f *cliFlags, ctxMeta cfgovctx.Context, verb, app string, ru
 		resource += "/" + string(ruleType)
 	}
 	appendAuditWarn(f, audit.EventType("rule."+verb), ctxMeta, audit.EventTarget{ResourceType: "rule", Resource: resource}, status, diff, err)
-}
-
-func ruleSetAudit(result ruleSetResult) string {
-	if result.App == "" && result.Type == "" {
-		return ""
-	}
-	return "app=" + result.App + " type=" + string(result.Type) + " sha256=" + result.SHA256 + " count=" + intString(result.Count)
-}
-
-func ruleAuditSummary(items []ruleSetResult) string {
-	parts := make([]string, 0, len(items))
-	for _, item := range items {
-		parts = append(parts, string(item.Type)+"="+item.SHA256+"/"+intString(item.Count))
-	}
-	return "ruleSets=" + intString(len(items)) + " " + strings.Join(parts, ",")
 }
 
 func filterRuleSetByResource(result ruleSetResult, resource string) ruleSetResult {

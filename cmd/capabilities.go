@@ -25,19 +25,22 @@ type capTool struct {
 }
 
 type capBackend struct {
-	Name            string   `json:"name"`
-	ResourceTypes   []string `json:"resourceTypes"`
-	SupportsHistory bool     `json:"supportsHistory"`
-	SupportsWatch   bool     `json:"supportsWatch"`
-	SupportsRules   bool     `json:"supportsRules"`
-	SupportsFlags   bool     `json:"supportsFlags"`
-	SupportsCAS     bool     `json:"supportsCas"`
-	Verbs           []string `json:"verbs"`
+	Name                       string   `json:"name"`
+	ResourceTypes              []string `json:"resourceTypes"`
+	SupportsHistory            bool     `json:"supportsHistory"`
+	SupportsWatch              bool     `json:"supportsWatch"`
+	SupportsRules              bool     `json:"supportsRules"`
+	SupportsFlags              bool     `json:"supportsFlags"`
+	SupportsCAS                bool     `json:"supportsCas"`
+	SupportsExistingRuleWrites bool     `json:"supportsExistingRuleWrites"`
+	SupportsExistingFlagWrites bool     `json:"supportsExistingFlagWrites"`
+	Verbs                      []string `json:"verbs"`
 }
 
 type capLimits struct {
 	DefaultConcurrency int   `json:"defaultConcurrency"`
 	MaxConcurrency     int   `json:"maxConcurrency"`
+	MaxListenEvents    int   `json:"maxListenEvents"`
 	TraceBodyLimit     int   `json:"traceBodyLimit"`
 	AuditMaxSizeBytes  int64 `json:"auditMaxSizeBytes"`
 }
@@ -56,6 +59,7 @@ type capFeatures struct {
 type capSupported struct {
 	ContextAPIVersions []string `json:"contextApiVersions"`
 	AuditAPIVersions   []string `json:"auditApiVersions"`
+	ReadAudit          string   `json:"readAudit"`
 }
 
 type capDomain struct {
@@ -121,9 +125,6 @@ func capabilityPlainCommands() []string {
 }
 
 func currentBackendCapabilities(f *cliFlags) cfgov.Capabilities {
-	if backend, _, err := buildBackend(f); err == nil {
-		return backend.Capabilities()
-	}
 	ctxMeta, _, _ := resolvedContext(f)
 	name := firstNonEmpty(f.Backend, ctxMeta.Backend, "nacos")
 	switch name {
@@ -197,17 +198,20 @@ func buildCapabilities(f *cliFlags, backend cfgov.Capabilities) capabilitiesData
 		Supported: capSupported{
 			ContextAPIVersions: []string{"cfgov-cli.io/context/v1"},
 			AuditAPIVersions:   []string{auditAPIVersion, mutationAuditAPIVersion},
+			ReadAudit:          "required-intent-outcome",
 		},
 		Domain: capDomain{
 			Backend: capBackend{
-				Name:            backend.Backend,
-				ResourceTypes:   backend.ResourceTypes,
-				SupportsHistory: backend.SupportsHistory,
-				SupportsWatch:   backend.SupportsWatch,
-				SupportsRules:   backend.SupportsRules,
-				SupportsFlags:   backend.SupportsFlags,
-				SupportsCAS:     backend.SupportsCAS,
-				Verbs:           backend.Verbs,
+				Name:                       backend.Backend,
+				ResourceTypes:              backend.ResourceTypes,
+				SupportsHistory:            backend.SupportsHistory,
+				SupportsWatch:              backend.SupportsWatch,
+				SupportsRules:              backend.SupportsRules,
+				SupportsFlags:              backend.SupportsFlags,
+				SupportsCAS:                backend.SupportsCAS,
+				SupportsExistingRuleWrites: backend.SupportsRules && backend.SupportsCAS,
+				SupportsExistingFlagWrites: backend.SupportsFlags && backend.SupportsCAS,
+				Verbs:                      backend.Verbs,
 			},
 			Commands: []capCommand{
 				{Noun: "config", Verb: "get", Risk: "R0"},
@@ -261,19 +265,21 @@ func buildCapabilities(f *cliFlags, backend cfgov.Capabilities) capabilitiesData
 				{Noun: "flag", Verb: "delete", Risk: "R2"},
 				{Noun: "flag", Verb: "delete(protected ctx)", Risk: "R3", AllowFlag: "allow-production-flag-delete"},
 				{Noun: "backup", Verb: "list", Risk: "R0"},
+				{Noun: "backup", Verb: "clean", Risk: "R3", AllowFlag: "allow-backup-clean"},
 				{Noun: "audit", Verb: "prune", Risk: "R3", AllowFlag: "allow-audit-prune"},
 				{Noun: "audit", Verb: "verify --repair", Risk: "R3", AllowFlag: "allow-audit-repair"},
 			},
 			OutputFormats:      []string{"table", "json", "plain"},
 			ErrorCodes:         errorCodeStrings(),
 			ExitCodes:          apperrors.AllExitCodes(),
-			Kinds:              []string{"AuditPruneResult", "AuditQueryResult", "AuditVerifyResult", "BackupCleanResult", "BackupList", "Capabilities", "ChangePlan", "ChangeResult", "ConfigExport", "ConfigItem", "ConfigList", "ConfigListenEvent", "ContextImportResult", "ContextItem", "ContextList", "ContextTestResult", "DiffResult", "DoctorResult", "Error", "ExportResult", "FlagDiff", "FlagExport", "FlagList", "FlagSet", "FlagValidation", "HistoryList", "MutationAuditRecord", "NamespaceItem", "NamespaceList", "RoleList", "RuleDiff", "RuleExport", "RuleList", "RuleSet", "RuleValidation", "ServiceInstanceList", "ServiceItem", "ServiceList", "ValidationResult", "VersionInfo"},
+			Kinds:              []string{"AuditPruneResult", "AuditQueryResult", "AuditVerifyResult", "BackupCleanResult", "BackupList", "Capabilities", "ChangePlan", "ChangeResult", "ConfigExport", "ConfigItem", "ConfigList", "ConfigListenEvent", "ContextImportResult", "ContextItem", "ContextList", "ContextTestResult", "DiffResult", "DoctorResult", "Error", "ExportResult", "FlagDiff", "FlagExport", "FlagList", "FlagSet", "FlagValidation", "HistoryList", "MutationAuditRecord", "NamespaceItem", "NamespaceList", "ReadAuditRecord", "RoleList", "RuleDiff", "RuleExport", "RuleList", "RuleSet", "RuleValidation", "ServiceInstanceList", "ServiceItem", "ServiceList", "ValidationResult", "VersionInfo"},
 			CredentialBackends: credstore.Available(),
 			Environment:        []string{"APOLLO_APP_ID", "APOLLO_CLUSTER", "APOLLO_ENV", "APOLLO_NAMESPACE", "APOLLO_RULE_NAMESPACE", "APOLLO_SECRET", "APOLLO_SERVER", "APOLLO_TOKEN", "CFGOV_AUDIT_PRIVATE_KEY", "CFGOV_CREDENTIAL_PASSPHRASE", "CONSUL_CACERT", "CONSUL_CLIENT_CERT", "CONSUL_CLIENT_KEY", "CONSUL_KEY_PREFIX", "CONSUL_NAMESPACE", "CONSUL_RULE_NAMESPACE", "CONSUL_SERVER", "CONSUL_TOKEN", "ETCD_CACERT", "ETCD_CLIENT_CERT", "ETCD_CLIENT_KEY", "ETCD_ENDPOINTS", "ETCD_KEY_PREFIX", "ETCD_NAMESPACE", "ETCD_PASSWORD", "ETCD_RULE_NAMESPACE", "ETCD_SERVER", "ETCD_USERNAME", "KUBECONFIG", "NACOS_NAMESPACE", "NACOS_PASSWORD", "NACOS_SERVER", "NACOS_USERNAME"},
 			RuleTypes:          []string{"flow", "degrade", "system", "authority", "param"},
 			Limits: capLimits{
 				DefaultConcurrency: 1,
 				MaxConcurrency:     1,
+				MaxListenEvents:    maxConfigListenEvents,
 				TraceBodyLimit:     f.TraceBodyLim,
 				AuditMaxSizeBytes:  firstPositiveInt64(f.AuditMaxSize, audit.DefaultMaxSizeBytes),
 			},

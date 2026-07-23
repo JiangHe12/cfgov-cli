@@ -12,6 +12,10 @@ func TestMain(m *testing.M) {
 	if os.Getenv(canceledProcessBoundaryTestEnv) == "1" {
 		exitWithCommandError(context.Canceled)
 	}
+	if err := configureTestProcessSecurity(); err != nil {
+		_, _ = fmt.Fprintf(os.Stderr, "configure test process security: %v\n", err)
+		os.Exit(1)
+	}
 	home, err := os.MkdirTemp("", "cfgov-cli-test-home-")
 	if err != nil {
 		_, _ = fmt.Fprintf(os.Stderr, "create isolated test home: %v\n", err)
@@ -24,6 +28,11 @@ func TestMain(m *testing.M) {
 		os.Exit(1)
 	}
 	home = canonicalHome
+	if err := secureTestHomeRoot(home); err != nil {
+		_, _ = fmt.Fprintf(os.Stderr, "secure isolated test home: %v\n", err)
+		_ = os.RemoveAll(home)
+		os.Exit(1)
+	}
 	type environmentValue struct {
 		name    string
 		value   string

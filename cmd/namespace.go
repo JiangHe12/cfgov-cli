@@ -44,16 +44,26 @@ func namespaceListCmd(f *cliFlags) *cobra.Command {
 		Short:   "List namespaces",
 		Args:    cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			manager, ctxMeta, err := buildNamespaceManager(f)
+			readResult, err := runMandatoryBackendRead(
+				f,
+				"namespace.list",
+				"namespace",
+				"*",
+				map[string]any{},
+				func(backend cfgov.Backend, _ cfgovctx.Context) ([]cfgov.NamespaceItem, error) {
+					manager, managerErr := namespaceManager(backend)
+					if managerErr != nil {
+						return nil, managerErr
+					}
+					return manager.ListNamespaces(cmd.Context())
+				},
+				func(items []cfgov.NamespaceItem) int { return len(items) },
+			)
 			if err != nil {
 				return err
 			}
-			items, err := manager.ListNamespaces(cmd.Context())
-			appendNamespaceAudit(f, ctxMeta, "list", "", auditStatus(err), "", err)
-			if err != nil {
-				return err
-			}
-			target := operationTargetFromContext(f, ctxMeta)
+			items := readResult.Value
+			target := readResult.operationTarget()
 			p := newPrinter(f)
 			if f.Output == "json" {
 				return targetJSONList(f, "NamespaceList", items, len(items), 1, len(items), target)
@@ -97,17 +107,14 @@ func namespaceMutateCmd(
 			if err := validateNamespaceInput(id, name); err != nil {
 				return err
 			}
-			manager, ctxMeta, err := buildNamespaceManager(f)
+			ctxMeta, ctxName, err := resolvedContext(f)
 			if err != nil {
 				return err
 			}
 			plan := namespacePlan{ResourceType: "namespace", Action: action, ID: id, Name: name, Description: desc, Risk: safety.R1, Impact: action + " one namespace", DryRun: isPlanOnly(f)}
 			if plan.DryRun {
 				markPreview(f)
-				return targetJSONData(f, "ChangePlan", plan, operationTargetFromContext(f, ctxMeta), operationTargetWrite)
-			}
-			if err := authorize(f, safety.R1, ctxMeta, ""); err != nil {
-				return err
+				return targetJSONData(f, "ChangePlan", plan, operationTargetFromResolvedContext(f, ctxMeta, ctxName), operationTargetWrite)
 			}
 			metadata := mutationValueMetadata("namespace."+action, plan)
 			metadata.Items = 1
@@ -116,21 +123,23 @@ func namespaceMutateCmd(
 			} else {
 				metadata.Updates = 1
 			}
-			mutation, err := beginMutationAudit(f, mutationAuditSpec{
+			execution, err := runAuthorizedBackendMutation(f, ctxMeta, ctxName, safety.R1, "", mutationAuditSpec{
 				Action:   "namespace." + action,
-				Context:  ctxMeta,
 				Target:   audit.EventTarget{ResourceType: "namespace", Resource: id},
 				Metadata: metadata,
+			}, func(backend cfgov.Backend, _ cfgovctx.Context) error {
+				manager, managerErr := namespaceManager(backend)
+				if managerErr != nil {
+					return managerErr
+				}
+				operationErr := mutate(cmd.Context(), manager, id, name, desc)
+				appendNamespaceAudit(f, ctxMeta, action, id, auditStatus(operationErr), plan.Impact, operationErr)
+				return operationErr
 			})
 			if err != nil {
 				return err
 			}
-			err = mutate(cmd.Context(), manager, id, name, desc)
-			appendNamespaceAudit(f, ctxMeta, action, id, auditStatus(err), plan.Impact, err)
-			if auditErr := finishMutationAudit(mutation, mutationAuditOutcome{}, err); auditErr != nil {
-				return auditErr
-			}
-			return targetJSONData(f, "ChangeResult", map[string]any{"resourceType": "namespace", "action": action, "id": id, "name": name}, operationTargetFromContext(f, ctxMeta), operationTargetWrite)
+			return targetJSONData(f, "ChangeResult", map[string]any{"resourceType": "namespace", "action": action, "id": id, "name": name}, operationTargetFromDescription(execution.ContextName, execution.Backend.Describe()), operationTargetWrite)
 		},
 	}
 	cmd.Flags().StringVar(&id, "id", "", "Namespace id")
@@ -152,31 +161,47 @@ func namespaceDeleteCmd(f *cliFlags) *cobra.Command {
 			if err := validateNamespaceID(id); err != nil {
 				return err
 			}
-			manager, ctxMeta, err := buildNamespaceManager(f)
+			backendRead, err := runMandatoryBackendRead(
+				f,
+				"namespace.delete.preflight",
+				"namespace",
+				id,
+				map[string]string{"id": id},
+				func(backend cfgov.Backend, _ cfgovctx.Context) (int, error) {
+					manager, managerErr := namespaceManager(backend)
+					if managerErr != nil {
+						return 0, managerErr
+					}
+					return manager.NamespaceConfigCount(cmd.Context(), id)
+				},
+				func(int) int { return 1 },
+			)
 			if err != nil {
 				return err
 			}
-			count, err := manager.NamespaceConfigCount(cmd.Context(), id)
+			backend, ctxMeta, ctxName := backendRead.Backend, backendRead.Context, backendRead.ContextName
+			manager, err := namespaceManager(backend)
 			if err != nil {
-				appendNamespaceAudit(f, ctxMeta, "delete", id, audit.StatusFailed, "", err)
 				return err
 			}
+			count := backendRead.Value
 			impact := fmt.Sprintf("delete namespace %s; configCount=%d", id, count)
 			plan := namespacePlan{ResourceType: "namespace", Action: "delete", ID: id, Risk: safety.R2, ConfigCount: count, Impact: impact, DryRun: isPlanOnly(f)}
 			if plan.DryRun {
 				markPreview(f)
-				return targetJSONData(f, "ChangePlan", plan, operationTargetFromContext(f, ctxMeta), operationTargetWrite)
+				return targetJSONData(f, "ChangePlan", plan, backendRead.operationTarget(), operationTargetWrite)
 			}
-			if err := authorizeNamespaceDelete(f, ctxMeta); err != nil {
+			if err := authorizeForContext(f, safety.R2, ctxMeta, allowProductionNamespaceDel, ctxName); err != nil {
 				return err
 			}
 			if err := confirmNamespaceDelete(f, id); err != nil {
 				return err
 			}
 			mutation, err := beginMutationAudit(f, mutationAuditSpec{
-				Action:  "namespace.delete",
-				Context: ctxMeta,
-				Target:  audit.EventTarget{ResourceType: "namespace", Resource: id},
+				Action:      "namespace.delete",
+				ContextName: ctxName,
+				Context:     ctxMeta,
+				Target:      audit.EventTarget{ResourceType: "namespace", Resource: id},
 				Metadata: mutationAuditMetadata{
 					Items:   1,
 					Deletes: 1,
@@ -190,24 +215,12 @@ func namespaceDeleteCmd(f *cliFlags) *cobra.Command {
 			if auditErr := finishMutationAudit(mutation, mutationAuditOutcome{}, err); auditErr != nil {
 				return auditErr
 			}
-			return targetJSONData(f, "ChangeResult", map[string]any{"resourceType": "namespace", "action": "delete", "id": id, "configCount": count}, operationTargetFromContext(f, ctxMeta), operationTargetWrite)
+			return targetJSONData(f, "ChangeResult", map[string]any{"resourceType": "namespace", "action": "delete", "id": id, "configCount": count}, backendRead.operationTarget(), operationTargetWrite)
 		},
 	}
 	cmd.Flags().StringVar(&id, "id", "", "Namespace id")
 	_ = cmd.MarkFlagRequired("id")
 	return cmd
-}
-
-func buildNamespaceManager(f *cliFlags) (cfgov.NamespaceManager, cfgovctx.Context, error) {
-	backend, ctxMeta, err := buildBackend(f)
-	if err != nil {
-		return nil, cfgovctx.Context{}, err
-	}
-	manager, err := namespaceManager(backend)
-	if err != nil {
-		return nil, cfgovctx.Context{}, err
-	}
-	return manager, ctxMeta, nil
 }
 
 func namespaceManager(backend cfgov.Backend) (cfgov.NamespaceManager, error) {

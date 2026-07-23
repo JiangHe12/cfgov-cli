@@ -6,8 +6,6 @@ import (
 	"crypto/md5" //nolint:gosec // Nacos revision fingerprints are MD5.
 	"crypto/sha256"
 	"encoding/hex"
-	"encoding/json"
-	"encoding/xml"
 	"errors"
 	"fmt"
 	"io"
@@ -17,7 +15,6 @@ import (
 	"time"
 
 	"github.com/spf13/cobra"
-	"gopkg.in/yaml.v3"
 
 	"github.com/JiangHe12/opskit-core/v2/apperrors"
 	"github.com/JiangHe12/opskit-core/v2/audit"
@@ -28,6 +25,24 @@ import (
 	"github.com/JiangHe12/cfgov-cli/internal/cfgov"
 	"github.com/JiangHe12/cfgov-cli/internal/cfgovctx"
 )
+
+type configHistoryReadResult struct {
+	Items []cfgov.HistoryItem
+	Total int
+}
+
+type configBlobReadResult struct {
+	Blob       cfgov.Blob
+	Coordinate cfgov.Coordinate
+	Key        string
+}
+
+type configContextDiffReadResult struct {
+	Diff              diffResult
+	TargetDescription cfgov.Description
+}
+
+const maxConfigListenEvents = 1_000
 
 func newConfigCmd(f *cliFlags) *cobra.Command {
 	cmd := &cobra.Command{Use: "config", Short: "Govern config blobs", Args: requireSubcommand, RunE: runParentHelp}
@@ -57,31 +72,38 @@ func configGetCmd(f *cliFlags) *cobra.Command {
 		Short: "Read a config blob",
 		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			backend, ctxMeta, err := buildBackend(f)
+			readResult, err := runMandatoryBackendRead(
+				f,
+				"config.get",
+				"config",
+				key,
+				map[string]string{"key": key},
+				func(backend cfgov.Backend, _ cfgovctx.Context) (configBlobReadResult, error) {
+					normalizedKey, keyErr := validateConfigKey(backend, key)
+					if keyErr != nil {
+						return configBlobReadResult{}, keyErr
+					}
+					coord := cfgov.Coordinate{Namespace: backend.Describe().Namespace, Key: normalizedKey}
+					blob, getErr := backend.Get(cmd.Context(), coord)
+					return configBlobReadResult{Blob: blob, Coordinate: coord, Key: normalizedKey}, getErr
+				},
+				func(configBlobReadResult) int { return 1 },
+			)
 			if err != nil {
 				return err
 			}
-			key, err = validateConfigKey(backend, key)
-			if err != nil {
-				return err
-			}
-			coord := cfgov.Coordinate{Namespace: backend.Describe().Namespace, Key: key}
-			blob, err := backend.Get(cmd.Context(), coord)
-			appendReadAudit(f, ctxMeta, key, err)
-			if err != nil {
-				return err
-			}
-			target := operationTargetFromBackend(f, backend)
+			blob, coord, normalizedKey := readResult.Value.Blob, readResult.Value.Coordinate, readResult.Value.Key
+			target := readResult.operationTarget()
 			p := newPrinter(f)
 			if f.Output == "plain" {
 				if err := printOperationTarget(p, target, operationTargetRead); err != nil {
 					return err
 				}
-				return p.Content(key, string(blob.Content))
+				return p.Content(normalizedKey, string(blob.Content))
 			}
 			return targetJSONData(f, "ConfigItem", map[string]any{
 				"namespace": coord.Namespace,
-				"key":       key,
+				"key":       normalizedKey,
 				"revision":  blob.Revision,
 				"sha256":    sha256Bytes(blob.Content),
 				"content":   string(blob.Content),
@@ -102,34 +124,38 @@ func configListCmd(f *cliFlags) *cobra.Command {
 		Short:   "List config blobs",
 		Args:    cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			backend, ctxMeta, err := buildBackend(f)
+			readResult, err := runMandatoryBackendRead(
+				f,
+				"config.list",
+				"config",
+				firstNonEmpty(f.Namespace, "*"),
+				map[string]any{"group": group, "query": query, "prefix": prefix, "page": page, "pageSize": pageSize, "limit": limit},
+				func(backend cfgov.Backend, _ cfgovctx.Context) ([]cfgov.ListItem, error) {
+					normalizedQuery := query
+					if normalizedQuery != "" {
+						var queryErr error
+						normalizedQuery, queryErr = validateConfigKey(backend, normalizedQuery)
+						if queryErr != nil {
+							return nil, queryErr
+						}
+					}
+					return backend.List(cmd.Context(), cfgov.ListOptions{
+						Namespace: backend.Describe().Namespace,
+						Group:     group,
+						Query:     normalizedQuery,
+						Prefix:    prefix,
+						Page:      page,
+						PageSize:  pageSize,
+						Limit:     limit,
+					})
+				},
+				func(items []cfgov.ListItem) int { return len(items) },
+			)
 			if err != nil {
 				return err
 			}
-			if query != "" {
-				query, err = validateConfigKey(backend, query)
-				if err != nil {
-					return err
-				}
-			}
-			items, err := backend.List(cmd.Context(), cfgov.ListOptions{
-				Namespace: backend.Describe().Namespace,
-				Group:     group,
-				Query:     query,
-				Prefix:    prefix,
-				Page:      page,
-				PageSize:  pageSize,
-				Limit:     limit,
-			})
-			status := audit.StatusSuccess
-			if err != nil {
-				status = audit.StatusFailed
-			}
-			appendAuditWarn(f, audit.EventType("config.list"), ctxMeta, audit.EventTarget{ResourceType: "config"}, status, "", err)
-			if err != nil {
-				return err
-			}
-			target := operationTargetFromBackend(f, backend)
+			items := readResult.Value
+			target := readResult.operationTarget()
 			p := newPrinter(f)
 			if f.Output == "json" {
 				return targetJSONList(f, "ConfigList", items, len(items), normalizedPage(page), normalizedPageSize(pageSize, len(items)), target)
@@ -163,31 +189,45 @@ func configDiffCmd(f *cliFlags) *cobra.Command {
 			if sourceContext != "" || targetContext != "" {
 				return configContextDiff(cmd.Context(), f, key, sourceContext, targetContext)
 			}
-			backend, ctxMeta, err := buildBackend(f)
-			if err != nil {
-				return err
-			}
-			key, err = validateConfigKey(backend, key)
-			if err != nil {
-				return err
-			}
 			local, err := readConfigInput(inlineContent, file)
 			if err != nil {
 				return err
 			}
-			coord := cfgov.Coordinate{Namespace: backend.Describe().Namespace, Key: key}
-			remote, err := backend.Get(cmd.Context(), coord)
-			appendReadAudit(f, ctxMeta, key, err)
+			readResult, err := runMandatoryBackendRead(
+				f,
+				"config.diff",
+				"config",
+				key,
+				map[string]any{
+					"key":         key,
+					"localSha256": sha256Bytes(local),
+				},
+				func(backend cfgov.Backend, _ cfgovctx.Context) (diffResult, error) {
+					normalizedKey, keyErr := validateConfigKey(backend, key)
+					if keyErr != nil {
+						return diffResult{}, keyErr
+					}
+					coord := cfgov.Coordinate{Namespace: backend.Describe().Namespace, Key: normalizedKey}
+					remote, getErr := backend.Get(cmd.Context(), coord)
+					if getErr != nil {
+						return diffResult{}, getErr
+					}
+					result := diffSummary(remote.Content, local)
+					if result.Same && isStrictNoChange(f) {
+						return diffResult{}, apperrors.New(apperrors.CodeNoChangeRequired, "no changes detected", nil)
+					}
+					return result, nil
+				},
+				func(diffResult) int { return 1 },
+			)
 			if err != nil {
 				return err
 			}
-			summary := diffSummary(remote.Content, local)
-			if summary.Same && isStrictNoChange(f) {
-				return apperrors.New(apperrors.CodeNoChangeRequired, "no changes detected", nil)
-			}
+			summary := readResult.Value
+			target := readResult.operationTarget()
 			if f.Output == "plain" {
 				p := newPrinter(f)
-				if err := printOperationTarget(p, operationTargetFromBackend(f, backend), operationTargetRead); err != nil {
+				if err := printOperationTarget(p, target, operationTargetRead); err != nil {
 					return err
 				}
 				if err := p.Info(summary.Summary); err != nil {
@@ -200,7 +240,7 @@ func configDiffCmd(f *cliFlags) *cobra.Command {
 				}
 				return nil
 			}
-			return targetJSONData(f, "DiffResult", summary, operationTargetFromBackend(f, backend), operationTargetRead)
+			return targetJSONData(f, "DiffResult", summary, target, operationTargetRead)
 		},
 	}
 	cmd.Flags().StringVar(&key, "key", "", "Config key: dataId or group/dataId")
@@ -258,37 +298,48 @@ func configPullCmd(f *cliFlags) *cobra.Command {
 		Short: "Pull a remote config into a local file",
 		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			backend, ctxMeta, err := buildBackend(f)
+			readResult, err := runMandatoryBackendRead(
+				f,
+				"config.pull",
+				"config",
+				key,
+				map[string]string{"key": key, "file": file},
+				func(backend cfgov.Backend, _ cfgovctx.Context) (configBlobReadResult, error) {
+					normalizedKey, keyErr := validateConfigKey(backend, key)
+					if keyErr != nil {
+						return configBlobReadResult{}, keyErr
+					}
+					coord := cfgov.Coordinate{Namespace: backend.Describe().Namespace, Key: normalizedKey}
+					blob, getErr := backend.Get(cmd.Context(), coord)
+					return configBlobReadResult{Blob: blob, Coordinate: coord, Key: normalizedKey}, getErr
+				},
+				func(configBlobReadResult) int { return 1 },
+			)
 			if err != nil {
 				return err
 			}
-			key, err = validateConfigKey(backend, key)
-			if err != nil {
-				return err
-			}
-			coord := cfgov.Coordinate{Namespace: backend.Describe().Namespace, Key: key}
-			blob, err := backend.Get(cmd.Context(), coord)
-			appendReadAudit(f, ctxMeta, key, err)
-			if err != nil {
-				return err
-			}
+			ctxMeta := readResult.Context
+			ctxName := readResult.ContextName
+			blob, coord, normalizedKey := readResult.Value.Blob, readResult.Value.Coordinate, readResult.Value.Key
+			target := readResult.operationTarget()
 			if isPlanOnly(f) {
 				markPreview(f)
 				return targetJSONData(f, "ChangePlan", map[string]any{
 					"resourceType": "file",
 					"action":       "config pull",
 					"file":         file,
-					"key":          key,
+					"key":          normalizedKey,
 					"revision":     blob.Revision,
 					"sha256":       sha256Bytes(blob.Content),
 					"bytes":        len(blob.Content),
 					"dryRun":       true,
-				}, operationTargetFromBackend(f, backend), operationTargetRead)
+				}, target, operationTargetRead)
 			}
 			mutation, err := beginMutationAudit(f, mutationAuditSpec{
-				Action:  "config.pull",
-				Context: ctxMeta,
-				Target:  audit.EventTarget{ResourceType: "file", Resource: file},
+				Action:      "config.pull",
+				ContextName: ctxName,
+				Context:     ctxMeta,
+				Target:      audit.EventTarget{ResourceType: "file", Resource: file},
 				Metadata: mutationAuditMetadata{
 					PayloadFingerprint: mutationAuditFingerprint("payload:config.pull", blob.Content),
 					PayloadBytes:       len(blob.Content),
@@ -310,11 +361,11 @@ func configPullCmd(f *cliFlags) *cobra.Command {
 			}
 			return targetJSONData(f, "ConfigItem", map[string]any{
 				"namespace": coord.Namespace,
-				"key":       key,
+				"key":       normalizedKey,
 				"file":      file,
 				"revision":  blob.Revision,
 				"sha256":    sha256Bytes(blob.Content),
-			}, operationTargetFromBackend(f, backend), operationTargetRead)
+			}, target, operationTargetRead)
 		},
 	}
 	cmd.Flags().StringVar(&key, "key", "", "Config key: dataId or group/dataId")
@@ -332,28 +383,32 @@ func configHistoryCmd(f *cliFlags) *cobra.Command {
 		Short: "Show config history",
 		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			backend, ctxMeta, err := buildBackend(f)
+			options := cfgov.HistoryOptions{Page: page, PageSize: pageSize}
+			readResult, err := runMandatoryBackendRead(
+				f,
+				"config.history",
+				"config",
+				key,
+				map[string]any{"key": key, "options": options},
+				func(backend cfgov.Backend, _ cfgovctx.Context) (configHistoryReadResult, error) {
+					normalizedKey, keyErr := validateConfigKey(backend, key)
+					if keyErr != nil {
+						return configHistoryReadResult{}, keyErr
+					}
+					if !backend.Capabilities().SupportsHistory {
+						return configHistoryReadResult{}, apperrors.New(apperrors.CodeNotImplemented, "backend does not support config history", nil)
+					}
+					coord := cfgov.Coordinate{Namespace: backend.Describe().Namespace, Key: normalizedKey}
+					items, total, historyErr := backend.History(cmd.Context(), coord, options)
+					return configHistoryReadResult{Items: items, Total: total}, historyErr
+				},
+				func(result configHistoryReadResult) int { return len(result.Items) },
+			)
 			if err != nil {
 				return err
 			}
-			key, err = validateConfigKey(backend, key)
-			if err != nil {
-				return err
-			}
-			if !backend.Capabilities().SupportsHistory {
-				return apperrors.New(apperrors.CodeNotImplemented, "backend does not support config history", nil)
-			}
-			coord := cfgov.Coordinate{Namespace: backend.Describe().Namespace, Key: key}
-			items, total, err := backend.History(cmd.Context(), coord, cfgov.HistoryOptions{Page: page, PageSize: pageSize})
-			status := audit.StatusSuccess
-			if err != nil {
-				status = audit.StatusFailed
-			}
-			appendAuditWarn(f, audit.EventType("config.history"), ctxMeta, audit.EventTarget{ResourceType: "config", Resource: key}, status, "", err)
-			if err != nil {
-				return err
-			}
-			target := operationTargetFromBackend(f, backend)
+			items, total := readResult.Value.Items, readResult.Value.Total
+			target := readResult.operationTarget()
 			p := newPrinter(f)
 			if f.Output == "json" {
 				return targetJSONList(f, "HistoryList", items, total, normalizedPage(page), normalizedPageSize(pageSize, len(items)), target)
@@ -387,56 +442,84 @@ func configListenCmd(f *cliFlags) *cobra.Command { //nolint:gocyclo // Cobra han
 			if maxEvents <= 0 {
 				return apperrors.New(apperrors.CodeUsageError, "--max-events must be greater than 0", nil)
 			}
-			backend, ctxMeta, err := buildBackend(f)
-			if err != nil {
-				return err
+			if maxEvents > maxConfigListenEvents {
+				return apperrors.New(
+					apperrors.CodeUsageError,
+					fmt.Sprintf("--max-events must not exceed %d", maxConfigListenEvents),
+					nil,
+				)
 			}
-			key, err = validateConfigKey(backend, key)
-			if err != nil {
-				return err
-			}
-			if !backend.Capabilities().SupportsWatch {
-				return apperrors.New(apperrors.CodeNotImplemented, "backend does not support config listen", nil)
-			}
-			coord := cfgov.Coordinate{Namespace: backend.Describe().Namespace, Key: key}
-			revision, err := backend.CurrentRevision(cmd.Context(), coord)
-			appendReadAudit(f, ctxMeta, key, err)
-			if err != nil {
-				return err
-			}
-			events := make([]cfgov.WatchEvent, 0, maxEvents)
-			const (
-				listenBackoffStart = 2 * time.Second
-				listenBackoffMax   = 60 * time.Second
-				listenAbortAfter   = 20
-			)
-			backoff := listenBackoffStart
-			consecutiveErrors := 0
-			for len(events) < maxEvents {
-				pollCtx, cancel := context.WithTimeout(cmd.Context(), longPoll+5*time.Second)
-				event, err := backend.Watch(pollCtx, coord, revision, cfgov.WatchOptions{LongPoll: longPoll})
-				cancel()
-				if err != nil {
-					nextBackoff, nextErrors, err := handleListenPollError(cmd.Context(), err, backoff, consecutiveErrors, listenAbortAfter)
-					backoff, consecutiveErrors = nextBackoff, nextErrors
-					if err != nil {
-						return err
+			readResult, err := runMandatoryBackendRead(
+				f,
+				"config.listen",
+				"config",
+				key,
+				map[string]any{
+					"key":       key,
+					"maxEvents": maxEvents,
+					"longPoll":  longPoll.String(),
+				},
+				func(backend cfgov.Backend, _ cfgovctx.Context) ([]cfgov.WatchEvent, error) {
+					normalizedKey, keyErr := validateConfigKey(backend, key)
+					if keyErr != nil {
+						return nil, keyErr
 					}
-					continue
-				}
-				consecutiveErrors = 0
-				backoff = listenBackoffStart
-				if !event.Changed {
-					break
-				}
-				events = append(events, event)
-				revision = event.Revision
+					if !backend.Capabilities().SupportsWatch {
+						return nil, apperrors.New(apperrors.CodeNotImplemented, "backend does not support config listen", nil)
+					}
+					coord := cfgov.Coordinate{Namespace: backend.Describe().Namespace, Key: normalizedKey}
+					revision, revisionErr := backend.CurrentRevision(cmd.Context(), coord)
+					if revisionErr != nil {
+						return nil, revisionErr
+					}
+					events := make([]cfgov.WatchEvent, 0, maxEvents)
+					const (
+						listenBackoffStart = 2 * time.Second
+						listenAbortAfter   = 20
+					)
+					backoff := listenBackoffStart
+					consecutiveErrors := 0
+					for len(events) < maxEvents {
+						pollCtx, cancel := context.WithTimeout(cmd.Context(), longPoll+5*time.Second)
+						event, watchErr := backend.Watch(pollCtx, coord, revision, cfgov.WatchOptions{LongPoll: longPoll})
+						cancel()
+						if watchErr != nil {
+							nextBackoff, nextErrors, retryErr := handleListenPollError(
+								cmd.Context(),
+								f,
+								watchErr,
+								backoff,
+								consecutiveErrors,
+								listenAbortAfter,
+							)
+							backoff, consecutiveErrors = nextBackoff, nextErrors
+							if retryErr != nil {
+								return nil, retryErr
+							}
+							continue
+						}
+						consecutiveErrors = 0
+						backoff = listenBackoffStart
+						if !event.Changed {
+							break
+						}
+						events = append(events, event)
+						revision = event.Revision
+					}
+					return events, nil
+				},
+				func(events []cfgov.WatchEvent) int { return len(events) },
+			)
+			if err != nil {
+				return err
 			}
+			events := readResult.Value
+			target := readResult.operationTarget()
 			if f.Output == "json" {
-				return targetJSONList(f, "ConfigListenEvent", events, len(events), 1, len(events), operationTargetFromBackend(f, backend))
+				return targetJSONList(f, "ConfigListenEvent", events, len(events), 1, len(events), target)
 			}
 			p := newPrinter(f)
-			if err := printOperationTarget(p, operationTargetFromBackend(f, backend), operationTargetRead); err != nil {
+			if err := printOperationTarget(p, target, operationTargetRead); err != nil {
 				return err
 			}
 			for _, event := range events {
@@ -454,7 +537,7 @@ func configListenCmd(f *cliFlags) *cobra.Command { //nolint:gocyclo // Cobra han
 	return cmd
 }
 
-func handleListenPollError(ctx context.Context, err error, backoff time.Duration, consecutiveErrors, abortAfter int) (time.Duration, int, error) {
+func handleListenPollError(ctx context.Context, f *cliFlags, err error, backoff time.Duration, consecutiveErrors, abortAfter int) (time.Duration, int, error) {
 	const (
 		listenBackoffStart = 2 * time.Second
 		listenBackoffMax   = 60 * time.Second
@@ -469,7 +552,7 @@ func handleListenPollError(ctx context.Context, err error, backoff time.Duration
 		return backoff, consecutiveErrors, err
 	}
 	consecutiveErrors++
-	_, _ = fmt.Fprintf(os.Stderr, "warning: listen poll failed (%d/%d), retrying in %s: %v\n", consecutiveErrors, abortAfter, backoff, err)
+	_, _ = fmt.Fprintf(diagnosticWriter(f), "warning: listen poll failed (%d/%d), retrying in %s: %s\n", consecutiveErrors, abortAfter, backoff, redactedDiagnosticError(err))
 	if consecutiveErrors >= abortAfter {
 		return backoff, consecutiveErrors, apperrors.New(apperrors.CodeNetworkError, fmt.Sprintf("listen aborted after %d consecutive failures", consecutiveErrors), err)
 	}
@@ -500,14 +583,6 @@ func configPushCmd(f *cliFlags) *cobra.Command { //nolint:gocyclo // Cobra handl
 			if createOnly && updateOnly {
 				return apperrors.New(apperrors.CodeUsageError, "--create-only and --update-only are mutually exclusive", nil)
 			}
-			backend, ctxMeta, err := buildBackend(f)
-			if err != nil {
-				return err
-			}
-			key, err = validateConfigKey(backend, key)
-			if err != nil {
-				return err
-			}
 			content, err := readConfigInput(inlineContent, file)
 			if err != nil {
 				return err
@@ -522,27 +597,64 @@ func configPushCmd(f *cliFlags) *cobra.Command { //nolint:gocyclo // Cobra handl
 				}
 			}
 			class := cfgclass.Classify(cfgclass.OperationPush, content, contentType)
-			coord := cfgov.Coordinate{Namespace: backend.Describe().Namespace, Key: key}
-			plan := pushPlan(cmd.Context(), backend, coord, content, class)
-			plan.CreateOnly = createOnly
-			plan.UpdateOnly = updateOnly
-			remote, exists, err := inspectConfigPushTarget(cmd.Context(), backend, coord)
+			backendRead, err := runMandatoryBackendRead(
+				f,
+				"config.push.preflight",
+				"config",
+				key,
+				map[string]any{
+					"key":              key,
+					"contentSha256":    sha256Bytes(content),
+					"contentBytes":     len(content),
+					"contentType":      contentType,
+					"expectedRevision": mutationAuditFingerprint("config.push.expected-revision", []byte(expectedRevision)),
+					"createOnly":       createOnly,
+					"updateOnly":       updateOnly,
+				},
+				func(backend cfgov.Backend, _ cfgovctx.Context) (configPushReadResult, error) {
+					normalizedKey, keyErr := validateConfigKey(backend, key)
+					if keyErr != nil {
+						return configPushReadResult{}, keyErr
+					}
+					coord := cfgov.Coordinate{Namespace: backend.Describe().Namespace, Key: normalizedKey}
+					remote, exists, inspectErr := inspectConfigPushTarget(cmd.Context(), backend, coord)
+					if inspectErr != nil {
+						return configPushReadResult{}, inspectErr
+					}
+					plan := pushPlan(coord, content, class, remote.Revision)
+					plan.CreateOnly = createOnly
+					plan.UpdateOnly = updateOnly
+					plan.TargetExists = &exists
+					return configPushReadResult{
+						Plan:       plan,
+						Remote:     remote,
+						Exists:     exists,
+						Coordinate: coord,
+						Key:        normalizedKey,
+					}, nil
+				},
+				func(configPushReadResult) int { return 1 },
+			)
 			if err != nil {
 				return err
 			}
-			plan.TargetExists = &exists
+			backend, ctxMeta := backendRead.Backend, backendRead.Context
+			ctxName := backendRead.ContextName
+			plan, remote, exists := backendRead.Value.Plan, backendRead.Value.Remote, backendRead.Value.Exists
+			coord, key := backendRead.Value.Coordinate, backendRead.Value.Key
+			target := backendRead.operationTarget()
 			if isPlanOnly(f) {
 				markPreview(f)
 				if err := validateConfigPushMode(createOnly, updateOnly, exists); err != nil {
 					return err
 				}
 				appendAuditWarn(f, audit.EventType("config.write"), ctxMeta, audit.EventTarget{ResourceType: "config", Resource: key}, audit.StatusSuccess, plan.Impact, nil)
-				return targetJSONData(f, "ChangePlan", plan, operationTargetFromBackend(f, backend), operationTargetWrite)
+				return targetJSONData(f, "ChangePlan", plan, target, operationTargetWrite)
 			}
 			if err := validateBackupPolicy(f, ctxMeta); err != nil {
 				return err
 			}
-			if err := authorize(f, class.Risk, ctxMeta, ""); err != nil {
+			if err := authorizeForContext(f, class.Risk, ctxMeta, "", ctxName); err != nil {
 				return err
 			}
 			if err := validateConfigPushMode(createOnly, updateOnly, exists); err != nil {
@@ -560,10 +672,11 @@ func configPushCmd(f *cliFlags) *cobra.Command { //nolint:gocyclo // Cobra handl
 				metadata.Creates = 1
 			}
 			mutation, err := beginMutationAudit(f, mutationAuditSpec{
-				Action:   "config.write",
-				Context:  ctxMeta,
-				Target:   audit.EventTarget{ResourceType: "config", Resource: key},
-				Metadata: metadata,
+				Action:      "config.write",
+				ContextName: ctxName,
+				Context:     ctxMeta,
+				Target:      audit.EventTarget{ResourceType: "config", Resource: key},
+				Metadata:    metadata,
 			})
 			if err != nil {
 				return err
@@ -593,7 +706,7 @@ func configPushCmd(f *cliFlags) *cobra.Command { //nolint:gocyclo // Cobra handl
 				"revision":     blob.Revision,
 				"risk":         class.Risk,
 				"backup":       backupResult,
-			}, operationTargetFromBackend(f, backend), operationTargetWrite)
+			}, target, operationTargetWrite)
 		},
 	}
 	cmd.Flags().StringVar(&key, "key", "", "Config key: dataId or group/dataId")
@@ -616,31 +729,51 @@ func configDeleteCmd(f *cliFlags) *cobra.Command {
 		Short:   "Delete a config blob",
 		Args:    cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			backend, ctxMeta, err := buildBackend(f)
+			backendRead, err := runMandatoryBackendRead(
+				f,
+				"config.delete.preflight",
+				"config",
+				key,
+				map[string]any{
+					"key":              key,
+					"expectedRevision": mutationAuditFingerprint("config.delete.expected-revision", []byte(expectedRevision)),
+				},
+				func(backend cfgov.Backend, _ cfgovctx.Context) (configDeleteReadResult, error) {
+					normalizedKey, keyErr := validateConfigKey(backend, key)
+					if keyErr != nil {
+						return configDeleteReadResult{}, keyErr
+					}
+					return configDeleteReadResult{
+						Coordinate: cfgov.Coordinate{Namespace: backend.Describe().Namespace, Key: normalizedKey},
+						Key:        normalizedKey,
+					}, nil
+				},
+				func(configDeleteReadResult) int { return 0 },
+			)
 			if err != nil {
 				return err
 			}
-			key, err = validateConfigKey(backend, key)
-			if err != nil {
-				return err
-			}
+			backend, ctxMeta := backendRead.Backend, backendRead.Context
+			ctxName := backendRead.ContextName
+			coord, key := backendRead.Value.Coordinate, backendRead.Value.Key
+			target := backendRead.operationTarget()
 			class := cfgclass.Classify(cfgclass.OperationDelete, nil, "")
 			if isPlanOnly(f) {
 				markPreview(f)
 				plan := map[string]any{"resourceType": "config", "key": key, "baseRisk": class.Risk, "impact": "delete one config blob"}
-				return targetJSONData(f, "ChangePlan", plan, operationTargetFromBackend(f, backend), operationTargetWrite)
+				return targetJSONData(f, "ChangePlan", plan, target, operationTargetWrite)
 			}
 			if err := validateBackupPolicy(f, ctxMeta); err != nil {
 				return err
 			}
-			if err := authorize(f, safety.R2, ctxMeta, allowProductionConfigDelete); err != nil {
+			if err := authorizeForContext(f, safety.R2, ctxMeta, allowProductionConfigDelete, ctxName); err != nil {
 				return err
 			}
-			coord := cfgov.Coordinate{Namespace: backend.Describe().Namespace, Key: key}
 			mutation, err := beginMutationAudit(f, mutationAuditSpec{
-				Action:  "config.delete",
-				Context: ctxMeta,
-				Target:  audit.EventTarget{ResourceType: "config", Resource: key},
+				Action:      "config.delete",
+				ContextName: ctxName,
+				Context:     ctxMeta,
+				Target:      audit.EventTarget{ResourceType: "config", Resource: key},
 				Metadata: mutationAuditMetadata{
 					Revision: expectedRevision,
 					Items:    1,
@@ -663,7 +796,7 @@ func configDeleteCmd(f *cliFlags) *cobra.Command {
 			if auditErr := finishMutationAudit(mutation, mutationAuditOutcome{}, err); auditErr != nil {
 				return auditErr
 			}
-			return targetJSONData(f, "ChangeResult", map[string]any{"resourceType": "config", "namespace": coord.Namespace, "key": key, "deleted": true, "backup": backupResult}, operationTargetFromBackend(f, backend), operationTargetWrite)
+			return targetJSONData(f, "ChangeResult", map[string]any{"resourceType": "config", "namespace": coord.Namespace, "key": key, "deleted": true, "backup": backupResult}, target, operationTargetWrite)
 		},
 	}
 	cmd.Flags().StringVar(&key, "key", "", "Config key: dataId or group/dataId")
@@ -683,6 +816,19 @@ type changePlan struct {
 	CreateOnly   bool             `json:"createOnly,omitempty"`
 	UpdateOnly   bool             `json:"updateOnly,omitempty"`
 	TargetExists *bool            `json:"targetExists,omitempty"`
+}
+
+type configPushReadResult struct {
+	Plan       changePlan
+	Remote     cfgov.Blob
+	Exists     bool
+	Coordinate cfgov.Coordinate
+	Key        string
+}
+
+type configDeleteReadResult struct {
+	Coordinate cfgov.Coordinate
+	Key        string
 }
 
 type diffResult struct {
@@ -708,8 +854,7 @@ type diffTarget struct {
 	Bytes     int    `json:"bytes"`
 }
 
-func pushPlan(ctx context.Context, backend cfgov.Backend, coord cfgov.Coordinate, content []byte, class cfgclass.Result) changePlan {
-	before, _ := backend.CurrentRevision(ctx, coord)
+func pushPlan(coord cfgov.Coordinate, content []byte, class cfgclass.Result, before string) changePlan {
 	hash := sha256Bytes(content)
 	impact := fmt.Sprintf("write one config blob; bytes=%d; currentRevision=%s; targetSha256=%s", len(content), before, hash)
 	if before == md5Like(content) {
@@ -783,14 +928,6 @@ func finishIdempotentConfigPush(f *cliFlags, meta cfgovctx.Context, coord cfgov.
 	}, operationTargetFromContext(f, meta), operationTargetWrite)
 }
 
-func appendReadAudit(f *cliFlags, ctxMeta cfgovctx.Context, key string, err error) {
-	status := audit.StatusSuccess
-	if err != nil {
-		status = audit.StatusFailed
-	}
-	appendAuditWarn(f, audit.EventType("config.read"), ctxMeta, audit.EventTarget{ResourceType: "config", Resource: key}, status, "", err)
-}
-
 func validateBackupPolicy(f *cliFlags, meta cfgovctx.Context) error {
 	if f.Backup && f.NoBackup {
 		return apperrors.New(apperrors.CodeUsageError, "--backup and --no-backup are mutually exclusive", nil)
@@ -860,54 +997,19 @@ func validateContent(content []byte, contentType string) error {
 	case "properties":
 		return validateProperties(content)
 	case "json":
-		var v any
-		if err := json.Unmarshal(content, &v); err != nil {
+		if err := cfgclass.ValidateStructured(content, "json"); err != nil {
 			return apperrors.New(apperrors.CodeValidationFailed, "invalid json config", err)
 		}
 	case "yaml":
-		var v any
-		if err := yaml.Unmarshal(content, &v); err != nil {
+		if err := cfgclass.ValidateStructured(content, "yaml"); err != nil {
 			return apperrors.New(apperrors.CodeValidationFailed, "invalid yaml config", err)
 		}
 	case "xml":
-		if err := validateXML(content); err != nil {
-			return err
+		if err := cfgclass.ValidateStructured(content, "xml"); err != nil {
+			return apperrors.New(apperrors.CodeValidationFailed, "invalid xml config", err)
 		}
 	default:
 		return apperrors.New(apperrors.CodeValidationFailed, "unsupported config type", nil)
-	}
-	return nil
-}
-
-func validateXML(content []byte) error {
-	decoder := xml.NewDecoder(bytes.NewReader(content))
-	seenRoot := false
-	depth := 0
-	for {
-		tok, err := decoder.Token()
-		if err != nil {
-			if errors.Is(err, io.EOF) {
-				break
-			}
-			return apperrors.New(apperrors.CodeValidationFailed, "invalid xml config", err)
-		}
-		switch tok.(type) {
-		case xml.StartElement:
-			if depth == 0 {
-				if seenRoot {
-					return apperrors.New(apperrors.CodeValidationFailed, "invalid xml config", nil)
-				}
-				seenRoot = true
-			}
-			depth++
-		case xml.EndElement:
-			if depth > 0 {
-				depth--
-			}
-		}
-	}
-	if !seenRoot {
-		return apperrors.New(apperrors.CodeValidationFailed, "invalid xml config", nil)
 	}
 	return nil
 }
@@ -1037,52 +1139,78 @@ func configContextDiff(ctx context.Context, f *cliFlags, key, sourceContext, tar
 	if key == "" {
 		return apperrors.New(apperrors.CodeUsageError, "--key is required", nil)
 	}
-	source, err := buildBackendFromNamedContext(ctx, f, sourceContext)
+	sourceMeta, err := loadNamedContext(sourceContext)
 	if err != nil {
 		return err
 	}
-	target, err := buildBackendFromNamedContext(ctx, f, targetContext)
+	targetMeta, err := loadNamedContext(targetContext)
 	if err != nil {
 		return err
 	}
-	sourceKey, err := validateConfigKey(source, key)
-	if err != nil {
-		return err
-	}
-	targetKey, err := validateConfigKey(target, key)
-	if err != nil {
-		return err
-	}
-	sourceCoord := cfgov.Coordinate{Namespace: source.Describe().Namespace, Key: sourceKey}
-	targetCoord := cfgov.Coordinate{Namespace: target.Describe().Namespace, Key: targetKey}
-	sourceBlob, err := source.Get(ctx, sourceCoord)
-	if err != nil {
-		appendAuditWarn(f, audit.EventType("config.diff"), cfgovctx.Context{}, audit.EventTarget{ResourceType: "config", Resource: key}, audit.StatusFailed, "", err)
-		return err
-	}
-	targetBlob, err := target.Get(ctx, targetCoord)
-	if err != nil {
-		appendAuditWarn(f, audit.EventType("config.diff"), cfgovctx.Context{}, audit.EventTarget{ResourceType: "config", Resource: key}, audit.StatusFailed, "", err)
-		return err
-	}
-	result := diffSummary(targetBlob.Content, sourceBlob.Content)
-	if result.Same && isStrictNoChange(f) {
-		return apperrors.New(apperrors.CodeNoChangeRequired, "no changes detected", nil)
-	}
-	result.Source = diffTargetFor(sourceContext, source.Describe(), sourceKey, sourceBlob.Content)
-	result.Target = diffTargetFor(targetContext, target.Describe(), targetKey, targetBlob.Content)
-	appendAuditWarn(
-		f,
-		audit.EventType("config.diff"),
-		cfgovctx.Context{},
-		audit.EventTarget{ResourceType: "config", Resource: key},
-		audit.StatusSuccess,
-		fmt.Sprintf("sourceSha256=%s targetSha256=%s addedLines=%d removedLines=%d", result.LocalSHA256, result.RemoteSHA256, result.AddedLines, result.RemovedLines),
-		nil,
+	spec := newReadAuditSpec(
+		"config.diff",
+		targetMeta,
+		"config",
+		sourceContext+"\x00"+targetContext+"\x00"+key,
+		map[string]any{
+			"sourceContext": sourceContext,
+			"targetContext": targetContext,
+			"key":           key,
+		},
 	)
+	spec.ContextName = targetContext
+	spec.Authorize = []readAuditAuthorization{
+		{ContextName: sourceContext, Context: sourceMeta},
+		{ContextName: targetContext, Context: targetMeta},
+	}
+	readResult, err := runMandatoryRead(
+		f,
+		spec,
+		func() (configContextDiffReadResult, error) {
+			source, sourceBuildErr := buildBackendFromNamedContext(ctx, f, sourceContext, sourceMeta)
+			if sourceBuildErr != nil {
+				return configContextDiffReadResult{}, sourceBuildErr
+			}
+			target, targetBuildErr := buildBackendFromNamedContext(ctx, f, targetContext, targetMeta)
+			if targetBuildErr != nil {
+				return configContextDiffReadResult{}, targetBuildErr
+			}
+			sourceKey, sourceKeyErr := validateConfigKey(source, key)
+			if sourceKeyErr != nil {
+				return configContextDiffReadResult{}, sourceKeyErr
+			}
+			targetKey, targetKeyErr := validateConfigKey(target, key)
+			if targetKeyErr != nil {
+				return configContextDiffReadResult{}, targetKeyErr
+			}
+			sourceCoord := cfgov.Coordinate{Namespace: source.Describe().Namespace, Key: sourceKey}
+			targetCoord := cfgov.Coordinate{Namespace: target.Describe().Namespace, Key: targetKey}
+			sourceBlob, sourceErr := source.Get(ctx, sourceCoord)
+			if sourceErr != nil {
+				return configContextDiffReadResult{}, sourceErr
+			}
+			targetBlob, targetErr := target.Get(ctx, targetCoord)
+			if targetErr != nil {
+				return configContextDiffReadResult{}, targetErr
+			}
+			result := diffSummary(targetBlob.Content, sourceBlob.Content)
+			if result.Same && isStrictNoChange(f) {
+				return configContextDiffReadResult{}, apperrors.New(apperrors.CodeNoChangeRequired, "no changes detected", nil)
+			}
+			result.Source = diffTargetFor(sourceContext, source.Describe(), sourceKey, sourceBlob.Content)
+			result.Target = diffTargetFor(targetContext, target.Describe(), targetKey, targetBlob.Content)
+			return configContextDiffReadResult{Diff: result, TargetDescription: target.Describe()}, nil
+		},
+		func(configContextDiffReadResult) int { return 2 },
+	)
+	if err != nil {
+		return err
+	}
+	result := readResult.Diff
+	operationTarget := operationTargetFromDescription(targetContext, readResult.TargetDescription)
 	if f.Output == "plain" {
 		p := newPrinter(f)
-		if err := printOperationTarget(p, operationTargetFromDescription(targetContext, target.Describe()), operationTargetRead); err != nil {
+		if err := printOperationTarget(p, operationTarget, operationTargetRead); err != nil {
 			return err
 		}
 		if err := p.Info(result.Summary); err != nil {
@@ -1095,7 +1223,7 @@ func configContextDiff(ctx context.Context, f *cliFlags, key, sourceContext, tar
 		}
 		return nil
 	}
-	return targetJSONData(f, "DiffResult", result, operationTargetFromDescription(targetContext, target.Describe()), operationTargetRead)
+	return targetJSONData(f, "DiffResult", result, operationTarget, operationTargetRead)
 }
 
 func diffTargetFor(contextName string, desc cfgov.Description, key string, content []byte) *diffTarget {
